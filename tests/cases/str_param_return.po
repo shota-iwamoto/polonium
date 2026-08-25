@@ -1,0 +1,7 @@
+# OUTPUT: [Polonium]
+def wrap(s: str) -> str:
+    return "[" + s + "]"
+
+def main() -> int:
+    print(wrap("Polonium"))
+    return 0

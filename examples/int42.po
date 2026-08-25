@@ -1,0 +1,5 @@
+# 最小のプログラム：整数を 1 つ書く
+#
+#   ../build/poloniumc int42.po -o int42 && ./int42; echo $?
+#   → 42
+42

@@ -1,0 +1,5 @@
+# OUTPUT: hello, Polonium
+def main() -> int:
+    name: str = "Polonium"
+    print("hello, " + name)
+    return 0

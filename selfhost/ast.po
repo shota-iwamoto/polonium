@@ -1,0 +1,586 @@
+# ast.po — 抽象構文木（第17章）
+#
+# ★ src/ast.h / src/ast.c の移植です。**機械的に移しています。**
+#   種別の値と順序は C 版に揃えます（C 版を見ながら 1 つずつ確認するため）。
+#
+# 方針は C 版と同じ「全部入り構造体」（docs/design/architecture.md 3.2）。
+# ⚠️ 子ノードはほぼ全部 `Node | None` になります。C 版で NULL だったものを
+#    Polonium で表す唯一の方法だからです（第15章）。
+import strings
+import token
+
+# ── 型の種類（C 版 TypeKind と同じ順序・同じ値）──
+TY_INT: int = 0
+TY_BOOL: int = 1
+TY_NONE: int = 2
+TY_STR: int = 3
+TY_LIST: int = 4
+TY_CLASS: int = 5
+TY_OPT: int = 6      # T | None（第15章）
+TY_NULL: int = 7     # None リテラルの型（変数の型にはならない）
+
+
+class Type:
+    kind: int
+    elem: Type | None     # list[T] の要素型 / T | None の中身
+    name: str             # クラス名（エラーメッセージ用）
+    cls: Class | None     # 定義への参照。★ 型の同一性はこれで判定する
+    opt: Type | None      # この型の「T | None」版（1 個だけ作る）
+
+    def init(self, kind: int) -> None:
+        self.kind = kind
+        self.name = ""
+
+
+class Field:
+    name: str
+    type: Type | None
+    index: int    # 構造体の何番目か（getelementptr に渡す）
+    offset: int   # 先頭から何バイト目か（説明とデバッグ用）
+    tok: token.Token | None
+    next: Field | None
+
+    def init(self, name: str, tok: token.Token | None) -> None:
+        self.name = name
+        self.tok = tok
+        self.index = 0
+        self.offset = 0
+
+
+class Class:
+    name: str
+    ir_name: str          # IR 上の修飾名（"lexer.Token"）
+    tok: token.Token | None
+    fields: Field | None  # 宣言順
+    nfields: int
+    size: int
+    align: int
+    type: Type | None
+    node: Node | None           # ND_CLASS（メソッドをたどるため）
+    has_init: bool
+    owner_name: str   # 定義されているモジュール名（第13章）
+    next: Class | None
+
+    def init(self, name: str, tok: token.Token | None) -> None:
+        self.name = name
+        self.tok = tok
+        self.ir_name = ""
+        self.owner_name = ""
+        self.nfields = 0
+        self.size = 0
+        self.align = 0
+        self.has_init = False
+
+
+# ── プリミティブ型のシングルトン ────────────────────────────
+#
+# ⚠️ Polonium のグローバル変数の初期化式はコンパイル時定数だけなので、
+#   C 版のように起動時の関数（types_init）で作ることができません。
+#   代わりに「1 個だけ作って持ち回る」入れ物を用意します。
+class Prims:
+    int_: Type | None
+    bool_: Type | None
+    none_: Type | None
+    str_: Type | None
+    null_: Type | None
+
+    def init(self) -> None:
+        self.int_ = Type(TY_INT)
+        self.bool_ = Type(TY_BOOL)
+        self.none_ = Type(TY_NONE)
+        self.str_ = Type(TY_STR)
+        self.null_ = Type(TY_NULL)
+
+
+def type_list(elem: Type | None) -> Type:
+    t: Type = Type(TY_LIST)
+    t.elem = elem
+    return t
+
+def type_class(name: str, c: Class | None) -> Type:
+    t: Type = Type(TY_CLASS)
+    t.name = name
+    t.cls = c
+    return t
+
+# nullable にできる型か（参照型だけ）
+def type_can_be_opt(t: Type) -> bool:
+    return t.kind == TY_STR or t.kind == TY_LIST or t.kind == TY_CLASS
+
+def type_opt(elem: Type) -> Type:
+    if elem.kind == TY_OPT:
+        return elem
+    cached: Type | None = elem.opt
+    if cached is not None:
+        return cached
+    t: Type = Type(TY_OPT)
+    t.elem = elem
+    elem.opt = t
+    return t
+
+def elem_of(t: Type) -> Type:
+    e: Type | None = t.elem
+    if e is None:
+        panic("types: 要素型がありません")
+        return t
+    else:
+        return e
+
+# 2 つの型が同じか（C 版 type_equal）
+#
+# ★ クラスの == は参照（アドレス）の比較です（第12章）。C 版の
+#   `if (a == b) return true;`（ポインタ比較）がそのまま書けます。
+def type_equal(a: Type, b: Type) -> bool:
+    if a == b:
+        return True
+    if a.kind != b.kind:
+        return False
+    if a.kind == TY_LIST:
+        return type_equal(elem_of(a), elem_of(b))
+    if a.kind == TY_CLASS:
+        return same_class(a, b)
+    if a.kind == TY_OPT:
+        return type_equal(elem_of(a), elem_of(b))
+    return True
+
+# ★ クラスは「同じ定義か」で比べる（名前の一致ではない）
+def same_class(a: Type, b: Type) -> bool:
+    ca: Class | None = a.cls
+    cb: Class | None = b.cls
+    # ⚠️ 'or' では絞り込みが効かないので、ガード節を 2 本に分けます（15.5 節）
+    if ca is None:
+        return False
+    if cb is None:
+        return False
+    return ca == cb
+
+# 代入互換性（C 版 type_assignable）
+def type_assignable(from_: Type, to: Type) -> bool:
+    if type_equal(from_, to):
+        return True
+    if to.kind != TY_OPT:
+        return False
+    if from_.kind == TY_NULL:
+        return True
+    return type_assignable(from_, elem_of(to))
+
+def type_name(t: Type) -> str:
+    if t.kind == TY_INT:
+        return "int"
+    if t.kind == TY_BOOL:
+        return "bool"
+    if t.kind == TY_NONE:
+        return "None"
+    if t.kind == TY_STR:
+        return "str"
+    if t.kind == TY_LIST:
+        return "list[" + type_name(elem_of(t)) + "]"
+    if t.kind == TY_CLASS:
+        return t.name
+    if t.kind == TY_OPT:
+        return type_name(elem_of(t)) + " | None"
+    if t.kind == TY_NULL:
+        return "None"
+    panic("types.type_name: unknown kind")
+    return ""
+
+def type_size(t: Type) -> int:
+    if t.kind == TY_BOOL:
+        return 1
+    return 8
+
+def type_align(t: Type) -> int:
+    return type_size(t)
+
+def type_name_list() -> str:
+    return "int, bool, str, None, list[T], T | None"
+
+
+# ── ノードの種類（C 版 NodeKind と同じ順序・同じ値）──
+ND_INT: int = 0
+ND_BOOL: int = 1
+ND_STR: int = 2
+ND_BINOP: int = 3
+ND_LOGICAL: int = 4
+ND_UNARY: int = 5
+ND_VAR: int = 6
+ND_VARDECL: int = 7
+ND_ASSIGN: int = 8
+ND_BLOCK: int = 9
+ND_IF: int = 10
+ND_WHILE: int = 11
+ND_BREAK: int = 12
+ND_CONTINUE: int = 13
+ND_PASS: int = 14
+ND_PRINT: int = 15
+ND_FUNC: int = 16
+ND_PARAM: int = 17
+ND_CALL: int = 18
+ND_RETURN: int = 19
+ND_TYPEREF: int = 20
+ND_LIST: int = 21
+ND_INDEX: int = 22
+ND_METHOD: int = 23
+ND_CLASS: int = 24
+ND_FIELDDECL: int = 25
+ND_FIELD: int = 26
+ND_IMPORT: int = 27
+ND_NONE: int = 28
+
+# ── 演算子の種類（C 版 OpKind と同じ順序・同じ値）──
+OP_ADD: int = 0
+OP_SUB: int = 1
+OP_MUL: int = 2
+OP_TRUEDIV: int = 3
+OP_FLOORDIV: int = 4
+OP_MOD: int = 5
+OP_BITAND: int = 6
+OP_BITOR: int = 7
+OP_BITXOR: int = 8
+OP_SHL: int = 9
+OP_SHR: int = 10
+OP_POW: int = 11
+OP_EQ: int = 12
+OP_NE: int = 13
+OP_LT: int = 14
+OP_LE: int = 15
+OP_GT: int = 16
+OP_GE: int = 17
+OP_AND: int = 18
+OP_OR: int = 19
+OP_IS: int = 20
+OP_ISNOT: int = 21
+OP_NEG: int = 22
+OP_POS: int = 23
+OP_BITNOT: int = 24
+OP_NOT: int = 25
+
+# 比較演算子か（C 版 is_compare。★ OP_EQ 〜 OP_GE が連続していることに依存）
+def is_compare(op: int) -> bool:
+    return op >= OP_EQ and op <= OP_GE
+
+# 演算子の記号（エラーメッセージと --dump-ast 用）
+def op_symbol(op: int) -> str:
+    if op == OP_ADD:
+        return "+"
+    if op == OP_SUB:
+        return "-"
+    if op == OP_MUL:
+        return "*"
+    if op == OP_TRUEDIV:
+        return "/"
+    if op == OP_FLOORDIV:
+        return "//"
+    if op == OP_MOD:
+        return "%"
+    if op == OP_BITAND:
+        return "&"
+    if op == OP_BITOR:
+        return "|"
+    if op == OP_BITXOR:
+        return "^"
+    if op == OP_SHL:
+        return "<<"
+    if op == OP_SHR:
+        return ">>"
+    if op == OP_POW:
+        return "**"
+    if op == OP_EQ:
+        return "=="
+    if op == OP_NE:
+        return "!="
+    if op == OP_LT:
+        return "<"
+    if op == OP_LE:
+        return "<="
+    if op == OP_GT:
+        return ">"
+    if op == OP_GE:
+        return ">="
+    if op == OP_AND:
+        return "and"
+    if op == OP_OR:
+        return "or"
+    if op == OP_IS:
+        return "is"
+    if op == OP_ISNOT:
+        return "is not"
+    if op == OP_NEG:
+        return "-"
+    if op == OP_POS:
+        return "+"
+    if op == OP_BITNOT:
+        return "~"
+    if op == OP_NOT:
+        return "not"
+    panic("ast.op_symbol: unknown op")
+    return ""
+
+
+# ── ノード ──────────────────────────────────────────────────
+#
+# ★ C 版と同じ「全部入り」方式。使わないフィールドは None のままです。
+class Node:
+    kind: int
+
+    # このノードの代表トークン（位置情報。全ノードが必ず持つ）
+    tok: token.Token | None
+
+    # ── 値 ──
+    ival: int    # ND_INT / ND_BOOL
+    sval: str    # ND_STR（エスケープ解決済み）
+    slen: int    # ND_STR のバイト長
+    op: int      # ND_BINOP / ND_LOGICAL / ND_UNARY
+    name: str    # 変数名・関数名・クラス名・モジュール名
+
+    # 型注釈が T | None か（ND_TYPEREF。第15章）
+    nullable: bool
+
+    # 型注釈のモジュール修飾（ND_TYPEREF。第13章）
+    mod_name: str
+
+    # ★ この式の型。意味解析パス（sema.po）が埋めます。
+    #   構文解析の直後は必ず None です。
+    type: Type | None
+
+    # LLVM 上の名前（sema が割り当てる。第7章〜）
+    ir_name: str
+
+    # 参照先が別のモジュールにあるか（第13章）
+    is_extern: bool
+    is_global: bool
+
+    # sema が解決した記録（第9・12章）
+    #
+    # ★ C 版は Builtin 表へのポインタを持ちますが、Polonium 版は
+    #   「呼ぶランタイム関数の名前」を持ちます（codegen が使うのはそれだけ）。
+    builtin: str
+    cls: Class | None
+    field: Field | None
+
+    # ── 子ノード ──
+    lhs: Node | None
+    rhs: Node | None
+    body: Node | None       # ND_BLOCK の中身 / ND_IF の then / ND_CLASS のメンバ
+    els: Node | None        # ND_IF の else
+    incr: Node | None       # ND_WHILE の増分（for の脱糖。第11章）
+    params: Node | None     # ND_FUNC の仮引数
+    args: Node | None       # ND_CALL / ND_METHOD の実引数
+    type_ref: Node | None   # 型注釈の木
+
+    # 兄弟（文のリスト・引数リストは next で繋ぐ）
+    next: Node | None
+
+    def init(self, kind: int, tok: token.Token | None) -> None:
+        self.kind = kind
+        self.tok = tok
+        self.ival = 0
+        self.sval = ""
+        self.slen = 0
+        self.op = 0
+        self.name = ""
+        self.nullable = False
+        self.mod_name = ""
+        self.ir_name = ""
+        self.builtin = ""
+        self.is_extern = False
+        self.is_global = False
+
+
+# ── コンストラクタ（C 版の new_*_node と同じ形）──────────────
+
+def new_node(kind: int, tok: token.Token | None) -> Node:
+    return Node(kind, tok)
+
+def new_int_node(tok: token.Token | None, value: int) -> Node:
+    n: Node = Node(ND_INT, tok)
+    n.ival = value
+    return n
+
+def new_bool_node(tok: token.Token | None, value: bool) -> Node:
+    n: Node = Node(ND_BOOL, tok)
+    if value:
+        n.ival = 1
+    return n
+
+def new_str_node(tok: token.Token | None, bytes_: str, slen: int) -> Node:
+    n: Node = Node(ND_STR, tok)
+    n.sval = bytes_
+    n.slen = slen
+    return n
+
+def new_binop_node(tok: token.Token | None, op: int, lhs: Node, rhs: Node) -> Node:
+    n: Node = Node(ND_BINOP, tok)
+    n.op = op
+    n.lhs = lhs
+    n.rhs = rhs
+    return n
+
+def new_logical_node(tok: token.Token | None, op: int, lhs: Node, rhs: Node) -> Node:
+    n: Node = Node(ND_LOGICAL, tok)
+    n.op = op
+    n.lhs = lhs
+    n.rhs = rhs
+    return n
+
+def new_unary_node(tok: token.Token | None, op: int, operand: Node) -> Node:
+    n: Node = Node(ND_UNARY, tok)
+    n.op = op
+    n.lhs = operand
+    return n
+
+def new_var_node(tok: token.Token | None, name: str) -> Node:
+    n: Node = Node(ND_VAR, tok)
+    n.name = name
+    return n
+
+
+# ── S 式ダンプ（C 版 dump_ast と同じ出力）────────────────────
+#
+# ★ 木を歩く関数は最初から `Node | None` を受け取る形にします。
+#   そうすれば呼び出し側で絞り込む必要がなく、C 版と同じ書き方になります
+#   （ch17 17.3 節）。
+
+def indent_of(depth: int) -> str:
+    return strings.repeat("  ", depth)
+
+def dump(n: Node | None, depth: int) -> None:
+    pad: str = indent_of(depth)
+
+    if n is None:
+        print(pad + "(nil)")
+        return
+
+    # ★ ここから下では n は Node（絞り込み済み）
+
+    if n.kind == ND_INT:
+        print(pad + "(int " + str(n.ival) + ")")
+    elif n.kind == ND_BOOL:
+        if n.ival != 0:
+            print(pad + "(bool True)")
+        else:
+            print(pad + "(bool False)")
+    elif n.kind == ND_STR:
+        print(pad + "(str " + str(n.slen) + " bytes)")
+    elif n.kind == ND_LOGICAL:
+        print(pad + "(logical " + op_symbol(n.op))
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_BINOP:
+        print(pad + "(binop " + op_symbol(n.op))
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_UNARY:
+        print(pad + "(unary " + op_symbol(n.op))
+        dump(n.lhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_NONE:
+        print(pad + "(none)")
+    elif n.kind == ND_VAR:
+        print(pad + "(var " + n.name + ")")
+    elif n.kind == ND_TYPEREF:
+        if n.lhs is None:
+            print(pad + "(type " + n.name + ")")
+        else:
+            print(pad + "(type " + n.name)
+            dump(n.lhs, depth + 1)
+            print(pad + ")")
+    elif n.kind == ND_LIST:
+        print(pad + "(list")
+        dump_siblings(n.body, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_INDEX:
+        print(pad + "(index")
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_METHOD:
+        print(pad + "(method " + n.name)
+        dump(n.lhs, depth + 1)
+        dump_siblings(n.args, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_FIELD:
+        print(pad + "(field " + n.name)
+        dump(n.lhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_CLASS:
+        print(pad + "(class " + n.name)
+        dump_siblings(n.body, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_FIELDDECL:
+        print(pad + "(fielddecl " + n.name)
+        dump(n.type_ref, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_VARDECL:
+        print(pad + "(vardecl " + n.name)
+        dump(n.type_ref, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_ASSIGN:
+        print(pad + "(assign")
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_IF:
+        print(pad + "(if")
+        dump(n.lhs, depth + 1)
+        dump(n.body, depth + 1)
+        if n.els is not None:
+            dump(n.els, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_WHILE:
+        print(pad + "(while")
+        dump(n.lhs, depth + 1)
+        dump(n.body, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_BREAK:
+        print(pad + "(break)")
+    elif n.kind == ND_CONTINUE:
+        print(pad + "(continue)")
+    elif n.kind == ND_PASS:
+        print(pad + "(pass)")
+    elif n.kind == ND_PRINT:
+        print(pad + "(print")
+        dump(n.lhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_FUNC:
+        print(pad + "(func " + n.name)
+        dump(n.type_ref, depth + 1)
+        dump_siblings(n.params, depth + 1)
+        dump(n.body, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_PARAM:
+        print(pad + "(param " + n.name)
+        dump(n.type_ref, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_CALL:
+        print(pad + "(call " + n.name)
+        dump_siblings(n.args, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_RETURN:
+        if n.lhs is None:
+            print(pad + "(return)")
+        else:
+            print(pad + "(return")
+            dump(n.lhs, depth + 1)
+            print(pad + ")")
+    elif n.kind == ND_IMPORT:
+        print(pad + "(import " + n.name + ")")
+    elif n.kind == ND_BLOCK:
+        print(pad + "(block")
+        dump_siblings(n.body, depth + 1)
+        print(pad + ")")
+    else:
+        panic("ast.dump: unknown node kind")
+
+# 兄弟をたどって全部出す（C 版の for (x = ...; x; x = x->next) と同じ）
+def dump_siblings(first: Node | None, depth: int) -> None:
+    cur: Node | None = first
+    while cur is not None:
+        dump(cur, depth)
+        cur = cur.next     # ★ 代入で絞り込みが解除される（第15章 15.5 節）
+
+def dump_ast(root: Node | None) -> None:
+    dump(root, 0)

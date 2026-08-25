@@ -1,0 +1,25 @@
+# langinfo.po — 言語の「名前」と「拡張子」の唯一の定義場所（Polonium 版）
+#
+# ★ C 版の src/langinfo.h と対になります。言語名が変わったら、
+#   このファイルと src/langinfo.h と Makefile の LANG_* だけを直せば済みます。
+#   詳しくは docs/design/naming.md を参照。
+#
+# ⚠️ Polonium にはプリプロセッサが無いので、マクロではなく関数で持ちます。
+#   （グローバル定数はモジュールをまたいで読めないため）
+
+NAME: str = "Polonium"      # 人が読む言語名
+EXT: str = ".po"            # ソースファイルの拡張子（ドット込み）
+CC: str = "poloniumc"       # コンパイラのコマンド名
+
+def name() -> str:
+    return NAME
+
+def ext() -> str:
+    return EXT
+
+# 拡張子の長さ（"." を含む）
+def ext_len() -> int:
+    return len(EXT)
+
+def cc() -> str:
+    return CC
