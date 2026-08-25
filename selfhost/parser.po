@@ -866,8 +866,18 @@ class Parser:
             n.tok = bar
         return n
 
-    # param ::= IDENT ":" type（メソッドの第 1 引数 self だけ型注釈なし）
+    # param ::= IDENT ":" [ "own" | "mut" ] type
+    #          | [ "mut" ] "self"
+    #
+    # ★ 第21章：受け取り方（own / mut）を読む。**意味づけはまだしない。**
+    #   own / mut は「型の前」に置く（言語仕様 v2 §11）。self だけ型注釈が
+    #   無いので `mut self` と書く。
     def param(self, allow_self: bool) -> ast.Node:
+        # 名前の前に書けるのは 'mut self' の mut だけ
+        lead: token.Token | None = None
+        if self.peek().is_kw("mut") or self.peek().is_kw("own"):
+            lead = self.advance()
+
         name_tok: token.Token = self.peek()
         if name_tok.kind != token.TK_IDENT:
             self.fail_hint(name_tok, "引数は「名前: 型」の形で書きます（例: n: int）",
@@ -878,17 +888,37 @@ class Parser:
                 not self.peek().is_punct(":")):
             n0: ast.Node = ast.new_node(ast.ND_PARAM, name_tok)
             n0.name = name_tok.text
+            if lead is not None:
+                if lead.is_kw("own"):
+                    self.fail_hint(lead,
+                                   "self の所有権は奪えません（'mut self' なら書けます）",
+                                   "self に 'own' は書けません")
+                n0.mode = ast.PM_MUT
             return n0   # type_ref は None のまま（sema がクラスの型を入れる）
+
+        if lead is not None:
+            self.fail_hint(lead,
+                           "'" + lead.text + "' は型の前に書きます（例: " +
+                           name_tok.text + ": " + lead.text + " list[int]）",
+                           "ここには書けません")
 
         if self.consume(":") is None:
             self.fail_hint(self.peek(), "引数には型注釈が必須です（例: n: int）",
                            "引数名の後に ':' が必要です")
+
+        # ★ 第21章：型の前の own / mut
+        mode: int = ast.PM_BORROW
+        if self.consume_kw("own") is not None:
+            mode = ast.PM_OWN
+        elif self.consume_kw("mut") is not None:
+            mode = ast.PM_MUT
 
         tr: ast.Node = self.type_ref("引数には型注釈が必須です（例: n: int）")
 
         n: ast.Node = ast.new_node(ast.ND_PARAM, name_tok)
         n.name = name_tok.text
         n.type_ref = tr
+        n.mode = mode
         return n
 
     # 引数リスト（仮引数）を読む

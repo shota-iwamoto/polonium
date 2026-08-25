@@ -1,0 +1,5 @@
+# ERROR: 'raises' は予約語です
+# 第21章：raises / unsafe / pragma も予約済み（使うのは第27章以降）
+def main() -> int:
+    raises: int = 1
+    return raises

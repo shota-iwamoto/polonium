@@ -1072,13 +1072,28 @@ static Node *type_ref(Parser *p, const char *what) {
     return n;
 }
 
-// param ::= IDENT ":" type
+// param ::= IDENT ":" [ "own" | "mut" ] type
+//          | [ "mut" ] "self"
+//
+// ★ 第21章：受け取り方（own / mut）を読みます。**意味づけはまだしません。**
+//   own / mut は「型の前」に置きます（言語仕様 v2 §11）。
+//
+//   🤔 なぜ名前の前ではなく型の前なのか
+//     名前の前だと `mut xs: list[int]` となり、Python の
+//     「名前: 型」という並びの途中に修飾が割り込みます。型の前に置けば
+//     「xs は『可変で借りた list[int]』である」と、型注釈の一部として読めます。
+//     例外は self で、self には型注釈が無いので `mut self` と書きます。
 //
 // ★ 第12章：メソッドの第 1 引数 self だけは型注釈を書きません
 //   （そのクラスに決まっているので、書かせても意味がない）。
 //   型は sema が入れます。第11章の「型注釈のない ND_VARDECL」と同じ抜け道で、
 //   利用者が書くふつうの引数は今までどおり型注釈が必須です。
 static Node *param(Parser *p, bool allow_self) {
+    // 名前の前に書けるのは 'mut self' の mut だけ。
+    // それ以外（mut x: T / own x: T）は「型の前に書く」と案内します。
+    Token *lead = NULL;
+    if (tok_is_kw(peek(p), "mut") || tok_is_kw(peek(p), "own")) lead = advance(p);
+
     Token *name_tok = peek(p);
     if (name_tok->kind != TK_IDENT)
         error_at_hint(name_tok, "引数は「名前: 型」の形で書きます（例: n: int）",
@@ -1087,20 +1102,41 @@ static Node *param(Parser *p, bool allow_self) {
 
     if (allow_self && strcmp(name_tok->text, "self") == 0 &&
         !tok_is(peek(p), ":")) {
+        if (lead && tok_is_kw(lead, "own"))
+            error_at_hint(lead, "self の所有権は奪えません（'mut self' なら書けます）",
+                          "self に 'own' は書けません");
         Node *n = new_node(ND_PARAM, name_tok);
         n->name = name_tok->text;
+        n->mode = lead ? PM_MUT : PM_BORROW;
         return n;  // type_ref は NULL のまま（sema がクラスの型を入れる）
     }
+
+    if (lead)
+        error_at_hint(lead,
+                      diag_fmt("'%s' は型の前に書きます（例: %s: %s list[int]）",
+                               lead->text, name_tok->text, lead->text),
+                      "ここには書けません");
 
     if (!consume(p, ":"))
         error_at_hint(peek(p), "引数には型注釈が必須です（例: n: int）",
                       "引数名の後に ':' が必要です");
+
+    // ★ 第21章：型の前の own / mut
+    ParamMode mode = PM_BORROW;
+    if (tok_is_kw(peek(p), "own")) {
+        advance(p);
+        mode = PM_OWN;
+    } else if (tok_is_kw(peek(p), "mut")) {
+        advance(p);
+        mode = PM_MUT;
+    }
 
     Node *tr = type_ref(p, "引数には型注釈が必須です（例: n: int）");
 
     Node *n = new_node(ND_PARAM, name_tok);
     n->name = name_tok->text;
     n->type_ref = tr;
+    n->mode = mode;
     return n;
 }
 

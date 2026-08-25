@@ -94,6 +94,14 @@ const char *op_symbol(OpKind op) {
 // 第2章以降、ノード種別が増えるたびにここに case を足します。
 // インデント付きで出力するので、深い木でも構造が読めます。
 
+// 仮引数の受け取り方の接頭辞（第21章）。
+// ★ 既定（借用）は何も出しません。既存の出力を変えないためです。
+const char *param_mode_prefix(ParamMode mode) {
+    if (mode == PM_OWN) return "own ";
+    if (mode == PM_MUT) return "mut ";
+    return "";
+}
+
 static void dump(Node *n, int depth) {
     for (int i = 0; i < depth; i++) printf("  ");
 
@@ -237,7 +245,7 @@ static void dump(Node *n, int depth) {
             printf(")\n");
             break;
         case ND_PARAM:
-            printf("(param %s\n", n->name);
+            printf("(param %s%s\n", param_mode_prefix(n->mode), n->name);
             dump(n->type_ref, depth + 1);
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");

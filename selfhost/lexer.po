@@ -144,6 +144,8 @@ class Lexer:
                          "elif", "else", "extern", "False", "for", "if",
                          "import", "in", "is", "None", "not", "or", "pass",
                          "return", "True", "while",
+                         # 言語仕様 v2（第21章〜。del / try / except / with は下で予約済み）
+                         "own", "mut", "raises", "unsafe", "pragma",
                          "assert", "const", "del", "except", "finally", "from",
                          "global", "lambda", "match", "nonlocal", "raise",
                          "try", "with", "yield"]

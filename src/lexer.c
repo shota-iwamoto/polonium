@@ -87,6 +87,9 @@ static const char *KEYWORDS[] = {
     "and", "as", "break", "class", "continue", "def", "elif", "else",
     "extern", "False", "for", "if", "import", "in", "is", "None",
     "not", "or", "pass", "return", "True", "while",
+    // 言語仕様 v2 で使う語（第21章〜。所有権とエラー処理）
+    // ★ del / try / except / with は v1 の時点で予約済みなので下の表にあります。
+    "own", "mut", "raises", "unsafe", "pragma",
     // 将来のために予約（使うとエラーになる）
     "assert", "const", "del", "except", "finally", "from", "global", "lambda",
     "match", "nonlocal", "raise", "try", "with", "yield",

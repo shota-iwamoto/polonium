@@ -227,6 +227,21 @@ ND_FIELD: int = 26
 ND_IMPORT: int = 27
 ND_NONE: int = 28
 
+# ── 仮引数の受け取り方（C 版 ParamMode と同じ順序・同じ値。第21章）──
+PM_BORROW: int = 0   # 既定。読むだけ借りる
+PM_MUT: int = 1      # mut。書き換えるために借りる
+PM_OWN: int = 2      # own。所有権を受け取る
+
+# --dump-ast 用の接頭辞（"" / "mut " / "own "）
+# ★ 既定（借用）は何も出さない。既存の出力を変えないため。
+def param_mode_prefix(mode: int) -> str:
+    if mode == PM_OWN:
+        return "own "
+    if mode == PM_MUT:
+        return "mut "
+    return ""
+
+
 # ── 演算子の種類（C 版 OpKind と同じ順序・同じ値）──
 OP_ADD: int = 0
 OP_SUB: int = 1
@@ -336,6 +351,9 @@ class Node:
     # 型注釈が T | None か（ND_TYPEREF。第15章）
     nullable: bool
 
+    # 仮引数の受け取り方（ND_PARAM。第21章。PM_BORROW / PM_MUT / PM_OWN）
+    mode: int
+
     # 型注釈のモジュール修飾（ND_TYPEREF。第13章）
     mod_name: str
 
@@ -385,6 +403,7 @@ class Node:
         self.builtin = ""
         self.is_extern = False
         self.is_global = False
+        self.mode = PM_BORROW
 
 
 # ── コンストラクタ（C 版の new_*_node と同じ形）──────────────
@@ -552,7 +571,7 @@ def dump(n: Node | None, depth: int) -> None:
         dump(n.body, depth + 1)
         print(pad + ")")
     elif n.kind == ND_PARAM:
-        print(pad + "(param " + n.name)
+        print(pad + "(param " + param_mode_prefix(n.mode) + n.name)
         dump(n.type_ref, depth + 1)
         print(pad + ")")
     elif n.kind == ND_CALL:

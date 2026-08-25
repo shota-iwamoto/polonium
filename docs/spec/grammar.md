@@ -103,7 +103,8 @@ top_level  ::= func_def
 func_def   ::= "def" IDENT "(" [ param_list ] ")" "->" type ":" block
 
 param_list ::= param { "," param }
-param      ::= IDENT ":" type
+param      ::= IDENT ":" [ "own" | "mut" ] type      (* v2 ch21 *)
+             | [ "mut" ] "self"                       (* v2 ch21。self は型注釈なし *)
 
 (* ── extern 宣言 ── *)
 extern_def ::= "extern" "def" IDENT "(" [ param_list ] ")" "->" type NEWLINE

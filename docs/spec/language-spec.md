@@ -77,12 +77,21 @@ extern   False    for      if       import   in       is       None
 not      or       pass     return   True     while
 ```
 
-将来のために予約（v1 では使うとエラー）:
+v2 で追加した語（[safety-spec.md](safety-spec.md)。`own` / `mut` は第21章から使えます）:
+
+```
+own      mut      raises   unsafe   pragma
+```
+
+将来のために予約（使うとエラー）:
 
 ```
 assert   const    del      except   finally  from     global   lambda
 match    nonlocal raise    try      with     yield
 ```
+
+⚠️ `del` / `try` / `except` / `with` は v1 の時点で予約済みです。
+v2 ではこれらに意味が付きます（`del` は第25章、`try` / `except` は第27章、`with` は第28章）。
 
 ### 2.6 識別子
 

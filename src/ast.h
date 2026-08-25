@@ -157,6 +157,24 @@ struct Class {
     Class *next;
 };
 
+// 仮引数の受け取り方（第21章。言語仕様 v2 §4）
+//
+// ★ 第21章では構文として読むだけで、意味は与えません。
+//   検査が入るのは第22〜24章です（docs/design/ownership.md §2）。
+//
+// 🤔 なぜ Type ではなく引数に持たせるのか
+//   Type はシングルトンで共有しているので、そこに所有の情報を足すと
+//   「int 型」が場所ごとに別物になり、既存のポインタ比較が壊れます。
+//   受け取り方は「型の性質」ではなく「その引数の性質」なので、ここに持ちます。
+typedef enum {
+    PM_BORROW,  // 既定。読むだけ借りる
+    PM_MUT,     // mut。書き換えるために借りる
+    PM_OWN,     // own。所有権を受け取る
+} ParamMode;
+
+// --dump-ast 用の接頭辞（"" / "mut " / "own "）
+const char *param_mode_prefix(ParamMode mode);
+
 struct Node {
     NodeKind kind;
 
@@ -208,6 +226,10 @@ struct Node {
 
     // 型注釈が T | None か（ND_TYPEREF。第15章）
     bool nullable;
+
+    // 仮引数の受け取り方（ND_PARAM。第21章）。
+    // ★ 既定は PM_BORROW なので、new_node の calloc がそのまま初期値になります。
+    ParamMode mode;
 
     // 型注釈に書かれた名前（ND_TYPEREF）。
     // 「int」のような文字列で、sema が Type * に解決します。

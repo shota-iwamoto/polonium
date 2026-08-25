@@ -4,7 +4,7 @@
 > 判断の理由は [dev-log.md](dev-log.md)、決めごとは [spec/](spec/) と [design/](design/) にあります。
 > 作業を始めるときは、まずこのファイルを読んでください。
 
-最終更新：2026-08-26
+最終更新：2026-08-26（第21章 完了）
 
 ---
 
@@ -16,8 +16,8 @@
 | C 版コンパイラ（stage0） | ✅ 動作（`src/`、約 7,700 行） |
 | Polonium 版コンパイラ（stage1〜） | ✅ 動作（`selfhost/`、約 6,600 行） |
 | セルフホスト | ✅ 不動点（stage2 == stage3） |
-| テスト | ✅ 323 件パス（`make test`） |
-| 安全性（v2） | ⬜ 未着手（仕様と設計は完成） |
+| テスト | ✅ 331 件パス（`make test`） |
+| 安全性（v2） | 🔨 進行中 — [第21章](chapters/ch21-v2-foundation.md) 完了（構文のみ。検査はまだ無い） |
 | OS 対応 | ⬜ 未着手（要件のみ確定） |
 
 ```bash
@@ -29,24 +29,29 @@ make info       # 言語名・拡張子などの現在値
 
 ---
 
-## 2. 次の一手 — 第21章「v2 の土台」
+## 2. 次の一手 — 第22章「ムーブ検査」
 
-**目的**：新キーワードと `own` / `mut` を**構文として**通す。意味づけはまだしない。
+**目的**：新パス `src/ownck.c` を作り、**移動済みの値を使っていないか**を検出する。
+設計は [design/ownership.md §3〜4](design/ownership.md)。**最初は警告**として出す。
 
-- [ ] 既存コードでの衝突確認
-      `grep -rn '\b\(own\|mut\|raises\|try\|except\|unsafe\|pragma\|del\|with\)\b' src selfhost lib tests examples`
-- [ ] `src/lexer.c` / `selfhost/lexer.po` のキーワード表に 9 語を追加
-- [ ] `docs/spec/grammar.md` に [safety-spec.md §11](spec/safety-spec.md) の EBNF 差分を反映
-- [ ] `src/ast.h` に `ParamMode`（`PM_BORROW` / `PM_MUT` / `PM_OWN`）を追加し、`ND_PARAM` に持たせる
-- [ ] `src/parser.c`：`x: own T` / `x: mut T` / `mut self` を解析
-- [ ] `--dump-ast` の出力に mode を出す（`selfhost/dump_ast.po` と**同じ文字列**で）
-- [ ] `selfhost/` 側（`lexer.po` / `parser.po` / `ast.po` / `dump_ast.po`）に同じ変更を移植
-- [ ] `tests/cases/own_syntax_*.po` を追加（構文が通ることの確認）
-- [ ] `make test` / `make bootstrap` が緑
-- [ ] `docs/dev-log.md` に判断を記録し、`docs/roadmap-v2.md` の状態を「✅ 完成」に更新
+- [ ] `src/ownck.h` / `src/ownck.c` を新設し、`src/main.c` から sema の後に呼ぶ
+- [ ] `Place`（`Local` / `Field` / `Index` / `Global`）と重なり判定 `place_overlaps` を実装
+- [ ] `ty_is_owned(Type*)`（`str` / `list` / class が所有型、`int` / `bool` はコピー型）
+- [ ] 移動が起きる場所を実装（代入・`own` 引数・`return`・フィールド代入・`append`）
+- [ ] 3 状態（`Valid` / `MaybeMoved` / `Moved`）の格子と結合（`⊔`）
+- [ ] 構造化制御フロー上の解析（`if` は分岐して結合、`while` は不動点反復、`break`/`continue`/`return` の経路）
+- [ ] `while` の反復が 2 周で収束することを assert する
+- [ ] 診断 `E-MOVE-1`（移動した場所と使った場所の 2 か所を指す）
+- [ ] `--deny-move` でエラー昇格。**既定は警告**（既存コードを止めない）
+- [ ] `tests/cases/err_move_*.po` を 5 本以上追加
+- [ ] 既存 331 件が緑。**警告が出た箇所は第26章の宿題として記録する**
+- [ ] `selfhost/ownck.po` への移植は**第29章**（C 版が固まってから）
+- [ ] `docs/chapters/ch22-*.md` / `dev-log.md` / このファイルを更新
 
-**⚠️ 注意**：`--dump-ast` の出力形式を変えると `selfhost-test` の AST 比較に効きます。
-**C 版と Polonium 版を必ず同時に直すこと。**
+**⚠️ 注意**：この章で初めて「既存コードに警告が出る」状態になります。
+**警告を消すために仕様を緩めないこと。** 記録して第26章で直します。
+
+**先に決めること**：Q1（`copy(x)` を組み込み関数にするか、`x.copy()` にするか）。
 
 ---
 
@@ -84,7 +89,7 @@ make info       # 言語名・拡張子などの現在値
 
 | # | 論点 | いつ決めるか |
 |---|---|---|
-| Q1 | `copy(x)` を組み込み関数にするか、メソッド `x.copy()` にするか | ch22 |
+| Q1 | `copy(x)` を組み込み関数にするか、メソッド `x.copy()` にするか | **ch22（次章。着手前に決める）** |
 | Q2 | `for x in xs:` で要素を `own` として取り出す構文（`for own x in xs:`？） | ch23 |
 | Q3 | `del x` の対象を局所変数だけに限るか、フィールドも許すか | ch25 |
 | Q4 | `rc[T]` の `with` 構文を借用以外にも使うか（ファイルなど） | ch28 |
@@ -98,4 +103,5 @@ make info       # 言語名・拡張子などの現在値
 | 日付 | 内容 |
 |---|---|
 | 2026-08-26 | **Mython → Polonium に改名**（`.my` → `.po`、`mythonc` → `poloniumc`）。内部接頭辞を名前非依存化（`MYTHON_` → `PLC_`、`my_` → `pl_`）。`langinfo` を新設し名前の定義を 3 か所に集約。v2 の仕様・設計・ロードマップを作成 |
+| 2026-08-26 | **第21章 完了** — キーワード 5 語（`own` / `mut` / `raises` / `unsafe` / `pragma`）を予約し、`x: own T` / `x: mut T` / `mut self` を構文として解析。`ParamMode` は型ではなく引数（`ND_PARAM`）に持たせた。**意味づけは無し・IR は不変**。テスト 331 件（+8）、不動点維持 |
 | 2026-08-26 | v1 完成（第20章）。セルフホスト不動点・323 テスト |
