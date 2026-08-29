@@ -31,9 +31,13 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
             shell: bash
-          - name: macos
+          # ★ macOS は **ユニバーサル**（Intel と Apple Silicon の両対応）で作ります。
+          #   GitHub の macos-latest は Apple Silicon なので、普通に作ると
+          #   arm64 専用になり、Intel Mac では "bad CPU type" で動きません。
+          - name: macos-universal
             os: macos-latest
             shell: bash
+            make_flags: UNIVERSAL=1 DIST_NAME=polonium-macos-universal
           - name: windows-x86_64
             os: windows-latest
             shell: 'msys2 {0}'
@@ -60,11 +64,21 @@ jobs:
 
       - name: ビルドとテスト
         run: |
-          make
-          make test
+          make ${{ matrix.make_flags }}
+          make test ${{ matrix.make_flags }}
 
       - name: 配布物を作る
-        run: make dist
+        run: make dist ${{ matrix.make_flags }}
+
+      - name: 2 つのアーキが入っているか確かめる（macOS）
+        if: runner.os == 'macOS'
+        run: |
+          cd build/dist
+          d=$(ls -d polonium-*)
+          file "$d/bin/poloniumc" "$d/lib/polonium/runtime.a"
+          # ★ 片方しか入っていなかったら、ここで落とします
+          lipo -archs "$d/bin/poloniumc" | grep -q x86_64
+          lipo -archs "$d/bin/poloniumc" | grep -q arm64
 
       - name: 動くことを確かめる（展開した場所から）
         run: |

@@ -40,6 +40,7 @@ ifeq ($(origin CC),default)
 endif
 CLANG ?= clang
 CFLAGS  := -std=c11 -g -O0 -Wall -Wextra -Wno-unused-parameter
+RUNTIME_CFLAGS := -std=c11 -O2 -Wall -Wextra
 
 # ── 言語の名前と拡張子（★ 改名するときはここだけ）───────────
 # 言語名は将来変わるかもしれません。名前に依存する値をここに集めてあります。
@@ -67,6 +68,30 @@ HOST_TRIPLE := $(shell printf '' > .plc-empty.c 2>/dev/null; \
                  | sed -n 's/^target triple = "\(.*\)"$$/\1/p'; \
                  rm -f .plc-empty.c)
 CFLAGS  += -DPLC_TARGET_TRIPLE='"$(HOST_TRIPLE)"'
+
+# ── macOS のユニバーサルバイナリ（make UNIVERSAL=1）─────────────
+#
+# ★ 配布物を Intel Mac と Apple Silicon の**両方で動かす**ための指定です。
+#   1 つの実行ファイルに 2 つの機械語を入れます（Mach-O の fat 形式）。
+#
+# ⚠️ **triple も 2 つ要ります。** 生成する IR に書く triple は
+#    「いま動いている側」でなければならないのに、既定では
+#    ビルド時に 1 つだけ埋め込まれます。x86_64 の Mac で arm64 の
+#    triple を書いた IR を出すと、動かない実行ファイルができます。
+#    そこで両方を渡し、C 側（src/codegen.c）で選ばせます。
+#
+#   普段のビルドには一切影響しません（UNIVERSAL を指定したときだけ）。
+ifeq ($(UNIVERSAL),1)
+  ARCHFLAGS := -arch x86_64 -arch arm64
+  CFLAGS  += $(ARCHFLAGS)
+  RUNTIME_CFLAGS += $(ARCHFLAGS)
+  triple_for = $(shell printf '' > .plc-empty.c 2>/dev/null; \
+                 $(CLANG) -arch $(1) -S -emit-llvm -x c .plc-empty.c -o - 2>/dev/null \
+                 | sed -n 's/^target triple = "\(.*\)"$$/\1/p'; \
+                 rm -f .plc-empty.c)
+  CFLAGS  += -DPLC_TARGET_TRIPLE_X86_64='"$(call triple_for,x86_64)"' \
+             -DPLC_TARGET_TRIPLE_ARM64='"$(call triple_for,arm64)"'
+endif
 
 # ── LLVM のツール（opt / lli / llvm-as / ld.lld）──────────────
 #
@@ -99,7 +124,6 @@ RUNTIME_HOSTED := runtime/hosted.c
 #     `ar` はどの環境にもあり、clang のリンク行にそのまま渡せます。
 RUNTIME_OBJ := build/runtime.a
 AR ?= ar
-RUNTIME_CFLAGS := -std=c11 -O2 -Wall -Wextra
 
 # ★ 生成したプログラムをリンクするのに使う clang（実行時に呼ぶ相手）。
 #   ⚠️ clang-18 のように名前が違う環境があるので、埋め込みつつ
@@ -290,6 +314,7 @@ info:
 	@echo "UNAME_S      = $(UNAME_S)"
 	@echo "CLANG        = $(CLANG)"
 	@echo "RUNTIME      = $(RUNTIME_OBJ)"
+	@echo "UNIVERSAL    = $(UNIVERSAL) $(ARCHFLAGS)"
 
 clean:
 	rm -rf build a.out a.out.ll tests/tmp

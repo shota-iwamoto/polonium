@@ -50,6 +50,12 @@ def main() -> int:
 [Releases](https://github.com/shota-iwamoto/polonium/releases) から
 OS に合う `.tar.gz` を取って展開します。
 
+| ファイル | 対象 |
+|---|---|
+| `polonium-linux-x86_64.tar.gz` | Linux（x86_64） |
+| `polonium-macos-universal.tar.gz` | macOS（**Intel / Apple Silicon 両対応**） |
+| `polonium-windows-x86_64.tar.gz` | Windows（MSYS2 / MINGW64） |
+
 ```bash
 tar xzf polonium-linux-x86_64.tar.gz
 cd polonium-*
