@@ -47,6 +47,20 @@ else
     C_OK=''; C_NG=''; C_DIM=''; C_END=''
 fi
 
+# ★ AddressSanitizer が **使えるかどうかを、実際に試して**確かめます。
+#   ASan は「clang に付いてくる別のライブラリ」です。clang があっても実体
+#   （libclang_rt.asan）が入っていないことがあり、MSYS2 の clang がそれです。
+#   version を見て判断すると外すので、**小さいプログラムを 1 本リンクしてみる**
+#   のがいちばん確実です（CI の Windows が教えてくれた差）。
+CLANG="${PLC_CLANG:-clang}"
+if ! echo 'int main(void){return 0;}' \
+        | "$CLANG" -fsanitize=address -x c - -o "$TMP/asan_probe" 2>/dev/null; then
+    printf "%s（この環境には AddressSanitizer が無いので、検査を飛ばします）%s\n" \
+           "$C_DIM" "$C_END"
+    exit 0
+fi
+rm -f "$TMP/asan_probe" "$TMP/asan_probe.exe"
+
 pass=0
 fail=0
 
@@ -65,7 +79,7 @@ for f in "${CASES[@]}"; do
     fi
 
     # ★ ランタイムも一緒に ASan でビルドする（解放するのはランタイム側なので）
-    if ! "${PLC_CLANG:-clang}" -fsanitize=address -O0 "$TMP/$base.drop".*.ll "$ROOT/runtime/core.c" "$ROOT/runtime/hosted.c" \
+    if ! "$CLANG" -fsanitize=address -O0 "$TMP/$base.drop".*.ll "$ROOT/runtime/core.c" "$ROOT/runtime/hosted.c" \
             -o "$TMP/$base.asan" 2>"$TMP/$base.link"; then
         printf "  %sFAIL%s  %s（リンクに失敗）\n" "$C_NG" "$C_END" "$name"
         head -5 "$TMP/$base.link" | sed 's/^/          /'
