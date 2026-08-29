@@ -101,19 +101,23 @@ for case_file in "${CASES[@]}"; do
     exe="$TMP/$base"
 
     # ── 期待値をヘッダコメントから読み取る ──
-    want_exit="$(sed -n 's/^# *EXIT: *//p'   "$case_file" | head -1)"
+    # ⚠️ 期待値から \r を落とします（Windows のチェックアウトで混ざることがある）。
+    #    .gitattributes で変換は止めていますが、既存の作業コピーでも動くように。
+    strip_cr() { tr -d '\r'; }
+
+    want_exit="$(sed -n 's/^# *EXIT: *//p'   "$case_file" | head -1 | strip_cr)"
     # ERROR は複数行書ける。すべてが stderr に含まれることを要求する。
     # 診断メッセージの note: / ヒント: 行まで検証できるようにするため。
-    want_error="$(sed -n 's/^# *ERROR: *//p' "$case_file")"
+    want_error="$(sed -n 's/^# *ERROR: *//p' "$case_file" | strip_cr)"
     # OUTPUT は複数行を許す
-    want_output="$(sed -n 's/^# *OUTPUT: *//p' "$case_file")"
+    want_output="$(sed -n 's/^# *OUTPUT: *//p' "$case_file" | strip_cr)"
     # TOKENS は複数行書けるので、空白 1 個で連結して 1 行にする
     want_tokens="$(sed -n 's/^# *TOKENS: *//p' "$case_file" \
                    | tr '\n' ' ' | tr -s ' ' | sed 's/ *$//')"
     # 第22章：警告の検証（コンパイルは成功する）と、追加のオプション
-    want_warn="$(sed -n 's/^# *WARN: *//p' "$case_file")"
-    want_explain="$(sed -n 's/^# *EXPLAIN-MUT: *//p' "$case_file")"
-    extra_flags="$(sed -n 's/^# *FLAGS: *//p' "$case_file" | tr '\n' ' ')"
+    want_warn="$(sed -n 's/^# *WARN: *//p' "$case_file" | strip_cr)"
+    want_explain="$(sed -n 's/^# *EXPLAIN-MUT: *//p' "$case_file" | strip_cr)"
+    extra_flags="$(sed -n 's/^# *FLAGS: *//p' "$case_file" | tr '\n' ' ' | strip_cr)"
     stage0_only="$(sed -n 's/^# *STAGE0-ONLY: *//p' "$case_file" | head -1)"
 
     # ★ C 版でしか動かないケースは、Polonium 版で回すときに飛ばす（第22章）
@@ -250,7 +254,7 @@ $compile_err"
     # ── 実行 ──
     # ★ Windows（MSYS2）では実行ファイルに .exe が付きます
     [ -x "$exe" ] || [ ! -x "$exe.exe" ] || exe="$exe.exe"
-    actual_output="$("$exe" 2>/dev/null)"
+    actual_output="$("$exe" 2>/dev/null | strip_cr)"
     actual_exit=$?
 
     ok=1
