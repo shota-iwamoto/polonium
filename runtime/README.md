@@ -1,18 +1,30 @@
 # runtime/ — C 製ランタイムライブラリ
 
-**第9章から使います。** 現在は空です。
+**第9章から使い、第31章で 2 つに分けました。**
 
-生成される LLVM IR を単純に保つため、制御フローを含む処理は
-ここに C 関数として置き、IR 側は `call` 1 行にします
-（[../docs/design/ir-conventions.md](../docs/design/ir-conventions.md) 規約 R10）。
+| ファイル | 中身 | ベアメタルで使うか |
+|---|---|---|
+| `core.h` | 環境ごとに違う 4 つの操作（フック）の宣言 | — |
+| `core.c` | **libc に依存しない核**（文字列・リスト・rc・解放・print の組み立て） | ✅ 使う |
+| `hosted.c` | フックの libc 実装 + ファイル入出力・argv・環境変数など | ❌ 使わない |
 
-予定している内容：
+```
+  ┌─────────────┐        ┌──────────────────┐
+  │  core.c      │──呼ぶ──▶│ pl_hook_alloc     │  hosted.c（PC 上）
+  │              │        │ pl_hook_free      │    → calloc / free / stdout
+  │              │        │ pl_hook_write     │  kernel/（ベアメタル。第32章〜）
+  │              │        │ pl_hook_panic     │    → 自前ヒープ / UART
+  └─────────────┘        └──────────────────┘
+```
 
-- `pl_alloc` — ゼロ初期化つきメモリ確保（失敗時は即終了）
-- `pl_print_int` / `pl_print_str` / `pl_print_bool` — `print` の実体
-- `pl_str_concat` / `pl_str_eq` / `pl_str_len` / `pl_str_sub` — 文字列操作
-- `pl_str_from_int` / `pl_int_from_str` — 相互変換
-- `pl_list_new` / `pl_list_push_*` / `pl_list_get_*` — `list[T]`（第10章）
-- `pl_check_not_none` — None 参照の親切なエラー（第12章）
+**🤔 なぜ分けたのか**（第31章）
 
-API の一覧は [../docs/design/memory-model.md](../docs/design/memory-model.md) 第4節にあります。
+v1 のランタイムは `printf` / `calloc` / `fopen` を直接呼んでいました。
+ベアメタルにはそのどれもありません。かといって「OS 用のランタイム」をもう 1 本書くと、
+同じ処理が 2 か所に増えて必ずずれます。
+**libc に触る所だけを 4 つのフックに追い出せば、核は 1 本で済みます。**
+
+生成される LLVM IR を単純に保つため、制御フローを含む処理はここに C 関数として置き、
+IR 側は `call` 1 行にします（[../docs/design/ir-conventions.md](../docs/design/ir-conventions.md) 規約 R10）。
+
+ビルド：`make`（`build/core.o` と `build/hosted.o` を作り、`ld -r` で `build/runtime.o` にまとめます）

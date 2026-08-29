@@ -125,6 +125,9 @@ typedef struct {
     ErrTag *err_tags;   // エラー型 → ID
     int next_err_tag;   // 次に振る番号（1 から）
     struct TryCtx *cur_try;  // 今いる try 文（入れ子になるのでスタック）
+
+    // ── 第30章：低レベル ──
+    int unsafe_depth;   // unsafe: の中にいる深さ（0 なら外）
 } Sema;
 
 // 入れ子の try（内側で捕まらなければ外側が受け止める）
@@ -466,6 +469,21 @@ static Type *resolve_base_type(Sema *s, Node *tr) {
             error_at_hint(tr->tok, "None 型の値は存在しないので要素にできません",
                           "list の要素型に None は使えません");
         return type_list(elem);
+    }
+
+    // ── 第30章：ptr[T]（生ポインタ）──
+    //
+    // ★ 中身に取れるのは int だけにしてあります。OS で触るのはメモリの番地で、
+    //   そこに「Polonium の型」は載っていないからです（仕様 §10.2）。
+    if (strcmp(tr->name, "ptr") == 0) {
+        if (!tr->lhs)
+            error_at_hint(tr->tok, "中身の型を書いてください（例: ptr[int]）",
+                          "ptr には中身の型が必要です");
+        Type *elem = resolve_type(s, tr->lhs);
+        if (elem->kind != TY_INT)
+            error_at_hint(tr->tok, "いま ptr に書けるのは int だけです（例: ptr[int]）",
+                          "'%s' は ptr に入れられません", type_name(elem));
+        return type_ptr(elem);
     }
 
     // ── 第28章：rc[T]（共有所有）──
@@ -1554,7 +1572,103 @@ static Type *check_new(Sema *s, Node *n, Class *c) {
 }
 
 // 関数呼び出しの検査（docs/spec/type-system.md 5.7 の順序に従う）
+// ── 第30章：低レベルの組み込み ──────────────────────────────
+//
+// ★ 引数の型が「表」で書けない（ptr[int] を取る／返す）ので、
+//   rc(x) と同じくここで特別扱いします。
+//
+//   ptr_at(addr)        番地からポインタを作る
+//   addr_of(p)          ポインタを番地に戻す
+//   peek8/peek64(p, i)  読む（volatile）
+//   poke8/poke64(p,i,v) 書く（volatile）
+typedef struct {
+    const char *name;
+    int nargs;   // ポインタを除く引数の数（ptr_at は 0 で特別）
+    bool ret_ptr;
+    bool takes_ptr;
+} LowLevel;
+
+static const LowLevel LOWLEVEL[] = {
+    // ── 第33章：インラインアセンブリ ──
+    //   asm(text)          … 命令を並べるだけ（wfi など）
+    //   asm_in(text, v)     … 値を 1 つ渡す（%0 に入る。csrw など）
+    //   asm_out(text)       … 値を 1 つ受け取る（%0 に入る。csrr など）
+    {"asm", 1, false, false},
+    {"asm_in", 2, false, false},
+    {"asm_out", 1, false, false},
+
+    {"ptr_at", 1, true, false},
+    {"addr_of", 1, false, true},
+    {"peek8", 2, false, true},
+    {"peek64", 2, false, true},
+    {"poke8", 3, false, true},
+    {"poke64", 3, false, true},
+    {NULL, 0, false, false},
+};
+
+static const LowLevel *lowlevel_of(const char *name) {
+    for (int i = 0; LOWLEVEL[i].name; i++)
+        if (strcmp(LOWLEVEL[i].name, name) == 0) return &LOWLEVEL[i];
+    return NULL;
+}
+
+bool is_lowlevel_name(const char *name) { return lowlevel_of(name) != NULL; }
+
+static Type *check_lowlevel_call(Sema *s, Node *n, const LowLevel *ll) {
+    // ★ unsafe: の外では触れません（仕様 §10.1）
+    if (s->unsafe_depth == 0) {
+        Diag d = {0};
+        d.code = "E-UNSAFE-1";
+        d.message = diag_fmt("'%s' は unsafe: の中でしか使えません", n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "生ポインタを触っています";
+        d.hint = "unsafe: ブロックで囲んでください:\n"
+                 "             unsafe:\n"
+                 "                 poke8(p, 0, 65)";
+        diag_fail(&d);
+    }
+
+    int nargs = 0;
+    for (Node *a = n->args; a; a = a->next) nargs++;
+    if (nargs != ll->nargs)
+        error_at_hint(n->tok, diag_fmt("%s は %d 個の引数を取ります", n->name, ll->nargs),
+                      "引数の個数が違います");
+
+    // ★ asm 系は第 1 引数が「文字列リテラル」（実行時に組み立てられては困る）
+    bool is_asm = strncmp(n->name, "asm", 3) == 0;
+    if (is_asm && (!n->args || n->args->kind != ND_STR))
+        error_at_hint(n->tok, "命令はリテラルで書いてください（例: asm(\"wfi\")）",
+                      "asm の第 1 引数は文字列リテラルです");
+
+    int i = 0;
+    for (Node *a = n->args; a; a = a->next, i++) {
+        if (is_asm && i == 0) {
+            check_expr(s, a);
+            continue;
+        }
+        Type *at = check_expr(s, a);
+        bool want_ptr = ll->takes_ptr && i == 0;
+        if (want_ptr && at->kind != TY_PTR)
+            error_at_hint(a->tok, "第 1 引数には ptr[int] を渡してください",
+                          "'%s' はポインタではありません", type_name(at));
+        if (!want_ptr && at->kind != TY_INT)
+            error_at_hint(a->tok, "低レベルの操作が扱うのは int だけです",
+                          "'%s' はここに渡せません", type_name(at));
+    }
+
+    n->builtin = NULL;
+    if (ll->ret_ptr) return type_ptr(ty_int);
+    if (strcmp(n->name, "poke8") == 0 || strcmp(n->name, "poke64") == 0)
+        return ty_none;
+    if (strcmp(n->name, "asm") == 0 || strcmp(n->name, "asm_in") == 0) return ty_none;
+    return ty_int;
+}
+
 static Type *check_call(Sema *s, Node *n) {
+    // ── 第30章：低レベルの組み込み ──
+    const LowLevel *ll = lowlevel_of(n->name);
+    if (ll && !lookup_func(s, n->name)) return check_lowlevel_call(s, n, ll);
+
     // ── 第28章：rc(x) — 共有所有にくるむ ──
     //
     // ★ 構文上はただの呼び出しですが、型が「引数の型から作られる」ので
@@ -1769,6 +1883,26 @@ static void check_stmt(Sema *s, Node *n) {
             s->loop_depth--;
             break;
         }
+
+        // ── 第31章：pragma（設定。検査するのは名前だけ）──
+        case ND_PRAGMA: {
+            bool is_target = strcmp(n->name, "target") == 0;
+            bool is_no_rt = strcmp(n->name, "no_runtime") == 0;
+            if (!is_target && !is_no_rt)
+                error_at_hint(n->tok, "いま使える pragma は target と no_runtime です",
+                              "未知の pragma '%s' です", n->name);
+            if (is_target && !n->sval)
+                error_at_hint(n->tok, "pragma target \"riscv64-unknown-elf\" の形で書きます",
+                              "pragma target には文字列が必要です");
+            break;
+        }
+
+        // ── 第30章：unsafe: ブロック ──
+        case ND_UNSAFE:
+            s->unsafe_depth++;
+            check_block(s, n->body);
+            s->unsafe_depth--;
+            break;
 
         // ── 第27章：try / except ──
         case ND_TRY: {
@@ -2475,6 +2609,7 @@ static void declare_module(Sema *s, Node *ast) {
         else if (d->kind == ND_VARDECL) declare_global(s, d);
         else if (d->kind == ND_CLASS) continue;  // 1a / 1b で済んでいる
         else if (d->kind == ND_IMPORT) continue;  // 読み込みは module.c が済ませた
+        else if (d->kind == ND_PRAGMA) continue;  // 第31章：設定（宣言ではない）
         else UNREACHABLE();  // parser が保証している
     }
 }

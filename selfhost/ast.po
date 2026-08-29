@@ -42,7 +42,7 @@ class Field:
     next: Field | None
 
     def init(self, name: str, tok: token.Token | None) -> None:
-        self.name = name
+        self.name = copy(name)
         self.tok = tok
         self.index = 0
         self.offset = 0
@@ -63,7 +63,7 @@ class Class:
     next: Class | None
 
     def init(self, name: str, tok: token.Token | None) -> None:
-        self.name = name
+        self.name = copy(name)
         self.tok = tok
         self.ir_name = ""
         self.owner_name = ""
@@ -106,7 +106,7 @@ def type_rc(elem: Type | None) -> Type:
 
 def type_class(name: str, c: Class | None) -> Type:
     t: Type = Type(TY_CLASS)
-    t.name = name
+    t.name = copy(name)
     t.cls = c
     return t
 
@@ -449,7 +449,7 @@ def new_bool_node(tok: token.Token | None, value: bool) -> Node:
 
 def new_str_node(tok: token.Token | None, bytes_: str, slen: int) -> Node:
     n: Node = Node(ND_STR, tok)
-    n.sval = bytes_
+    n.sval = copy(bytes_)
     n.slen = slen
     return n
 
@@ -475,7 +475,7 @@ def new_unary_node(tok: token.Token | None, op: int, operand: Node) -> Node:
 
 def new_var_node(tok: token.Token | None, name: str) -> Node:
     n: Node = Node(ND_VAR, tok)
-    n.name = name
+    n.name = copy(name)
     return n
 
 

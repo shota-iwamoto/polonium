@@ -31,7 +31,7 @@ class Label:
 
     def init(self, tok: token.Token | None, text: str) -> None:
         self.tok = tok
-        self.text = text
+        self.text = copy(text)
 
 
 # 1 件の診断（C 版の Diag と同じ形）
@@ -287,7 +287,7 @@ def error_at(tok: token.Token, msg: str) -> None:
 def error_at_hint(tok: token.Token, hint: str, msg: str) -> None:
     d: Diag = Diag(msg)
     d.primary = Label(tok, "")
-    d.hint = hint
+    d.hint = copy(hint)
     fail(d)
 
 # 診断コード付きのエラー（第27章）。
@@ -319,5 +319,5 @@ def error_full(tok: token.Token, msg: str, label: str,
     d.primary = Label(tok, label)
     if rel is not None:
         d.related = Label(rel, rel_label)
-    d.hint = hint
+    d.hint = copy(hint)
     fail(d)

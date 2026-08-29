@@ -1,27 +1,90 @@
-// runtime/runtime.c — Polonium のランタイムライブラリ
+// core.c — ランタイムの「核」（第31章で runtime.c から分離）
 //
-// ★ ここに置くもの：ループ・分岐・メモリ確保を含む処理（規約 R10）。
-//   生成する LLVM IR を単純に保つために、複雑さをこちら側に押し出します。
+// ★ ここには **libc に依存しないもの**だけを置きます。
+//   OS を書くとき（第32章以降）、リンクできるのはこのファイルだけです。
 //
-// ⚠️ 関数名は全部 pl_ で始めます。libc のシンボルと衝突させないためです
-//    （第8章でグローバル変数に @g. を付けたのと同じ理由）。
+// 🤔 なぜ分けるのか
+//   v1 のランタイムは printf / malloc / fopen を直接呼んでいました。
+//   ベアメタルにはそのどれもありません。かといって「OS 用の別ランタイム」を
+//   もう 1 本書くと、同じ処理が 2 か所に増えて必ずずれます。
+//   **libc に触る所だけを 4 つのフック関数に追い出せば、核は 1 本で済みます。**
 //
-// メモリは解放しません（docs/design/memory-model.md 3 節）。
-// コンパイラは「起動して、変換して、終了する」プログラムなので、
-// プロセス終了時に OS がまとめて回収します。
+//   ┌─────────────┐        ┌──────────────────┐
+//   │  core.c      │──呼ぶ──▶│ pl_hook_alloc     │  hosted.c（PC 上）
+//   │（この file） │        │ pl_hook_free      │    → calloc / free / stdout
+//   │              │        │ pl_hook_write     │  kernel/（ベアメタル）
+//   │              │        │ pl_hook_panic     │    → UART / 停止
+//   └─────────────┘        └──────────────────┘
+//
+// ⚠️ このファイルでは <stdio.h> / <stdlib.h> / <string.h> を include しません。
+//    必要な小道具（memcpy 相当）は自分で持ちます。
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/wait.h>
+#include "core.h"
+
+// ★ libc を include しないので、必要な定義は自分で持ちます。
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
+// ── 自前の小道具（libc の代わり）────────────────────────────
+//
+// ★ freestanding でも clang は memcpy / memset の呼び出しを生成することが
+//   あります。ベアメタル向けにビルドするときだけ、自分で用意します。
+static void *pl_memcpy(void *dst, const void *src, long long n) {
+    unsigned char *d = dst;
+    const unsigned char *s = src;
+    for (long long i = 0; i < n; i++) d[i] = s[i];
+    return dst;
+}
+
+static long long pl_cstr_len(const char *s) {
+    long long n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+#ifdef PL_FREESTANDING
+// ★ clang は「明らかにコピー」と見たループを memcpy の呼び出しに変えることが
+//   あります。libc の無い世界では、その相手も自分で用意しておきます。
+void *memcpy(void *dst, const void *src, unsigned long n) {
+    return pl_memcpy(dst, src, (long long)n);
+}
+void *memset(void *dst, int c, unsigned long n) {
+    unsigned char *d = dst;
+    for (unsigned long i = 0; i < n; i++) d[i] = (unsigned char)c;
+    return dst;
+}
+#endif
+
+// 整数を 10 進の文字列にする（snprintf の代わり）。返すのは書いた長さ。
+static long long pl_itoa(long long v, char *out) {
+    char tmp[24];
+    int n = 0;
+    int neg = v < 0;
+    unsigned long long u = neg ? (unsigned long long)(-(v + 1)) + 1ULL
+                               : (unsigned long long)v;
+    if (u == 0) tmp[n++] = '0';
+    while (u > 0) {
+        tmp[n++] = (char)('0' + (u % 10));
+        u /= 10;
+    }
+    long long len = 0;
+    if (neg) out[len++] = '-';
+    while (n > 0) out[len++] = tmp[--n];
+    out[len] = '\0';
+    return len;
+}
+
 
 // ── エラー ─────────────────────────────────────────────────
 
 // 回復不能なエラー。stderr に出して終了コード 1 で死ぬ。
 // 例外機構（try / except）は v1 では採用しません（言語仕様 8 節）。
 _Noreturn void pl_panic(const char *msg) {
-    fprintf(stderr, "runtime error: %s\n", msg);
-    exit(1);
+    // ★ 「どう死ぬか」は環境ごとに違うので、フックに任せます。
+    pl_hook_panic(msg);
+    for (;;) {  // フックは戻ってこない約束（戻ってきたらここで止まる）
+    }
 }
 
 // ── メモリ ─────────────────────────────────────────────────
@@ -29,7 +92,7 @@ _Noreturn void pl_panic(const char *msg) {
 // ★ calloc でゼロ初期化し、失敗したら即終了する。
 //   即終了にすることで、生成する IR に NULL チェックを入れずに済みます。
 void *pl_alloc(long long size) {
-    void *p = calloc(1, (size_t)size);
+    void *p = pl_hook_alloc(size);
     if (!p) pl_panic("out of memory");
     return p;
 }
@@ -49,21 +112,27 @@ void *pl_check_not_none(void *p) {
 
 // ── 出力（print のオーバーロード）──────────────────────────
 
-void pl_print_int(long long v) { printf("%lld\n", v); }
+void pl_print_int(long long v) {
+    char buf[26];
+    long long n = pl_itoa(v, buf);
+    buf[n++] = '\n';
+    pl_hook_write(buf, n);
+}
 
 // stdout にそのまま書く（改行を足さない）。第19章。
 // ★ print は改行を足すので、IR の出力には使えません。
-void pl_print_raw(const char *s) { fputs(s, stdout); }
+void pl_print_raw(const char *s) { pl_hook_write(s, pl_cstr_len(s)); }
 
-// stderr にそのまま書く（改行は付けない）。第18章。
-//
-// ★ コンパイラは診断を stderr に書きます。print は stdout なので、
-//   セルフホストの診断にはこれが要ります（移植で見つかった穴）。
-void pl_eprint(const char *s) { fputs(s, stderr); }
 
-void pl_print_str(const char *s) { printf("%s\n", s); }
+void pl_print_str(const char *s) {
+    pl_hook_write(s, pl_cstr_len(s));
+    pl_hook_write("\n", 1);
+}
 
-void pl_print_bool(long long v) { printf("%s\n", v ? "True" : "False"); }
+void pl_print_bool(long long v) {
+    if (v) pl_hook_write("True\n", 5);
+    else pl_hook_write("False\n", 6);
+}
 
 // ── 文字列 ─────────────────────────────────────────────────
 //
@@ -105,9 +174,9 @@ char *pl_str_alloc(long long len) {
 
 // C 文字列から str を作る（argv など、ヘッダを持たない文字列から作るとき）
 char *pl_str_from_cstr(const char *s) {
-    long long n = (long long)strlen(s);
+    long long n = (long long)pl_cstr_len(s);
     char *p = pl_str_alloc(n);
-    memcpy(p, s, (size_t)n + 1);
+    pl_memcpy(p, s, (long long)n + 1);
     return p;
 }
 
@@ -123,8 +192,8 @@ char *pl_str_concat(const char *a, const char *b) {
     long long la = pl_str_len(a);
     long long lb = pl_str_len(b);
     char *p = pl_str_alloc(la + lb);
-    memcpy(p, a, (size_t)la);
-    memcpy(p + la, b, (size_t)lb);
+    pl_memcpy(p, a, (long long)la);
+    pl_memcpy(p + la, b, (long long)lb);
     p[la + lb] = '\0';
     return p;
 }
@@ -133,15 +202,23 @@ char *pl_str_concat(const char *a, const char *b) {
 // ★ これ 1 つで == != < <= > >= の 6 種類すべてに使えます
 //   （生成側は結果を 0 と比べる述語を変えるだけ）。
 long long pl_str_cmp(const char *a, const char *b) {
-    int r = strcmp(a, b);
-    return r < 0 ? -1 : (r > 0 ? 1 : 0);
+    // ⚠️ libc の strcmp は使えません（core は libc に触らない）。
+    //    符号だけ分かればよいので、自分で比べます。
+    const unsigned char *x = (const unsigned char *)a;
+    const unsigned char *y = (const unsigned char *)b;
+    while (*x && *x == *y) {
+        x++;
+        y++;
+    }
+    if (*x == *y) return 0;
+    return *x < *y ? -1 : 1;
 }
 
 char *pl_str_from_int(long long v) {
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%lld", v);
+    char buf[26];
+    long long n = pl_itoa(v, buf);
     char *p = pl_str_alloc(n);
-    memcpy(p, buf, (size_t)n + 1);
+    pl_memcpy(p, buf, n + 1);
     return p;
 }
 
@@ -151,10 +228,23 @@ char *pl_str_from_bool(long long v) {
 
 // 文字列を整数にする。パースできなければ実行時エラー（言語仕様 7 節）。
 long long pl_str_to_int(const char *s) {
-    char *end;
-    long long v = strtoll(s, &end, 10);
-    if (end == s || *end != '\0') pl_panic("int(): not a number");
-    return v;
+    // ⚠️ libc の strtoll は使えないので、自分で読みます（第31章）。
+    //    ★ v1 と同じ規則：符号 1 個 + 数字 1 個以上、余りがあれば panic。
+    const char *p = s;
+    int neg = 0;
+    if (*p == '-' || *p == '+') {
+        neg = *p == '-';
+        p++;
+    }
+    if (*p < '0' || *p > '9') pl_panic("int(): not a number");
+
+    long long v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (*p - '0');
+        p++;
+    }
+    if (*p != '\0') pl_panic("int(): not a number");
+    return neg ? -v : v;
 }
 
 long long pl_ord(const char *s) {
@@ -201,7 +291,6 @@ long long pl_ipow(long long base, long long exp) {
 
 // ── プロセス ───────────────────────────────────────────────
 
-_Noreturn void pl_exit(long long code) { exit((int)code); }
 
 // ── ファイル入出力（第14章）────────────────────────────────
 //
@@ -211,86 +300,18 @@ _Noreturn void pl_exit(long long code) { exit((int)code); }
 // ⚠️ 失敗したら panic で落とします。エラー値を返して利用者に検査させる形は
 //    `T | None` がまだ無いので書けません（第15章）。
 
-char *pl_read_file(const char *path) {
-    FILE *fp = fopen(path, "rb");
-    if (!fp) {
-        char buf[512];
-        snprintf(buf, sizeof(buf), "cannot open file: %s", path);
-        pl_panic(buf);
-    }
-    fseek(fp, 0, SEEK_END);
-    long size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
 
-    char *buf = pl_str_alloc((long long)size);
-    size_t got = fread(buf, 1, (size_t)size, fp);
-    buf[got] = '\0';
-    // ⚠️ テキストモードの差などで読めたバイト数が減ることがあるので、
-    //    実際に読めた長さで書き直します（長さは 8 バイト手前）。
-    ((long long *)buf)[-1] = (long long)got;
-    fclose(fp);
-    return buf;
-}
 
-void pl_write_file(const char *path, const char *text) {
-    FILE *fp = fopen(path, "wb");
-    if (!fp) {
-        char buf[512];
-        snprintf(buf, sizeof(buf), "cannot write file: %s", path);
-        pl_panic(buf);
-    }
-    fputs(text, fp);
-    fclose(fp);
-}
-
-// ⚠️ bool ではなく int を返します。extern の境界を bool は越えられません
-//    （14.2 節。C の _Bool と i1 の ABI が環境依存のため）。
-long long pl_file_exists(const char *path) {
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return 0;
-    fclose(fp);
-    return 1;
-}
 
 // ── コマンドライン引数と外部コマンド（第14章）──────────────
 //
 // ★ この 2 つが無いと、Polonium 製コンパイラは「コマンド」になれません
 //   （docs/design/self-hosting.md 3.4）。
 
-static long long g_argc;
-static char **g_argv;
 
-// 生成される C の main が、いちばん最初に呼びます。
-void pl_set_args(long long argc, char **argv) {
-    g_argc = argc;
-    g_argv = argv;
-}
 
-// ⚠️ system() が返すのは「終了コード」ではなく wait(2) の状態値です。
-//    そのまま返すと exit 3 が 768（3 << 8）に見えて驚くので、
-//    ここで終了コードに直します。境界の食い違いはランタイムで吸収します。
-// ファイルを削除する（失敗しても何もしない）。第20章。
-// ★ コンパイラは中間ファイル（.ll）を片付ける必要があります。
-void pl_remove(const char *path) { remove(path); }
 
-// 環境変数を読む（無ければ空文字列）。第18章。
-//
-// ★ stage1 が標準ライブラリの場所を知るために使います。C 版はビルド時に
-//   埋め込みますが（-DPLC_LIB_DIR）、Polonium にプリプロセッサは無いので
-//   実行時に読みます。C 版も同じ環境変数を見るようにして、挙動を揃えます。
-char *pl_getenv(const char *name) {
-    const char *v = getenv(name);
-    if (!v) return pl_str_from_cstr("");
-    return pl_str_from_cstr(v);
-}
 
-long long pl_system(const char *cmd) {
-    int st = system(cmd);
-    if (st == -1) return -1;
-    if (WIFEXITED(st)) return (long long)WEXITSTATUS(st);
-    if (WIFSIGNALED(st)) return (long long)(128 + WTERMSIG(st));
-    return (long long)st;
-}
 
 // ── list[T]（第10章）────────────────────────────────────────
 //
@@ -325,7 +346,7 @@ static void pl_list_grow(PlList *l) {
     if (l->len < l->cap) return;
     long long ncap = l->cap * 2;
     void *nd = pl_alloc(ncap * 8);
-    memcpy(nd, l->data, (size_t)l->len * 8);
+    pl_memcpy(nd, l->data, (long long)l->len * 8);
     l->data = nd;
     l->cap = ncap;
 }
@@ -335,8 +356,16 @@ static void pl_list_grow(PlList *l) {
 // ⚠️ 負の添字は「範囲外」です。Python の xs[-1] は採用しません。
 static void pl_list_check(PlList *l, long long i) {
     if (i < 0 || i >= l->len) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "index out of range: %lld (len=%lld)", i, l->len);
+        char buf[80];
+        char *w = buf;
+        const char *m = "index out of range: ";
+        while (*m) *w++ = *m++;
+        w += pl_itoa(i, w);
+        *w++ = ' ';
+        *w++ = '(';
+        w += pl_itoa(l->len, w);
+        *w++ = ')';
+        *w = '\0';
         pl_panic(buf);
     }
 }
@@ -389,30 +418,18 @@ char *pl_str_join(PlList *xs, const char *sep) {
     long long at = 0;
     for (long long i = 0; i < n; i++) {
         if (i > 0) {
-            memcpy(p + at, sep, (size_t)sep_len);
+            pl_memcpy(p + at, sep, (long long)sep_len);
             at += sep_len;
         }
         const char *e = ((char **)xs->data)[i];
         long long el = pl_str_len(e);
-        memcpy(p + at, e, (size_t)el);
+        pl_memcpy(p + at, e, (long long)el);
         at += el;
     }
     p[total] = '\0';
     return p;
 }
 
-// argv を list[str] にして返す（第14章）。
-//
-// ★ PlList を使うので、list の実装より後ろに置いています。
-//   argv の文字列はプロセスの寿命のあいだ有効なので、複製せずそのまま指します。
-PlList *pl_argv(void) {
-    PlList *l = pl_list_new();
-    // ⚠️ argv の文字列は C のものなので長さヘッダがありません。
-    //    Polonium の str として渡すには作り直す必要があります（第15章）。
-    for (long long i = 0; i < g_argc; i++)
-        pl_list_push_ptr(l, pl_str_from_cstr(g_argv[i]));
-    return l;
-}
 
 // 文字列の i 番目のバイトを int で返す（第15章）。
 //
@@ -423,8 +440,16 @@ PlList *pl_argv(void) {
 long long pl_byte_at(const char *s, long long i) {
     long long n = pl_str_len(s);
     if (i < 0 || i >= n) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "index out of range: %lld (len=%lld)", i, n);
+        char buf[80];
+        char *w = buf;
+        const char *m = "index out of range: ";
+        while (*m) *w++ = *m++;
+        w += pl_itoa(i, w);
+        *w++ = ' ';
+        *w++ = '(';
+        w += pl_itoa(n, w);
+        *w++ = ')';
+        *w = '\0';
         pl_panic(buf);
     }
     return (long long)(unsigned char)s[i];
@@ -434,8 +459,16 @@ long long pl_byte_at(const char *s, long long i) {
 char *pl_str_index(const char *s, long long i) {
     long long n = pl_str_len(s);
     if (i < 0 || i >= n) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "index out of range: %lld (len=%lld)", i, n);
+        char buf[80];
+        char *w = buf;
+        const char *m = "index out of range: ";
+        while (*m) *w++ = *m++;
+        w += pl_itoa(i, w);
+        *w++ = ' ';
+        *w++ = '(';
+        w += pl_itoa(n, w);
+        *w++ = ')';
+        *w = '\0';
         pl_panic(buf);
     }
     char *p = pl_str_alloc(1);
@@ -453,7 +486,7 @@ char *pl_str_copy(const char *s) {
     if (!s) return NULL;
     long long n = pl_str_len(s);
     char *p = pl_str_alloc(n);
-    memcpy(p, s, (size_t)n + 1);
+    pl_memcpy(p, s, (long long)n + 1);
     return p;
 }
 
@@ -503,7 +536,7 @@ void pl_rc_release(void *p, void (*value_drop)(void *)) {
     if (r->strong > 0) return;
     if (r->borrow > 0) pl_panic("rc: 借用したまま解放されました");
     if (value_drop) value_drop(r->value);
-    free(r);
+    pl_hook_free(r);
 }
 
 // 借用の数え札（仕様 §7.2。検査は**実行時**）
@@ -530,7 +563,7 @@ void pl_rc_unborrow(void *p) {
 //
 // ★ v1 は「解放しない」設計でした（docs/design/memory-model.md）。
 //   所有権（第22〜24章）で「誰が所有者か」が静的に決まったので、
-//   ここで初めて free() を入れます。
+//   ここで初めて pl_hook_free() を入れます。
 //
 // ⚠️ どれも「NULL を渡してよい」ようにしてあります。
 //    T | None のフィールドや、まだ入っていない値をそのまま渡せるからです。
@@ -539,7 +572,7 @@ void pl_drop_str(char *s) {
     if (!s) return;
     // ★ 文字列リテラル（.rodata）は解放しない
     if (((long long *)s)[-1] & PL_STR_STATIC) return;
-    free(s - 8);  // 確保したのはヘッダの先頭（pl_str_alloc を参照）
+    pl_hook_free(s - 8);  // 確保したのはヘッダの先頭（pl_str_alloc を参照）
 }
 
 // リストを解放する。
@@ -553,8 +586,8 @@ void pl_drop_list(PlList *l, void (*elem_drop)(void *)) {
         void **items = (void **)l->data;
         for (long long i = 0; i < l->len; i++) elem_drop(items[i]);
     }
-    free(l->data);
-    free(l);
+    pl_hook_free(l->data);
+    pl_hook_free(l);
 }
 
 // クラスのインスタンスそのものを解放する。
@@ -562,5 +595,5 @@ void pl_drop_list(PlList *l, void (*elem_drop)(void *)) {
 //   @drop.C の中で先に済ませてあります。
 void pl_drop_obj(void *p) {
     if (!p) return;
-    free(p);
+    pl_hook_free(p);
 }

@@ -29,10 +29,10 @@
 | [第27章](chapters/ch27-raises.md) | `raises` / `try` / `except` | エラー処理 | ✅ 完成 |
 | [第28章](chapters/ch28-rc.md) | `rc[T]`（共有所有） | 逃げ道の提供 | ✅ 完成 |
 | [第29章](chapters/ch29-selfhost-v2.md) | セルフホスト v2 | 不動点の再確立 | 🔨 第一段 完了 |
-| [第30章] | `unsafe` と `ptr[T]` | 低レベル入口 | 未着手 |
-| [第31章] | ランタイム分割と freestanding | libc からの離脱 | 未着手 |
-| [第32章] | ベアメタル起動（QEMU） | 画面に文字を出す | 未着手 |
-| [第33章] | 最小カーネル | 割り込み・ページング | 未着手 |
+| [第30章](chapters/ch30-unsafe-ptr.md) | `unsafe` と `ptr[T]` | 低レベル入口 | ✅ 完成 |
+| [第31章](chapters/ch31-runtime-split.md) | ランタイム分割と freestanding | libc からの離脱 | ✅ 完成 |
+| [第32章](chapters/ch32-baremetal.md) | ベアメタル起動（QEMU） | シリアルに文字を出す | ✅ 完成 |
+| [第33章](chapters/ch33-kernel.md) | 最小カーネル | 割り込み（タイマ・UART） | ✅ 完成 |
 
 ---
 
@@ -212,22 +212,32 @@ C 版と **1 バイト違わない IR** を出せるようになりました（`
 
 ## フェーズ D — OS へ
 
-### 第30章 `unsafe` と `ptr[T]`
-`unsafe:` ブロック、`ptr[T]`、`volatile_load/store`、`transmute`、`extern` の拡張。
-**完了条件**：`unsafe` の外でポインタを触ると落ちる。
+### 第30章 `unsafe` と `ptr[T]` ✅
+`unsafe:` ブロック、`ptr[T]`、低レベルの 6 操作（`ptr_at` / `addr_of` /
+`peek8` / `peek64` / `poke8` / `poke64`。読み書きは volatile）。
+**完了条件**（✅ 達成）：`unsafe` の外でポインタを触ると `E-UNSAFE-1` で落ちる。
+→ [第30章](chapters/ch30-unsafe-ptr.md)
 
-### 第31章 ランタイム分割と freestanding
-`runtime/core.c` と `runtime/hosted.c` に分割、フック 3 本（alloc / free / panic）、
-`pragma profile freestanding`、`pragma target`、`-c`（オブジェクト出力）。
-**完了条件**：`-nostdlib` でリンクできる `.o` が出る。
+### 第31章 ランタイム分割と freestanding ✅
+`runtime/core.c` と `runtime/hosted.c` に分割、フック **4 本**（alloc / free / write / panic）、
+`pragma target` / `pragma no_runtime`、`-c` / `--target=`。
+**完了条件**（✅ 達成）：`-c --target=riscv64-unknown-elf` で ELF のオブジェクトが出る。
+**★ プロファイル（hosted / freestanding）は要らなかった**——フックにしたので
+切り替えは `no_runtime` 1 つで足りた。
+→ [第31章](chapters/ch31-runtime-split.md)
 
-### 第32章 ベアメタル起動
-`@naked` / `asm` / `@section` / `@static`、リンカスクリプト、QEMU テストランナー。
-**完了条件**：QEMU のシリアルに Polonium で書いた文字列が出る。
+### 第32章 ベアメタル起動 ✅
+**ターゲットは RISC-V**（Q6 の決着）。`kernel/`（boot.s / link.ld / hooks.c / kernel.po）、
+`make kernel` / `make qemu` / `make qemu-test`。
+**完了条件**（✅ 達成）：QEMU のシリアルに Polonium で書いた文字列が出る。
+`@naked` / `@section` は要らなかった（起動コードはアセンブリ 1 ファイルで足りた）。
+→ [第32章](chapters/ch32-baremetal.md)
 
-### 第33章 最小カーネル
-GDT / IDT / 割り込み・タイマ・キーボード・ページング・簡易ヒープ（`pl_hook_alloc` の実装）。
-**完了条件**：キー入力をエコーする常駐カーネルが動く。
+### 第33章 最小カーネル ✅
+`asm` / `asm_in` / `asm_out`、タイマ割り込み（CLINT）、UART 受信、簡易ヒープ。
+GDT / IDT は RISC-V には無い（x86 の都合）。ページングは次の宿題。
+**完了条件**（✅ 達成）：タイマ割り込みを受けてカウントし、キー入力をエコーする。
+→ [第33章](chapters/ch33-kernel.md)
 
 ---
 

@@ -68,10 +68,10 @@ class Token:
     def init(self, kind: int, file: str, line: int, col: int, src: str,
              line_start: int, length: int) -> None:
         self.kind = kind
-        self.file = file
+        self.file = copy(file)
         self.line = line
         self.col = col
-        self.src = src
+        self.src = copy(src)
         self.line_start = line_start
         self.len = length
         self.raw = ""

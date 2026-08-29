@@ -4,6 +4,9 @@
 #   make            コンパイラをビルド
 #   make test       テストを全部実行（C 版のテスト + 解放の検査 + セルフホストの検証）
 #   make drop-asan  --drop で生成したプログラムを AddressSanitizer で検査（第25章）
+#   make kernel     ベアメタル（RISC-V）のカーネルをビルド（第32章）
+#   make qemu       そのカーネルを QEMU で動かす（Ctrl-A X で終了）
+#   make qemu-test  カーネルの出力を自動で検証する（第32〜33章）
 #   make selfhost-test  Polonium 版と C 版の出力を比較（5 本）
 #   make bootstrap      3 段ビルドと不動点の検証（第20章）
 #   make bootstrap-test Polonium 製コンパイラでテストを全部通す
@@ -48,12 +51,16 @@ OPT      := $(LLVM_BIN)/opt
 LLI      := $(LLVM_BIN)/lli
 LLVM_AS  := $(LLVM_BIN)/llvm-as
 
-# ── ランタイム（第9章）─────────────────────────────────────
+# ── ランタイム（第9章。第31章で 2 つに分割）─────────────────
 # ユーザーのプログラムにリンクされる C のコード。
+#
+#   core.c   … libc に依存しない核（ベアメタルでもリンクできる）
+#   hosted.c … PC 上で動かすときのフック実装 + ファイル入出力など
 #
 # ⚠️ コンパイラ本体（-O0 -g）とは目的が違うので -O2 でビルドします。
 #    ランタイムは「ユーザーのプログラムの一部」として動くからです。
-RUNTIME_SRC := runtime/runtime.c
+RUNTIME_CORE := runtime/core.c
+RUNTIME_HOSTED := runtime/hosted.c
 RUNTIME_OBJ := build/runtime.o
 RUNTIME_CFLAGS := -std=c11 -O2 -Wall -Wextra
 
@@ -77,9 +84,14 @@ all: $(TARGET) $(RUNTIME_OBJ)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $^ -o $@
 
-$(RUNTIME_OBJ): $(RUNTIME_SRC)
+# ★ 2 つを 1 つのオブジェクトにまとめます（ld -r ＝ 部分リンク）。
+#   こうしておくと、コンパイラ側は「ランタイムは .o が 1 本」という
+#   第9章からの前提のままで済みます。
+$(RUNTIME_OBJ): $(RUNTIME_CORE) $(RUNTIME_HOSTED) runtime/core.h
 	@mkdir -p build
-	$(CC) $(RUNTIME_CFLAGS) -c $< -o $@
+	$(CC) $(RUNTIME_CFLAGS) -c $(RUNTIME_CORE) -o build/core.o
+	$(CC) $(RUNTIME_CFLAGS) -c $(RUNTIME_HOSTED) -o build/hosted.o
+	ld -r -o $@ build/core.o build/hosted.o
 
 # -MMD -MP でヘッダの依存関係を自動生成する。
 # これがないと、ヘッダを直したのに再ビルドされず不思議なバグに悩まされます。
@@ -133,6 +145,48 @@ drop-asan: $(TARGET)
 asan: $(RUNTIME_OBJ)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -fsanitize=address,undefined $(SRCS) -o build/$(LANG_CC)-asan
+
+# ── ベアメタル（第32章〜）──────────────────────────────────
+#
+# ★ ターゲットは RISC-V（riscv64-unknown-elf）です。
+#   決め手は「手元にある道具」でした（第32章 32.1）：
+#     - Apple の clang には RISC-V のバックエンドが無い → Homebrew の LLVM を使う
+#     - x86 の ELF リンカは無いが、riscv64-elf-ld はある
+#     - qemu-system-riscv64 の virt マシンは -bios none で ELF を直接起動できる
+#
+# 使うもの: brew install llvm riscv64-elf-binutils qemu
+LLVM_CLANG := $(LLVM_BIN)/clang
+RV_LD      := riscv64-elf-ld
+RV_TRIPLE  := riscv64-unknown-elf
+RV_ARCH    := -march=rv64g -mabi=lp64 -mcmodel=medany -mno-relax
+RV_CFLAGS  := --target=$(RV_TRIPLE) $(RV_ARCH) -ffreestanding -O2
+KDIR       := build/kernel
+
+.PHONY: kernel qemu qemu-test
+
+kernel: $(TARGET) $(KDIR)/kernel.elf
+
+$(KDIR)/kernel.elf: kernel/kernel.po kernel/boot.s kernel/hooks.c kernel/link.ld                     runtime/core.c runtime/core.h $(TARGET)
+	@mkdir -p $(KDIR)
+	@echo "── Polonium 本体（.po → RISC-V の .o）"
+	PLC_CLANG=$(LLVM_CLANG) PLC_CFLAGS="$(RV_ARCH)" 	  ./$(TARGET) -c kernel/kernel.po -o $(KDIR)/kernel_main.o
+	@echo "── ランタイムの核（libc なし）"
+	$(LLVM_CLANG) $(RV_CFLAGS) -DPL_FREESTANDING -c runtime/core.c -o $(KDIR)/core.o
+	@echo "── カーネル側のフック（UART と bump allocator）"
+	$(LLVM_CLANG) $(RV_CFLAGS) -c kernel/hooks.c -o $(KDIR)/hooks.o
+	@echo "── 起動アセンブリ"
+	$(LLVM_CLANG) --target=$(RV_TRIPLE) $(RV_ARCH) -c kernel/boot.s -o $(KDIR)/boot.o
+	@echo "── リンク"
+	$(RV_LD) -T kernel/link.ld $(KDIR)/boot.o $(KDIR)/kernel_main.o 	         $(KDIR)/core.o $(KDIR)/hooks.o -o $@ 2>&1 | grep -v "RWX permissions" || true
+
+# QEMU で動かす（Ctrl-A X で抜ける）
+qemu: kernel
+	qemu-system-riscv64 -machine virt -bios none -kernel $(KDIR)/kernel.elf -nographic
+
+# ★ ベアメタルの自動検証：シリアルに出た文字列で判定します（第32章）。
+#   道具（qemu / riscv64-elf-ld）が無い環境ではスキップして緑にします。
+qemu-test: kernel
+	@tests/qemu.sh
 
 # ── 情報表示 ────────────────────────────────────────────────
 info:

@@ -45,9 +45,9 @@ class Module:
     next: Module | None   # 依存順のリスト（依存が先）
 
     def init(self, name: str, path: str, dir_: str) -> None:
-        self.name = name
-        self.path = path
-        self.dir = dir_
+        self.name = copy(name)
+        self.path = copy(path)
+        self.dir = copy(dir_)
         self.src = ""
         self.ll_path = ""
         self.state = 0
@@ -62,7 +62,7 @@ class Loader:
     stack: list[Module]
 
     def init(self, dir_: str) -> None:
-        self.dir = dir_
+        self.dir = copy(dir_)
         self.loaded = []
         self.stack = []
 
@@ -161,7 +161,7 @@ def cycle_path(ld: Loader, name: str) -> str:
         if started:
             parts.append(m.name)
         i = i + 1
-    parts.append(name)
+    parts.append(copy(name))
     return strings.join(parts, " → ")
 
 

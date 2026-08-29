@@ -93,7 +93,10 @@
 | B エラー処理 | [第27章](chapters/ch27-raises.md) ✅ | `raises` / `try` / `except`（アンワインドしない） |
 | B エラー処理 | [第28章](chapters/ch28-rc.md) ✅ | `rc[T]`（共有所有）。自動デリファレンス |
 | C セルフホスト v2 | [第29章](chapters/ch29-selfhost-v2.md) 🔨 | v2 の構文と意味づけを移植（第一段） |
-| D OS へ | 第30〜33章 | `unsafe` / `ptr[T]`、freestanding、ベアメタル起動、最小カーネル |
+| D OS へ | [第30章](chapters/ch30-unsafe-ptr.md) ✅ | `unsafe:` と `ptr[T]`（低レベルの入口） |
+| D OS へ | [第31章](chapters/ch31-runtime-split.md) ✅ | ランタイム分割（core / hosted）と `-c` / `--target` |
+| D OS へ | [第32章](chapters/ch32-baremetal.md) ✅ | **ベアメタル起動**（RISC-V / QEMU） |
+| D OS へ | [第33章](chapters/ch33-kernel.md) ✅ | 最小カーネル（タイマ割り込み・UART） |
 
 → 各章の目的と完了条件は [roadmap-v2.md](roadmap-v2.md)。
 

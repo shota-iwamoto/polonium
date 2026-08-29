@@ -33,6 +33,12 @@ typedef enum {
     //   （仕様 v2 §7）。代入は**移動ではなく共有**（カウント +1）になります。
     TY_RC,    // rc[T] → ptr（ヒープに { strong, borrow, 中身へのポインタ }）
 
+    // ── 第30章：低レベル（OS 開発向け）──
+    //
+    // ★ 生ポインタ。自動解放はしません（誰が解放するかは人間の責任。仕様 §10.2）。
+    //   触れるのは unsafe: の中だけです。
+    TY_PTR,   // ptr[T] → ptr
+
     // ── 以降の章で追加していく ──
     // TY_FLOAT,  // float
 } TypeKind;
@@ -96,6 +102,9 @@ Type *type_list(Type *elem);
 
 // rc[T] を作る（第28章）。list[T] と同じく、書かれた場所ごとに作ります。
 Type *type_rc(Type *elem);
+
+// ptr[T] を作る（第30章）
+Type *type_ptr(Type *elem);
 
 // T | None を作る（第15章）。
 // ★ 同じ T に対しては 1 個だけ作ります（elem 側にキャッシュする）。

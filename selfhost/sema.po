@@ -25,10 +25,10 @@ class Builtin:
     impl: str   # 呼び出すランタイム関数
 
     def init(self, name: str, arg: int, ret: int, impl: str) -> None:
-        self.name = name
+        self.name = copy(name)
         self.arg = arg
         self.ret = ret
-        self.impl = impl
+        self.impl = copy(impl)
 
 
 class Sema:
@@ -271,7 +271,7 @@ class Sema:
 
     def unique_ir_name(mut self, name: str) -> str:
         if not self.name_used(name):
-            self.used.append(name)
+            self.used.append(copy(name))
             return name
         i: int = 1
         while True:

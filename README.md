@@ -24,7 +24,7 @@ def main() -> int:
 | コンパイラ | `poloniumc`（C 実装 → **セルフホスト済み**） |
 | バックエンド | LLVM IR を直接出力（テキスト） |
 | 型付け | 静的・型注釈必須・実行時型情報なし |
-| 現在地 | v1 完成（セルフホスト不動点）／ v2（安全性）進行中・385 テスト |
+| 現在地 | v2（安全性・エラー処理・共有所有）実装済み／**RISC-V のベアメタルで動作**・388 テスト |
 
 ---
 
@@ -87,11 +87,34 @@ def read_config(path: str) -> Config raises IOError:   # 失敗は型で宣言�
 ```
 src/        C 版コンパイラ（stage0）
 selfhost/   Polonium 版コンパイラ（stage1 以降）
-runtime/    C 製ランタイム
+runtime/    C 製ランタイム（core = libc 非依存／hosted = PC 用）
 lib/        Polonium 製の標準ライブラリ
+kernel/     ベアメタル（RISC-V）のカーネル（第32〜33章）
 tests/      テストケースとテストランナー
 docs/       仕様・設計・章・開発ログ
 ```
+
+## ベアメタルで動かす（第32〜33章）
+
+```bash
+brew install llvm riscv64-elf-binutils qemu   # 必要な道具
+make qemu                                     # QEMU で起動（Ctrl-A X で終了）
+make qemu-test                                # 出力を自動で検証
+```
+
+```
+=================================
+ Polonium kernel on RISC-V (virt)
+=================================
+1 から 10 までの合計: 55
+tick 1
+tick 2
+tick 3
+3 回割り込みが来ました
+```
+
+**カーネル本体（`kernel/kernel.po`）に `unsafe` は 2 か所だけ**です。
+`print` も `for` も `list[str]` も、PC 上とまったく同じように書けます。
 
 **言語名が変わるときは** [docs/design/naming.md](docs/design/naming.md) の手順に従ってください
 （書き換えるのは `Makefile` / `src/langinfo.h` / `selfhost/langinfo.po` の 3 か所です）。

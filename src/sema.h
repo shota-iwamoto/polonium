@@ -40,6 +40,9 @@ struct Builtin_ {
 extern const Builtin BUILTINS[];
 bool is_builtin_name(const char *name);
 
+// 低レベルの組み込み（第30章。unsafe: の中でだけ使える）
+bool is_lowlevel_name(const char *name);
+
 
 // 全モジュールを検査し、各ノードの type / ir_name を埋める。
 // 問題があればエラーを表示して終了する（戻ってこない）。

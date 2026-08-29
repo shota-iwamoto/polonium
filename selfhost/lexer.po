@@ -126,8 +126,8 @@ class Lexer:
     puncts: list[str]
 
     def init(self, file: str, src: str) -> None:
-        self.file = file
-        self.src = src
+        self.file = copy(file)
+        self.src = copy(src)
         self.pos = 0
         self.line_start = 0
         self.line = 1
@@ -189,7 +189,7 @@ class Lexer:
     def push(mut self, kind: int, at: int, raw: str) -> token.Token:
         t: token.Token = token.Token(kind, self.file, self.line, self.col_of(at),
                                      self.src, self.line_start, len(raw))
-        t.raw = raw
+        t.raw = copy(raw)
         self.out.append(t)
         return t
 

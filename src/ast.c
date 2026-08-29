@@ -244,6 +244,15 @@ static void dump(Node *n, int depth) {
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
+        case ND_PRAGMA:
+            printf("(pragma %s)\n", n->name);
+            break;
+        case ND_UNSAFE:
+            printf("(unsafe\n");
+            dump(n->body, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
         case ND_RAISE:
             printf("(raise\n");
             dump(n->lhs, depth + 1);

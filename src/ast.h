@@ -66,6 +66,10 @@ typedef enum {
     ND_EXCEPT,  // except 節 → type_ref（エラー型）, name（as で束縛する名前）, body
     ND_RAISE,   // raise 文  → lhs（エラーオブジェクトの式）
 
+    // ── 第30章：低レベル ──
+    ND_UNSAFE,  // unsafe: ブロック → body
+    ND_PRAGMA,  // pragma 文 → name（設定名）, sval（値。文字列のとき）
+
     // ── 第14章以降で追加していく ──
 } NodeKind;
 

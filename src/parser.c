@@ -1048,6 +1048,43 @@ static Node *stmt(Parser *p) {
     if (tok_is_kw(t, "for")) return for_stmt(p);
     if (tok_is_kw(t, "try")) return try_stmt(p);
 
+    // ── 第31章：pragma 文 ──
+    //
+    //   pragma target "riscv64-unknown-elf"
+    //
+    // ★ 「このファイルはどの機械向けか」をソースに書けるようにします。
+    //   コマンドラインの --target より弱く、書いてあれば既定値を上書きします。
+    if (tok_is_kw(t, "pragma")) {
+        Token *kw = advance(p);
+        Token *name = peek(p);
+        if (name->kind != TK_IDENT)
+            error_at_hint(name, "pragma の後には設定名を書きます（例: pragma target \"...\"）",
+                          "設定名が必要です");
+        advance(p);
+        Node *n = new_node(ND_PRAGMA, kw);
+        n->name = name->text;
+        Token *v = peek(p);
+        if (v->kind == TK_STR) {
+            advance(p);
+            n->sval = v->text;
+            n->slen = v->slen;
+        }
+        return n;
+    }
+
+    // ── 第30章：unsafe: ブロック ──
+    //
+    // ★ 中でだけ生ポインタを触れます（仕様 §10.1）。
+    //   ⚠️ unsafe は「借用検査を止める」ものではありません。止めるのは
+    //     「ポインタ操作の禁止」だけです。
+    if (tok_is_kw(t, "unsafe")) {
+        Token *kw = advance(p);
+        expect_colon(p, "unsafe");
+        Node *n = new_node(ND_UNSAFE, kw);
+        n->body = block(p);
+        return n;
+    }
+
     // 対応する if が無い elif / else。
     // 放っておいても primary() の「予約語は変数名として使えません」に
     // 捕まりますが、それでは何が悪いのか分かりません。
@@ -1527,6 +1564,14 @@ static Node *program(Parser *p) {
         if (tok_is_kw(t, "extern")) {  // 第14章
             cur->next = extern_def(p);
             cur = cur->next;
+            continue;
+        }
+
+        // ★ 第31章：pragma はトップレベルに書く「設定」です（実行文ではない）
+        if (tok_is_kw(t, "pragma")) {
+            cur->next = stmt(p);
+            cur = cur->next;
+            expect_newline(p);
             continue;
         }
 

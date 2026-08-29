@@ -51,7 +51,7 @@ for f in "${CASES[@]}"; do
     fi
 
     # ★ ランタイムも一緒に ASan でビルドする（解放するのはランタイム側なので）
-    if ! clang -fsanitize=address -O0 "$TMP/$base.drop".*.ll "$ROOT/runtime/runtime.c" \
+    if ! clang -fsanitize=address -O0 "$TMP/$base.drop".*.ll "$ROOT/runtime/core.c" "$ROOT/runtime/hosted.c" \
             -o "$TMP/$base.asan" 2>"$TMP/$base.link"; then
         printf "  %sFAIL%s  %s（リンクに失敗）\n" "$C_NG" "$C_END" "$name"
         head -5 "$TMP/$base.link" | sed 's/^/          /'

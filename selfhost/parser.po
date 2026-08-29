@@ -490,7 +490,7 @@ class Parser:
     def hidden_decl(self, tok: token.Token | None, name: str,
                     init: ast.Node | None) -> ast.Node:
         n: ast.Node = ast.new_node(ast.ND_VARDECL, tok)
-        n.name = name
+        n.name = copy(name)
         n.rhs = init
         return n
 

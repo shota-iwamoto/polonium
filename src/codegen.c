@@ -169,6 +169,7 @@ static const char *llvm_type(Type *t) {
         case TY_CLASS: return "ptr";  // インスタンスへのポインタ（第12章）
         case TY_OPT: return "ptr";    // T | None（第15章）。None は null
         case TY_RC: return "ptr";     // rc[T]（第28章）
+        case TY_PTR: return "ptr";    // ptr[T]（第30章。生ポインタ）
         case TY_NULL: return "ptr";   // None リテラル
         default: UNREACHABLE();
     }
@@ -188,6 +189,7 @@ static const char *llvm_mem_type(Type *t) {
         case TY_CLASS: return "ptr";  // 第12章
         case TY_OPT: return "ptr";    // 第15章
         case TY_RC: return "ptr";     // 第28章（数え札付きの箱へのポインタ）
+        case TY_PTR: return "ptr";    // 第30章
         // ⚠️ TY_NONE はメモリ上の表現を持ちません。
         //    ここに来たら「None の変数を作ろうとしている」= コンパイラのバグ。
         default: UNREACHABLE();
@@ -1469,7 +1471,99 @@ static char *gen_builtin_call(Emitter *e, Node *n) {
 // ⚠️ void の呼び出しに結果を代入してはいけません。
 //      %t0 = call void @f()   ✗
 //      call void @f()         ✅
+// ── 第30章：低レベルの生成 ──────────────────────────────────
+//
+// ★ どれも命令 1〜2 個です。ランタイム関数は要りません（OS では呼べないので）。
+//   ⚠️ 読み書きは volatile にします。MMIO（装置のレジスタ）は
+//     「同じ番地を読んでも値が変わる」ので、最適化で消されると困ります。
+static char *gen_lowlevel(Emitter *e, Node *n) {
+    Node *a0 = n->args;
+
+    // ── 第33章：インラインアセンブリ ──
+    //
+    // ★ sideeffect を付けます。「値を返さないから消してよい」と
+    //   最適化に判断されると、csrw も wfi も消えてしまうためです。
+    if (strncmp(n->name, "asm", 3) == 0) {
+        // ⚠️ 利用者は C と同じ %0 で書きますが、LLVM IR のインライン
+        //    アセンブリでは $0 が「1 番目のオペランド」です。ここで直します
+        //    （RISC-V では % は %hi(...) のような再配置指定に使われるため、
+        //     そのままだとアセンブラが別物として読んでしまいます）。
+        StrBuf asmbuf;
+        sb_init(&asmbuf);
+        for (const char *c = a0->sval; *c; c++) {
+            if (*c == '%' && c[1] >= '0' && c[1] <= '9') {
+                sb_printf(&asmbuf, "$%c", c[1]);
+                c++;
+            } else if (*c == '$') {
+                sb_printf(&asmbuf, "$$");
+            } else {
+                sb_printf(&asmbuf, "%c", *c);
+            }
+        }
+        const char *text = sb_str(&asmbuf);
+        if (strcmp(n->name, "asm") == 0) {
+            sb_printf(&e->fn, "  call void asm sideeffect \"%s\", \"\"()\n", text);
+            return NULL;
+        }
+        if (strcmp(n->name, "asm_in") == 0) {
+            char *v = gen_expr(e, a0->next);
+            sb_printf(&e->fn,
+                      "  call void asm sideeffect \"%s\", \"r\"(i64 %s)\n", text, v);
+            return NULL;
+        }
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call i64 asm sideeffect \"%s\", \"=r\"()\n", t, text);
+        return t;
+    }
+
+    Node *a1 = a0 ? a0->next : NULL;
+    Node *a2 = a1 ? a1->next : NULL;
+
+    if (strcmp(n->name, "ptr_at") == 0) {
+        char *v = gen_expr(e, a0);
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = inttoptr i64 %s to ptr\n", t, v);
+        return t;
+    }
+    if (strcmp(n->name, "addr_of") == 0) {
+        char *v = gen_expr(e, a0);
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = ptrtoint ptr %s to i64\n", t, v);
+        return t;
+    }
+
+    bool is8 = strstr(n->name, "8") != NULL;
+    const char *ity = is8 ? "i8" : "i64";
+    char *p = gen_expr(e, a0);
+    char *off = gen_expr(e, a1);
+    char *addr = new_tmp(e);
+    sb_printf(&e->fn, "  %s = getelementptr %s, ptr %s, i64 %s\n", addr, ity, p, off);
+
+    if (strncmp(n->name, "peek", 4) == 0) {
+        char *v = new_tmp(e);
+        sb_printf(&e->fn, "  %s = load volatile %s, ptr %s\n", v, ity, addr);
+        if (!is8) return v;
+        char *z = new_tmp(e);
+        sb_printf(&e->fn, "  %s = zext i8 %s to i64\n", z, v);
+        return z;
+    }
+
+    // poke8 / poke64
+    char *val = gen_expr(e, a2);
+    if (is8) {
+        char *tr = new_tmp(e);
+        sb_printf(&e->fn, "  %s = trunc i64 %s to i8\n", tr, val);
+        val = tr;
+    }
+    sb_printf(&e->fn, "  store volatile %s %s, ptr %s\n", ity, val, addr);
+    return NULL;
+}
+
 static char *gen_call(Emitter *e, Node *n) {
+    // ★ 第30章：低レベルの組み込み（sema が ir_name を付けない目印）
+    if (!n->ir_name && !n->cls && !n->builtin && is_lowlevel_name(n->name))
+        return gen_lowlevel(e, n);
+
     if (n->builtin) return gen_builtin_call(e, n);
     if (n->cls) return gen_new(e, n);  // ★ 第12章：インスタンス生成
 
@@ -1523,6 +1617,9 @@ static char *gen_stmt(Emitter *e, Node *n) {
             e->scope = sc.outer;
             return last;
         }
+
+        // ★ 第30章：unsafe: は「検査のための印」なので、生成は中身そのまま
+        case ND_UNSAFE: return gen_stmt(e, n->body);
 
         case ND_IF: gen_if(e, n); return NULL;
         case ND_WHILE: gen_while(e, n); return NULL;
@@ -1884,7 +1981,8 @@ static void gen_c_main(Emitter *e, const char *main_ir_name) {
 // ★ 第13章：「1 ファイル = 1 モジュール = 1 つの .ll」（13.2 節）。
 //   import したモジュールのものは、使ったぶんだけ declare / 型定義の複製が
 //   自動で付いてきます（class_type / declare_extern が「出済みか」を見るため）。
-char *codegen(Module *mod, const char *main_ir_name, bool drop) {
+char *codegen(Module *mod, const char *main_ir_name, bool drop,
+              const char *triple) {
     Node *ast = mod->ast;
 
     Emitter e = {0};
@@ -1902,8 +2000,10 @@ char *codegen(Module *mod, const char *main_ir_name, bool drop) {
 
     // ⚠️ 規約 R11：target triple は必ず出力する。
     //    書かないと clang が -Woverride-module 警告を出します。
-    if (PLC_TARGET_TRIPLE[0])
-        sb_printf(&e.header, "target triple = \"%s\"\n", PLC_TARGET_TRIPLE);
+    // ★ 第31章：triple は外から渡します（--target / pragma target）。
+    //   NULL ならビルド時に埋め込んだ既定値（＝この機械のもの）。
+    if (!triple) triple = PLC_TARGET_TRIPLE;
+    if (triple[0]) sb_printf(&e.header, "target triple = \"%s\"\n", triple);
 
     // ② クラスの型定義（★ 使う側より先に、モジュールの先頭に出す）
     for (Node *d = ast->body; d; d = d->next) {
@@ -1913,6 +2013,7 @@ char *codegen(Module *mod, const char *main_ir_name, bool drop) {
     // ⑤ グローバル変数と関数定義
     for (Node *d = ast->body; d; d = d->next) {
         if (d->kind == ND_VARDECL) gen_global(&e, d);
+        // ★ 第31章：pragma は生成に何も出しません（main.c が読むだけ）
     }
     for (Node *d = ast->body; d; d = d->next) {
         // ★ 第14章：extern は宣言だけを出す（定義は C 側にある）

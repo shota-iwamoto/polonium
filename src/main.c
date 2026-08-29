@@ -48,6 +48,9 @@ static void usage(int status) {
             "  --deny-mut      読み取り専用の借用への書き換えを警告ではなくエラーにする\n"
             "  --explain-mut   呼び出しで変更される実引数を一覧表示して終了\n"
             "  --drop          スコープの出口に解放（drop）を挿入する\n"
+            "  -c              リンクせずオブジェクト（.o）を出す\n"
+            "  --target=<t>    生成する IR の target triple を指定する\n"
+            "                  （例: --target=riscv64-unknown-elf）\n"
             "  -O0|-O1|-O2|-O3 clang に渡す最適化レベル（既定: -O0）\n"
             "  -h, --help      この使い方を表示\n");
     exit(status);
@@ -73,6 +76,8 @@ typedef struct {
     int deny_borrow;  // --deny-borrow（第23章）
     int deny_mut;     // --deny-mut（第24章）
     int drop;         // --drop（第25章。解放を挿入する）
+    const char *target;  // --target=<triple>（第31章。ベアメタル向け）
+    int emit_obj;        // -c（リンクせずオブジェクトを出す。第31章）
 } Options;
 
 static Options parse_args(int argc, char **argv) {
@@ -104,6 +109,9 @@ static Options parse_args(int argc, char **argv) {
         if (strcmp(a, "--deny-mut") == 0) { o.deny_mut = 1; continue; }
         // ★ 第25章：解放（drop）の挿入。既定では入れません（決定 D16）。
         if (strcmp(a, "--drop") == 0) { o.drop = 1; continue; }
+        // ★ 第31章：ベアメタル向け。リンクは自分でやるので -c で止める。
+        if (strcmp(a, "-c") == 0) { o.emit_obj = 1; continue; }
+        if (strncmp(a, "--target=", 9) == 0) { o.target = a + 9; continue; }
         // ★ 第24章：呼び出し側に mut を書かせない代わりの道具（仕様 §5.3）。
         if (strcmp(a, "--explain-mut") == 0) { o.stage = STAGE_EXPLAIN_MUT; continue; }
 
@@ -182,6 +190,21 @@ int main(int argc, char **argv) {
     //    第29章で移植したら、ここも ownck を通すように変えます。
     if (opt.stage == STAGE_CHECK) return 0;
 
+    // ── 第31章：target triple を決める ──
+    //
+    //   ① --target=... が最優先
+    //   ② ソースの pragma target "..."
+    //   ③ ビルド時に埋め込んだ、この機械のもの（codegen の既定）
+    const char *triple = opt.target;
+    bool no_runtime = false;
+    for (Node *d = entry->ast->body; d; d = d->next) {
+        if (d->kind != ND_PRAGMA) continue;
+        if (!triple && strcmp(d->name, "target") == 0) triple = d->sval;
+        // ★ 第32章：ベアメタルでは C の main も argv も無い。
+        //   「@main のラッパを出さない」がこの pragma の意味です。
+        if (strcmp(d->name, "no_runtime") == 0) no_runtime = true;
+    }
+
     // ── ④ 所有権の検査（第22章）──
     //
     // ★ 既定は警告です。移動済みの値を使っていても、生成される IR は
@@ -202,7 +225,8 @@ int main(int argc, char **argv) {
 
     // ── ④ コード生成（モジュールごとに 1 本の .ll）──
     for (Module *m = mods; m; m = m->next) {
-        char *ir = codegen(m, m == entry ? sb_str(&main_ir) : NULL, opt.drop != 0);
+        const char *entry_main = (m == entry && !no_runtime) ? sb_str(&main_ir) : NULL;
+        char *ir = codegen(m, entry_main, opt.drop != 0, triple);
 
         if (opt.stage == STAGE_EMIT_IR) {
             // -S : IR を出して終了。複数モジュールなら区切りを入れて並べる。
@@ -215,6 +239,40 @@ int main(int argc, char **argv) {
         write_file(m->ll_path, ir);
     }
     if (opt.stage == STAGE_EMIT_IR) return 0;
+
+    // ── 第31章：-c ならオブジェクトを出して終わり ──
+    //
+    // ★ ベアメタル（第32章）では、リンクはこちらの仕事ではありません。
+    //   リンカスクリプトを渡すのも、起動アセンブリを混ぜるのも利用者側です。
+    //
+    // ⚠️ いまは 1 モジュールだけ対応します。import を含むカーネルは、
+    //    モジュールごとに .o を作って自分でリンクしてください。
+    if (opt.emit_obj) {
+        if (mods->next)
+            error("-c は 1 モジュールのファイルにだけ使えます"
+                  "（import があるときは、モジュールごとに分けてください）");
+
+        StrBuf oc;
+        sb_init(&oc);
+        // ★ RISC-V などは Apple の clang が対応していないことがあるので、
+        //   PLC_CLANG で使う clang を差し替えられるようにします。
+        const char *cc = getenv("PLC_CLANG");
+        if (!cc || !cc[0]) cc = "clang";
+        sb_printf(&oc, "%s %s -Wno-override-module -c '%s' -o '%s'", cc, opt.opt_level,
+                  entry->ll_path, opt.output);
+        if (triple) sb_printf(&oc, " --target=%s", triple);
+        const char *extra = getenv("PLC_CFLAGS");
+        if (extra && extra[0]) sb_printf(&oc, " %s", extra);
+
+        int orc = system(sb_str(&oc));
+        if (orc != 0) {
+            fprintf(stderr, "error: オブジェクトの生成に失敗しました\n  %s\n",
+                    sb_str(&oc));
+            return 1;
+        }
+        if (!opt.keep_ll) unlink(entry->ll_path);
+        return 0;
+    }
 
     // ── ⑤ clang に丸投げして実行ファイルを作る ──
     //

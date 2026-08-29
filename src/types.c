@@ -75,6 +75,14 @@ Type *type_rc(Type *elem) {
     return t;
 }
 
+// ptr[T]（第30章）。★ rc[T] と同じ作り
+Type *type_ptr(Type *elem) {
+    Type *t = xmalloc(sizeof(Type));
+    t->kind = TY_PTR;
+    t->elem = elem;
+    return t;
+}
+
 Type *type_class(char *name, struct Class *cls) {
     Type *t = new_type(TY_CLASS);
     t->name = name;
@@ -95,6 +103,7 @@ int type_size(Type *t) {
         case TY_LIST:
         case TY_CLASS:
         case TY_RC:   // 第28章：rc[T] もポインタ 1 個（指す先に数え札が付く）
+        case TY_PTR:  // 第30章：生ポインタ
         case TY_OPT: return 8;  // 第15章：T | None もポインタ 1 個
         default: UNREACHABLE();  // None は値を持たない
     }
@@ -115,6 +124,7 @@ bool type_equal(Type *a, Type *b) {
 
     // ★ 第28章：rc[T] も中身まで見る（rc[Node] と rc[Token] は別の型）
     if (a->kind == TY_RC) return type_equal(a->elem, b->elem);
+    if (a->kind == TY_PTR) return type_equal(a->elem, b->elem);
 
     // ★ 第12章：クラスは「同じ定義か」で比べます。名前の一致ではありません。
     //   今は 1 ファイルなので同名クラスは 1 つだけですが、第13章で import が
@@ -144,6 +154,12 @@ const char *type_name(Type *t) {
             return sb_str(&sb);
         }
         case TY_CLASS: return t->name;  // 第12章
+        case TY_PTR: {  // 第30章
+            StrBuf sb;
+            sb_init(&sb);
+            sb_printf(&sb, "ptr[%s]", type_name(t->elem));
+            return sb_str(&sb);
+        }
         case TY_RC: {  // 第28章
             StrBuf sb;
             sb_init(&sb);
