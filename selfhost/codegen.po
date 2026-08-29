@@ -114,6 +114,8 @@ class Emitter:
     def llvm_type(self, t: ast.Type) -> str:
         if t.kind == ast.TY_INT:
             return "i64"
+        if t.kind == ast.TY_FLOAT:
+            return "double"
         if t.kind == ast.TY_BOOL:
             return "i1"
         if t.kind == ast.TY_NONE:
@@ -138,6 +140,8 @@ class Emitter:
     def llvm_mem_type(self, t: ast.Type) -> str:
         if t.kind == ast.TY_INT:
             return "i64"
+        if t.kind == ast.TY_FLOAT:
+            return "double"
         if t.kind == ast.TY_BOOL:
             return "i8"
         if t.kind == ast.TY_STR:
@@ -155,6 +159,36 @@ class Emitter:
 
     # 二項演算子に対応する LLVM 命令
     # ⚠️ int は符号付きなので 's' の付く命令を使う（sdiv / ashr）
+    # ★ float は別命令（fadd など）。整数の add とはビット列の意味が違う。
+    def llvm_binop_f(self, op: int) -> str:
+        if op == ast.OP_ADD:
+            return "fadd"
+        if op == ast.OP_SUB:
+            return "fsub"
+        if op == ast.OP_MUL:
+            return "fmul"
+        if op == ast.OP_TRUEDIV:
+            return "fdiv"
+        panic("codegen: この演算子は float に来ません")
+        return "fadd"
+
+    # float の比較述語（ordered。NaN が絡むと必ず False）
+    def fcmp_pred(self, op: int) -> str:
+        if op == ast.OP_EQ:
+            return "oeq"
+        if op == ast.OP_NE:
+            return "one"
+        if op == ast.OP_LT:
+            return "olt"
+        if op == ast.OP_LE:
+            return "ole"
+        if op == ast.OP_GT:
+            return "ogt"
+        if op == ast.OP_GE:
+            return "oge"
+        panic("codegen: 比較演算子ではありません")
+        return "oeq"
+
     def llvm_binop(self, op: int) -> str:
         if op == ast.OP_ADD:
             return "add"
@@ -320,6 +354,11 @@ class Emitter:
             # 整数リテラルは命令を出す必要すらない（即値をそのまま書ける）
             return str(n.ival)
 
+        if n.kind == ast.ND_FLOAT:
+            # ★ 字句解析器が正規化した文字列を**そのまま**出す。
+            #   double を経由しないので、C 版と 1 バイトもずれない。
+            return n.sval
+
         if n.kind == ast.ND_BINOP:
             return self.gen_binop(n)
 
@@ -414,9 +453,16 @@ class Emitter:
                       ", i64 " + r + ")\n")
             return t
 
-        if ast.is_compare(n.op):
+        # ★ float の比較は fcmp、算術は fadd などの別命令
+        if ast.is_compare(n.op) and ot.kind == ast.TY_FLOAT:
+            self.emit("  " + t + " = fcmp " + self.fcmp_pred(n.op) +
+                      " double " + l + ", " + r + "\n")
+        elif ast.is_compare(n.op):
             self.emit("  " + t + " = icmp " + self.icmp_pred(n.op, ot) + " " +
                       self.llvm_type(ot) + " " + l + ", " + r + "\n")
+        elif ot.kind == ast.TY_FLOAT:
+            self.emit("  " + t + " = " + self.llvm_binop_f(n.op) +
+                      " double " + l + ", " + r + "\n")
         else:
             self.emit("  " + t + " = " + self.llvm_binop(n.op) + " " +
                       self.llvm_type(ot) + " " + l + ", " + r + "\n")
@@ -430,7 +476,11 @@ class Emitter:
             return v
 
         t: str = self.new_tmp()
-        if n.op == ast.OP_NEG:
+        nt: ast.Type = type_of(n)
+        if n.op == ast.OP_NEG and nt.kind == ast.TY_FLOAT:
+            # ★ float には専用の否定命令 fneg がある（符号ビットの反転）
+            self.emit("  " + t + " = fneg double " + v + "\n")
+        elif n.op == ast.OP_NEG:
             # ⚠️ LLVM に整数の neg 命令は無い。0 からの減算で表す
             self.emit("  " + t + " = sub i64 0, " + v + "\n")
         elif n.op == ast.OP_BITNOT:
@@ -495,7 +545,13 @@ class Emitter:
         return "i64"
 
     # 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる）
+    # ★ float はビットパターンのまま i64 のスロットに入れる（list の作りを
+    #   変えずに済む）。⚠️ 数値変換（sitofp）ではなく bitcast。
     def elem_to_slot(mut self, elem: ast.Type, v: str) -> str:
+        if elem.kind == ast.TY_FLOAT:
+            tf: str = self.new_tmp()
+            self.emit("  " + tf + " = bitcast double " + v + " to i64\n")
+            return tf
         if elem.kind != ast.TY_BOOL:
             return v
         t: str = self.new_tmp()
@@ -503,6 +559,10 @@ class Emitter:
         return t
 
     def slot_to_elem(mut self, elem: ast.Type, v: str) -> str:
+        if elem.kind == ast.TY_FLOAT:
+            tf: str = self.new_tmp()
+            self.emit("  " + tf + " = bitcast i64 " + v + " to double\n")
+            return tf
         if elem.kind != ast.TY_BOOL:
             return v
         t: str = self.new_tmp()
@@ -1326,6 +1386,11 @@ class Emitter:
         if type_of(n).kind == ast.TY_STR:
             lab: str = self.intern_str(rhs.sval)
             self.globals_.append(n.ir_name + " = global ptr " + lab + "\n")
+            return
+        # ★ float は値ではなく、字句解析器が正規化した文字列を出す
+        if type_of(n).kind == ast.TY_FLOAT:
+            self.globals_.append(n.ir_name + " = global double " +
+                                 rhs.sval + "\n")
             return
         self.globals_.append(n.ir_name + " = global " +
                              self.llvm_mem_type(type_of(n)) + " " +

@@ -71,6 +71,9 @@ typedef enum {
     ND_PRAGMA,  // pragma 文 → name（設定名）, sval（値。文字列のとき）
 
     // ── 第14章以降で追加していく ──
+
+    // ⚠️ 追加は**末尾に**。selfhost/ast.po が値を明示しているためです。
+    ND_FLOAT,   // 浮動小数点リテラル → sval（正規化済みの文字列。lexer.c 参照）
 } NodeKind;
 
 // 演算子の種類。
@@ -326,6 +329,7 @@ struct Node {
 // コンストラクタ
 Node *new_node(NodeKind kind, Token *tok);
 Node *new_int_node(Token *tok, long long value);
+Node *new_float_node(Token *tok, char *text);
 Node *new_bool_node(Token *tok, bool value);
 Node *new_str_node(Token *tok, char *bytes, int len);
 Node *new_binop_node(Token *tok, OpKind op, Node *lhs, Node *rhs);

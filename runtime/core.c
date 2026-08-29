@@ -112,6 +112,94 @@ void *pl_check_not_none(void *p) {
 
 // ── 出力（print のオーバーロード）──────────────────────────
 
+// ── double を 10 進の文字列にする（第34章）────────────────────
+//
+// ⚠️ **libc は使えません。** このランタイムはベアメタルでも動く必要があり、
+//    snprintf("%g") に頼れません（runtime/README.md）。そこで最小限の
+//    変換を自前で持ちます。
+//
+// 出力の規則（言語仕様 7 節。**この 1 か所が唯一の定義**です）:
+//   - NaN → "nan"、無限大 → "inf" / "-inf"
+//   - 小数部は最大 6 桁。末尾の 0 は落とすが、最低 1 桁は必ず残す（1.0）
+//   - |v| >= 1e18 または 0 < |v| < 1e-6 は指数表記（1.5e-9）
+//
+// ★ 6 桁に決め打つのは「短く読める」ことを優先した割り切りです。
+//   17 桁の往復保証（double → 文字列 → double が元に戻る）は**しません**。
+static long long pl_utoa(unsigned long long u, char *out) {
+    char tmp[24];
+    int n = 0;
+    if (u == 0) tmp[n++] = '0';
+    while (u > 0) {
+        tmp[n++] = (char)('0' + (u % 10));
+        u /= 10;
+    }
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+static long long pl_ftoa(double v, char *out) {
+    long long n = 0;
+
+    // NaN は自分自身と等しくない、という性質で見分けます
+    if (v != v) {
+        out[0] = 'n'; out[1] = 'a'; out[2] = 'n';
+        return 3;
+    }
+    // 無限大は ∞ - ∞ = NaN になる、という性質で見分けます
+    if (v - v != v - v) {
+        if (v < 0) out[n++] = '-';
+        out[n++] = 'i'; out[n++] = 'n'; out[n++] = 'f';
+        return n;
+    }
+    if (v < 0) {
+        out[n++] = '-';
+        v = -v;
+    }
+
+    // 大きすぎ・小さすぎるときは [1, 10) に正規化して指数を覚える
+    int exp10 = 0;
+    if (v != 0.0 && (v >= 1e18 || v < 1e-6)) {
+        while (v >= 10.0) { v /= 10.0; exp10++; }
+        while (v < 1.0)   { v *= 10.0; exp10--; }
+    }
+
+    // 整数部と、6 桁に丸めた小数部に分ける
+    unsigned long long ip = (unsigned long long)v;
+    double frac = v - (double)ip;
+    unsigned long long f = (unsigned long long)(frac * 1000000.0 + 0.5);
+    if (f >= 1000000ULL) {   // 繰り上がり（0.9999996 → 1.0）
+        f = 0;
+        ip++;
+    }
+
+    n += pl_utoa(ip, out + n);
+    out[n++] = '.';
+
+    // 小数部は必ず 6 桁書いてから、末尾の 0 を落とす
+    char fb[8];
+    long long fn = pl_utoa(f, fb);
+    for (long long i = 0; i < 6 - fn; i++) out[n++] = '0';
+    for (long long i = 0; i < fn; i++) out[n++] = fb[i];
+    while (out[n - 1] == '0' && out[n - 2] != '.') n--;
+
+    if (exp10 != 0) {
+        out[n++] = 'e';
+        if (exp10 < 0) {
+            out[n++] = '-';
+            exp10 = -exp10;
+        }
+        n += pl_utoa((unsigned long long)exp10, out + n);
+    }
+    return n;
+}
+
+void pl_print_float(double v) {
+    char buf[64];
+    long long n = pl_ftoa(v, buf);
+    buf[n++] = '\n';
+    pl_hook_write(buf, n);
+}
+
 void pl_print_int(long long v) {
     char buf[26];
     long long n = pl_itoa(v, buf);
@@ -221,6 +309,25 @@ char *pl_str_from_int(long long v) {
     pl_memcpy(p, buf, n + 1);
     return p;
 }
+
+char *pl_str_from_float(double v) {
+    char buf[64];
+    long long n = pl_ftoa(v, buf);
+    buf[n] = '\0';
+    char *p = pl_str_alloc(n);
+    pl_memcpy(p, buf, n + 1);
+    return p;
+}
+
+// int ↔ float の変換（言語仕様 7 節）。
+//
+// ★ 命令 1 つ（sitofp / fptosi）で済みますが、**組み込み関数の仕組みに
+//   そのまま乗せる**ためにランタイム関数にしています。コード生成器に
+//   float 専用の分岐を増やさずに済みます。
+// ⚠️ float → int は **0 方向への切り捨て**です（-1.7 → -1）。
+//    Python の int() と同じで、round() ではありません。
+double pl_float_from_int(long long v) { return (double)v; }
+long long pl_int_from_float(double v) { return (long long)v; }
 
 char *pl_str_from_bool(long long v) {
     return pl_str_from_cstr(v ? "True" : "False");

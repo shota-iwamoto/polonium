@@ -1,121 +1,73 @@
 # Polonium ドキュメント
 
-**Polonium** は、Python 風の文法をもつ **静的型付けのコンパイル言語** です。
-このリポジトリは、その処理系（コンパイラ）を **C言語 + LLVM** で 1 から自作し、
-最終的に **セルフホスト**（Polonium で書いたコンパイラで Polonium をコンパイルできる状態）
-に到達するまでの記録と教材です。
+**Polonium** は、Python の文法をもつ静的型付けのコンパイル言語です。
+GC を持たず、所有権と借用の検査でメモリ安全性を確保します。
 
-このドキュメント群だけを読めば、**まったく同じものをゼロから再現できる**ことを目標にしています。
-
-**現在地**：v1（第1〜20章。Python の文法・静的型・セルフホスト）は**完成**しました。
-いまは **v2 —— Rust のメモリ安全性を、Rust の書きにくさ抜きで入れる**——に取り組んでいます。
-その先の目標は **Polonium で OS を書けるようにすること**です。
-
-> 作業を始めるときは、まず [tasks.md](tasks.md)（作業ボード）を読んでください。
+```python
+def main() -> int:
+    for i in range(1, 4):
+        print("hello " + str(i))
+    return 0
+```
 
 ---
 
-## 0. まず読むもの
-
-> **Polonium を「書く」ために来た方へ** — このドキュメント群は
-> **コンパイラの作り方**の教材です。言語の使い方だけを知りたい場合は
-> **[tutorial.md](tutorial.md)（Polonium 入門）**を読んでください。30 分で読み切れます。
-
-| 順番 | ドキュメント | 内容 |
-|---|---|---|
-| 0 | [tutorial.md](tutorial.md) | **Polonium 入門** — 言語の使い方（コンパイラを作らない人はこれだけでよい） |
-| 1 | [tasks.md](tasks.md) | **作業ボード** — いまの状態・次の一手・決まっていること |
-| 2 | [00-introduction.md](00-introduction.md) | なぜ作るのか / コンパイラとは何か / 全体像 |
-| 3 | [roadmap.md](roadmap.md) | v1（第1〜20章）のロードマップと進捗表 |
-| 4 | [roadmap-v2.md](roadmap-v2.md) | **v2（第21〜33章）のロードマップ** — 安全性と OS へ |
-| 5 | [reference/glossary.md](reference/glossary.md) | 用語集（わからない言葉が出たらここ） |
-
-## 1. 設計ドキュメント（What を決める）
-
-「何を作るのか」を先に固めます。実装より先にこちらを読んでください。
+## 使う
 
 | ドキュメント | 内容 |
 |---|---|
-| [spec/language-spec.md](spec/language-spec.md) | **言語仕様 v1** — 構文・意味・組み込み関数 |
-| [spec/safety-spec.md](spec/safety-spec.md) | **言語仕様 v2（安全性モデル）** — 所有権・借用・可変性・エラー処理・unsafe |
-| [spec/grammar.md](spec/grammar.md) | **文法定義（EBNF）** — パーサを書くときの唯一の正解 |
-| [spec/type-system.md](spec/type-system.md) | **型システム** — 型の一覧・型付け規則・型検査アルゴリズム |
-| [design/architecture.md](design/architecture.md) | **コンパイラ全体アーキテクチャ** — パス構成とデータの流れ |
-| [design/ir-conventions.md](design/ir-conventions.md) | **LLVM IR 生成規約** — どう IR に落とすかの取り決め |
-| [design/memory-model.md](design/memory-model.md) | **メモリモデル** — 値の表現・確保・寿命 |
-| [design/self-hosting.md](design/self-hosting.md) | **セルフホスト計画** — ブートストラップ戦略と検証方法 |
-| [design/ownership.md](design/ownership.md) | **所有権・借用の実装設計** — 新パス ownck・データフロー解析・drop 挿入 |
-| [design/error-handling.md](design/error-handling.md) | **エラー処理の実装設計** — raises / try / except をどう IR に落とすか |
-| [design/os-support.md](design/os-support.md) | **OS 開発に向けた設計** — freestanding・unsafe・ベアメタル |
-| [design/naming.md](design/naming.md) | **名前づけの規約と改名手順** — 言語名が変わっても壊れない構造 |
+| **[tutorial.md](tutorial.md)** | **Polonium 入門** — Python との差分に絞った案内。まずこれ |
+| [reference/cli.md](reference/cli.md) | `poloniumc` のコマンドライン・リファレンス |
+| [spec/stdlib.md](spec/stdlib.md) | 標準ライブラリ・リファレンス（`strings` / `io` / `sys` / `dict`） |
 
-## 2. リファレンス（前提知識の補習）
+## 仕様
+
+言語がどう振る舞うかの**唯一の正解**です。実装と食い違ったら、どちらかが間違いです。
 
 | ドキュメント | 内容 |
 |---|---|
-| [reference/llvm-ir-primer.md](reference/llvm-ir-primer.md) | LLVM IR 入門。手で IR を書いて動かす |
-| [reference/toolchain.md](reference/toolchain.md) | clang / llc / opt / lli の使い方チートシート |
+| [spec/language-spec.md](spec/language-spec.md) | **言語仕様** — 字句・型・式・文・プログラム構造・組み込み関数 |
+| [spec/safety-spec.md](spec/safety-spec.md) | **安全性の仕様** — 所有権・借用・可変性・解放・エラー処理・`unsafe` |
+| [spec/type-system.md](spec/type-system.md) | **型システム** — 型の一覧と型付け規則 |
+| [spec/grammar.md](spec/grammar.md) | **文法定義（EBNF）** |
+
+## 設計
+
+処理系（`poloniumc`）がどう作られているかです。**言語を使うだけなら読む必要はありません。**
+
+| ドキュメント | 内容 |
+|---|---|
+| [design/architecture.md](design/architecture.md) | パス構成とデータの流れ |
+| [design/ir-conventions.md](design/ir-conventions.md) | LLVM IR の生成規約 |
+| [design/memory-model.md](design/memory-model.md) | 値の表現・確保・寿命 |
+| [design/ownership.md](design/ownership.md) | 所有権検査（`ownck`）の実装 |
+| [design/error-handling.md](design/error-handling.md) | `raises` / `try` / `except` の実装 |
+| [design/os-support.md](design/os-support.md) | freestanding・`unsafe`・ベアメタル |
+| [design/self-hosting.md](design/self-hosting.md) | ブートストラップと不動点の検証 |
+| [design/naming.md](design/naming.md) | 名前づけの規約 |
+
+## これから
+
+| ドキュメント | 内容 |
+|---|---|
+| **[roadmap.md](roadmap.md)** | **到達点と、これから入れるもの** — 機能ごとの優先度と設計 |
+| [design/future-features.md](design/future-features.md) | 未実装機能の設計（ジェネリクス・クロージャ・多相ほか） |
+
+## その他
+
+| ドキュメント | 内容 |
+|---|---|
 | [reference/glossary.md](reference/glossary.md) | 用語集 |
-
-## 3. 章（How を実装する）
-
-各章は「**読む → 手を動かす → テストが通る**」で完結します。
-章の終わりには必ず**動くコンパイラ**が残ります。
-
-| 章 | タイトル | 状態 |
-|---|---|---|
-| [第1章](chapters/ch01-setup-and-minimal-compiler.md) | 環境構築と最小コンパイラ（整数を返す） | ✅ 完成 |
-| [第2章](chapters/ch02-arithmetic-and-precedence.md) | 四則演算と演算子の優先順位 | ✅ 完成 |
-| [第3章](chapters/ch03-diagnostics.md) | エラー報告と診断メッセージ | ✅ 完成 |
-| [第4章](chapters/ch04-indentation.md) | インデント構文（NEWLINE / INDENT / DEDENT） | ✅ 完成 |
-| [第5章](chapters/ch05-variables-and-typecheck.md) | 変数と型検査パスの導入 | ✅ 完成 |
-| [第6章](chapters/ch06-bool-and-logical-ops.md) | bool・比較演算・論理演算 | ✅ 完成 |
-| [第7章](chapters/ch07-control-flow.md) | 制御構文（if / elif / else / while） | ✅ 完成 |
-| [第8章](chapters/ch08-functions.md) | 関数定義と呼び出し | ✅ 完成 |
-| [第9章](chapters/ch09-strings-and-runtime.md) | 文字列と C ランタイム連携 | ✅ 完成 |
-| [第10章](chapters/ch10-list.md) | list[T]（動的配列） | ✅ 完成 |
-| [第11章](chapters/ch11-for-and-range.md) | for 文と range | ✅ 完成 |
-| [第12章](chapters/ch12-class.md) | class（構造体とメソッド） | ✅ 完成 |
-| [第13章](chapters/ch13-modules.md) | モジュールと import | ✅ 完成 |
-| [第14章](chapters/ch14-stdlib.md) | 標準ライブラリ | ✅ 完成 |
-| [第15章](chapters/ch15-nullable.md) | セルフホスト準備（T \| None と棚卸し） | ✅ 完成 |
-| [第16章](chapters/ch16-selfhost-lexer.md) | Polonium で字句解析器を書く | ✅ 完成 |
-| [第17章](chapters/ch17-selfhost-parser.md) | Polonium で構文解析器を書く | ✅ 完成 |
-| [第18章](chapters/ch18-selfhost-sema.md) | Polonium で型検査器を書く | ✅ 完成 |
-| [第19章](chapters/ch19-selfhost-codegen.md) | Polonium でコード生成器を書く | ✅ 完成 |
-| [第20章](chapters/ch20-bootstrap.md) | ブートストラップと不動点検証 | ✅ 完成 |
-
-## 4. v2 の章（第21章〜。これから書く）
-
-| フェーズ | 章 | 内容 |
-|---|---|---|
-| A 安全性 | [第21章](chapters/ch21-v2-foundation.md) ✅ | v2 の土台（キーワードと `own` / `mut` の構文） |
-| A 安全性 | [第22章](chapters/ch22-move-check.md) ✅ | ムーブ検査（use-after-move）。新パス `ownck` |
-| A 安全性 | [第23章](chapters/ch23-borrow.md) ✅ | 借用（保存・返却の禁止）。ライフタイム注釈なしの S2 |
-| A 安全性 | [第24章](chapters/ch24-mutability.md) ✅ | 可変性 `mut` と借用の衝突。`--explain-mut` |
-| A 安全性 | [第25章](chapters/ch25-drop.md) ✅ | 解放（drop 挿入）。**初めて free する** |
-| A 安全性 | [第26章](chapters/ch26-migration.md) ✅ | 既存コードの v2 移行。**仕様が壊れて直した話** |
-| B エラー処理 | [第27章](chapters/ch27-raises.md) ✅ | `raises` / `try` / `except`（アンワインドしない） |
-| B エラー処理 | [第28章](chapters/ch28-rc.md) ✅ | `rc[T]`（共有所有）。自動デリファレンス |
-| C セルフホスト v2 | [第29章](chapters/ch29-selfhost-v2.md) 🔨 | v2 の構文と意味づけを移植（第一段） |
-| D OS へ | [第30章](chapters/ch30-unsafe-ptr.md) ✅ | `unsafe:` と `ptr[T]`（低レベルの入口） |
-| D OS へ | [第31章](chapters/ch31-runtime-split.md) ✅ | ランタイム分割（core / hosted）と `-c` / `--target` |
-| D OS へ | [第32章](chapters/ch32-baremetal.md) ✅ | **ベアメタル起動**（RISC-V / QEMU） |
-| D OS へ | [第33章](chapters/ch33-kernel.md) ✅ | 最小カーネル（タイマ割り込み・UART） |
-
-→ 各章の目的と完了条件は [roadmap-v2.md](roadmap-v2.md)。
-
-## 5. 作業ログ
-
-- [tasks.md](tasks.md) — 作業ボード（いまの状態・次の一手・未決事項）
-- [dev-log.md](dev-log.md) — 日付順の作業記録・判断の理由・つまずきメモ
+| [../old/](../old/) | 処理系を作っていく過程の記録（旧資料。現在の実装の説明ではありません） |
 
 ---
 
-## このドキュメントの読み方の約束
+## 実装の現在地
 
-- **📖 解説** … 概念の説明。読むだけ。
-- **✍️ 手を動かす** … ファイルを作る／コマンドを打つ。必ず実行する。
-- **✅ 確認** … ここで動作確認する。通らなければ次に進まない。
-- **🤔 なぜ？** … 設計判断の理由。飛ばしても動くが、読むと力がつく。
-- **⚠️ 落とし穴** … よくある失敗。
+| | |
+|---|---|
+| 処理系 | C 実装（stage0）約 11,000 行 ＋ Polonium 実装（stage1）約 7,500 行 |
+| セルフホスト | **到達済み** — stage2 と stage3 がバイト単位で一致（不動点） |
+| テスト | 388 件 ＋ 2 実装の出力比較 236 件 ＋ AddressSanitizer 11 件 |
+| 対応環境 | Linux / macOS / Windows（MSYS2）、RISC-V ベアメタル |
+| CI | 4 ジョブすべて GitHub Actions で常時検証 |

@@ -90,6 +90,8 @@ class Parser:
             return "ファイルの終わり"
         if kind == token.TK_INT:
             return "整数"
+        if kind == token.TK_FLOAT:
+            return "浮動小数点数"
         if kind == token.TK_PUNCT:
             return "記号"
         if kind == token.TK_IDENT:
@@ -144,6 +146,9 @@ class Parser:
         if t.kind == token.TK_INT:
             self.advance()
             return ast.new_int_node(t, t.ival)
+        if t.kind == token.TK_FLOAT:
+            self.advance()
+            return ast.new_float_node(t, copy(t.text))
         if t.kind == token.TK_IDENT:
             self.advance()
             return ast.new_var_node(t, t.text)

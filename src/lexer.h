@@ -27,8 +27,9 @@ typedef enum {
     TK_INDENT,   // ブロックの開始
     TK_DEDENT,   // ブロックの終了
 
-    // ── 第5章以降で追加していく ──
-    // TK_FLOAT,
+    // ⚠️ 追加は**末尾に**。selfhost/token.po が値を明示しているので、
+    //    途中に足すと 2 つの実装で番号がずれます。
+    TK_FLOAT,    // 浮動小数点リテラル → text（正規化済みの文字列）
 } TokenKind;
 
 typedef struct Token Token;
@@ -47,7 +48,10 @@ struct Token {
 
     // ── 値（kind によって使い分ける）──
     long long ival;  // TK_INT
-    char *text;      // TK_IDENT / TK_KEYWORD / TK_STR（NUL 終端した複製）
+    char *text;      // TK_IDENT / TK_KEYWORD / TK_STR / TK_FLOAT（NUL 終端した複製）
+                     //   ★ TK_FLOAT は **値ではなく文字列**で持ちます。理由は
+                     //     src/lexer.c の read_number を参照（セルフホスト版と
+                     //     同じ IR を出すため／実装言語に float が要らないため）
                      //   TK_STR はエスケープを解決した後の中身
     int slen;        // TK_STR のバイト長。
                      // ⚠️ 将来 "a\0b" を許すと strlen では測れないので、

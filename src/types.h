@@ -39,8 +39,10 @@ typedef enum {
     //   触れるのは unsafe: の中だけです。
     TY_PTR,   // ptr[T] → ptr
 
-    // ── 以降の章で追加していく ──
-    // TY_FLOAT,  // float
+    // ⚠️ 追加は**末尾に**。selfhost/ast.po が値を明示しているので、
+    //    途中に足すと 2 つの実装で番号がずれます。
+    TY_FLOAT, // float → double（IEEE 754 倍精度。第34章）
+
 } TypeKind;
 
 // クラス定義の実体は ast.h にあります（フィールドの並びとメソッドを持つため）。
@@ -74,6 +76,7 @@ struct Type {
 //   型の比較は必ず type_equal() を通します（== で直接比べない）。
 extern Type *ty_int;
 extern Type *ty_bool;
+extern Type *ty_float;
 extern Type *ty_none;
 extern Type *ty_str;
 extern Type *ty_null;  // None リテラルの型（第15章）

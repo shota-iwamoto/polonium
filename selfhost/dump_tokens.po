@@ -22,6 +22,9 @@ def format_token(i: int, t: token.Token) -> str:
     # 仮想トークンと EOF は長さ 0 なので表示する実体がない
     if t.kind == token.TK_INT:
         parts.append(str(t.ival))
+    elif t.kind == token.TK_FLOAT:
+        # ★ 正規化した後の文字列を出します（ソースのままではありません）
+        parts.append(t.text)
     elif t.kind == token.TK_EOF or t.kind == token.TK_NEWLINE:
         parts.append("")
     elif t.kind == token.TK_INDENT or t.kind == token.TK_DEDENT:

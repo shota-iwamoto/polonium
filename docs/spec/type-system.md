@@ -64,7 +64,7 @@ if (t->kind == TY_CLASS) { ... t->cls ... }   // フラグ方式だと Token | N
 フラグだと、既存の判定を `Token | None` がすり抜けて**実行時に壊れます**。
 種類を分ければ、判定を書き忘れた場所は
 **「型 'Token | None' にフィールドはありません」で止まります**。
-（[ch15](../chapters/ch15-nullable.md) 15.2 節）
+（[ch15](../../old/chapters/ch15-nullable.md) 15.2 節）
 
 ### プリミティブ型はシングルトンにする
 

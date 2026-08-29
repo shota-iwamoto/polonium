@@ -92,7 +92,7 @@ sudo make install            # 既定は /usr/local
 make install PREFIX=$HOME/.local   # 自分の環境だけに入れるなら
 
 poloniumc hello.po -o hello  # どこからでも呼べる
-poloniumc --version          # → poloniumc 0.1.0 (stage0)
+poloniumc --version          # → poloniumc 0.2.0 (stage0)
 ```
 
 ### よく使うコマンド
@@ -118,22 +118,21 @@ make info                  # 使っている clang・triple などの現在値
 ## ドキュメント
 
 **言語の使い方を知りたい方は [docs/tutorial.md](docs/tutorial.md)（Polonium 入門）から。**
-30 分で読み切れます。以下はコンパイラの作り方（本編）です。
-
-**すべての判断は `docs/` にあります。コードより先にドキュメントを読んでください。**
+30 分で読み切れます。
 
 | | |
 |---|---|
-| [docs/tasks.md](docs/tasks.md) | **作業ボード** — いまの状態と次の一手 |
 | [docs/README.md](docs/README.md) | ドキュメントの入口（全体の地図） |
-| [docs/spec/language-spec.md](docs/spec/language-spec.md) | 言語仕様 v1 |
-| [docs/spec/safety-spec.md](docs/spec/safety-spec.md) | **言語仕様 v2 — 安全性モデル**（所有権・借用・エラー処理） |
-| [docs/roadmap-v2.md](docs/roadmap-v2.md) | 第21〜33章のロードマップ（安全性 → セルフホスト v2 → OS） |
-| [docs/dev-log.md](docs/dev-log.md) | 開発ログ（判断の理由とつまずき） |
+| [docs/tutorial.md](docs/tutorial.md) | **入門** — 言語の使い方 |
+| [docs/reference/cli.md](docs/reference/cli.md) | `poloniumc` のオプション |
+| [docs/spec/](docs/spec/) | **言語仕様** — 構文・型・安全性・標準ライブラリ |
+| [docs/design/](docs/design/) | **処理系の設計** — パス構成・IR 規約・所有権検査 |
+| [docs/roadmap.md](docs/roadmap.md) | 到達点と、これから入れるもの |
+| [old/](old/) | 処理系を作っていく過程の記録（旧資料） |
 
 ---
 
-## v2 でやろうとしていること
+## 安全性の考え方
 
 Rust の保証（use-after-free / 二重解放 / データ競合 / null の排除）を入れつつ、
 **Rust の記法は持ち込みません**。書かせるのは `own` / `mut` / `raises` の 3 つだけです。
@@ -166,10 +165,11 @@ runtime/    C 製ランタイム（core = libc 非依存／hosted = PC 用）
 lib/        Polonium 製の標準ライブラリ
 kernel/     ベアメタル（RISC-V）のカーネル（第32〜33章）
 tests/      テストケースとテストランナー
-docs/       仕様・設計・章・開発ログ
+docs/       言語仕様・処理系の設計・入門
+old/        処理系を作っていく過程の記録（旧資料）
 ```
 
-## ベアメタルで動かす（第32〜33章）
+## ベアメタルで動かす（RISC-V）
 
 ```bash
 brew install llvm riscv64-elf-binutils qemu   # 必要な道具

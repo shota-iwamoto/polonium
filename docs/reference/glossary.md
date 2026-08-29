@@ -365,7 +365,7 @@ Polonium のオブジェクト（class, list, 実行時の文字列）はここ�
 
 ### AddressSanitizer (ASan)
 メモリバグ（範囲外アクセス、use-after-free）を実行時に検出する clang の機能。
-**コンパイラ開発では必須の道具。** → [toolchain.md](toolchain.md) 第7節
+**コンパイラ開発では必須の道具。** → [toolchain.md](../../old/reference/toolchain.md) 第7節
 
 ### インクリメンタル開発 (incremental development)
 **常に動く状態を保ちながら**少しずつ機能を足す進め方。

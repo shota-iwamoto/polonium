@@ -91,6 +91,7 @@ static const char *tok_kind_ja(TokenKind kind) {
     switch (kind) {
         case TK_EOF: return "ファイルの終わり";
         case TK_INT: return "整数";
+        case TK_FLOAT: return "浮動小数点数";
         case TK_PUNCT: return "記号";
         case TK_IDENT: return "名前";
         case TK_KEYWORD: return "予約語";
@@ -164,6 +165,10 @@ static Node *primary(Parser *p) {
     if (t->kind == TK_INT) {
         advance(p);
         return new_int_node(t, t->ival);
+    }
+    if (t->kind == TK_FLOAT) {
+        advance(p);
+        return new_float_node(t, t->text);
     }
     if (t->kind == TK_IDENT) {
         advance(p);

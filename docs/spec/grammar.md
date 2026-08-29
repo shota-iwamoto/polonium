@@ -29,7 +29,9 @@ DEC        ::= digit { digit | "_" }
 HEX        ::= "0" ("x"|"X") hexdigit { hexdigit | "_" }
 OCT        ::= "0" ("o"|"O") octdigit { octdigit | "_" }
 BIN        ::= "0" ("b"|"B") bindigit { bindigit | "_" }
-FLOAT      ::= digit { digit | "_" } "." { digit | "_" } [ exponent ]
+(* ⚠️ 小数点の後には**必ず数字が要ります**（`1.` は FLOAT ではない）。
+   `1.foo` のような書き方と食い違わせないためです。 *)
+FLOAT      ::= digit { digit | "_" } "." digit { digit | "_" } [ exponent ]
              | digit { digit | "_" } exponent
 exponent   ::= ("e"|"E") [ "+" | "-" ] digit { digit }
 

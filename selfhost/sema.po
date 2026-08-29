@@ -59,11 +59,16 @@ class Sema:
             Builtin("print", ast.TY_INT, ast.TY_NONE, "pl_print_int"),
             Builtin("print", ast.TY_STR, ast.TY_NONE, "pl_print_str"),
             Builtin("print", ast.TY_BOOL, ast.TY_NONE, "pl_print_bool"),
+            Builtin("print", ast.TY_FLOAT, ast.TY_NONE, "pl_print_float"),
             Builtin("len", ast.TY_STR, ast.TY_INT, "pl_str_len"),
             Builtin("len", ast.TY_LIST, ast.TY_INT, "pl_list_len"),
             Builtin("str", ast.TY_INT, ast.TY_STR, "pl_str_from_int"),
             Builtin("str", ast.TY_BOOL, ast.TY_STR, "pl_str_from_bool"),
+            Builtin("str", ast.TY_FLOAT, ast.TY_STR, "pl_str_from_float"),
             Builtin("int", ast.TY_STR, ast.TY_INT, "pl_str_to_int"),
+            # 第34章：int ↔ float。⚠️ 暗黙変換はしないので必ずここを通す
+            Builtin("int", ast.TY_FLOAT, ast.TY_INT, "pl_int_from_float"),
+            Builtin("float", ast.TY_INT, ast.TY_FLOAT, "pl_float_from_int"),
             Builtin("ord", ast.TY_STR, ast.TY_INT, "pl_ord"),
             Builtin("chr", ast.TY_INT, ast.TY_STR, "pl_chr"),
             Builtin("exit", ast.TY_INT, ast.TY_NONE, "pl_exit"),
@@ -86,6 +91,8 @@ class Sema:
             return unwrap_type(p.none_)
         if kind == ast.TY_STR:
             return unwrap_type(p.str_)
+        if kind == ast.TY_FLOAT:
+            return unwrap_type(p.float_)
         if kind == ast.TY_NULL:
             return unwrap_type(p.null_)
         panic("sema: 未知のプリミティブ型")
@@ -103,6 +110,9 @@ class Sema:
     def ty_str(self) -> ast.Type:
         return self.prim(ast.TY_STR)
 
+    def ty_float(self) -> ast.Type:
+        return self.prim(ast.TY_FLOAT)
+
     def ty_null(self) -> ast.Type:
         return self.prim(ast.TY_NULL)
 
@@ -115,6 +125,8 @@ class Sema:
             return self.ty_none()
         if name == "str":
             return self.ty_str()
+        if name == "float":
+            return self.ty_float()
         return None
 
     # ── モジュールの出入り（第13章）──────────────────────
@@ -458,6 +470,11 @@ class Sema:
             return True
         if t.kind == ast.TY_INT:
             return op != ast.OP_TRUEDIV
+        # ★ float は int のちょうど裏返し。'/' が使えて '//' '%' とビット演算が使えない
+        #   ⚠️ '**' は int 専用（pow をランタイムに持たないため。C 版と同じ）
+        if t.kind == ast.TY_FLOAT:
+            return (op == ast.OP_ADD or op == ast.OP_SUB or
+                    op == ast.OP_MUL or op == ast.OP_TRUEDIV)
         if t.kind == ast.TY_STR:
             return op == ast.OP_ADD
         return False
@@ -555,6 +572,14 @@ class Sema:
                     n.tok, operand, t)
             return self.ty_bool()
 
+        # ★ float には - と + が使える（~ はビット演算なので int だけ）
+        if t.kind == ast.TY_FLOAT:
+            if n.op == ast.OP_NEG or n.op == ast.OP_POS:
+                return t
+            diag.error_at(unwrap_tok(n.tok),
+                          "型 '" + ast.type_name(t) + "' に単項演算子 '" +
+                          ast.op_symbol(n.op) + "' は適用できません")
+
         # - + ~ は int のみ
         if t.kind != ast.TY_INT:
             diag.error_at(unwrap_tok(n.tok),
@@ -595,6 +620,8 @@ class Sema:
         t: ast.Type = self.ty_int()
         if n.kind == ast.ND_INT:
             t = self.ty_int()
+        elif n.kind == ast.ND_FLOAT:
+            t = self.ty_float()
         elif n.kind == ast.ND_BOOL:
             t = self.ty_bool()
         elif n.kind == ast.ND_STR:
@@ -1998,11 +2025,11 @@ class Sema:
         # ⚠️ 初期化式はコンパイル時定数のみ（言語仕様 6.2 の v1 制限）
         rhs: ast.Node = unwrap_node(n.rhs)
         if (rhs.kind != ast.ND_INT and rhs.kind != ast.ND_BOOL and
-                rhs.kind != ast.ND_STR):
+                rhs.kind != ast.ND_STR and rhs.kind != ast.ND_FLOAT):
             diag.error_full(unwrap_tok(rhs.tok),
                             "グローバル変数の初期化式は定数でなければなりません",
-                            "ここには整数・True / False・文字列リテラルだけが" +
-                            "書けます", None, "",
+                            "ここには整数・浮動小数点数・True / False・" +
+                            "文字列リテラルだけが書けます", None, "",
                             "計算が必要なら main の中でローカル変数にしてください")
 
         actual: ast.Type = self.check_expr(rhs)

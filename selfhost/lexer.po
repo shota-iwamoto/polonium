@@ -27,6 +27,11 @@ B_BACKSLASH: int = 92
 B_UNDERSCORE: int = 95
 B_ZERO: int = 48
 B_NINE: int = 57
+B_DOT: int = 46
+B_PLUS: int = 43
+B_MINUS: int = 45
+B_LOWER_E: int = 101
+B_UPPER_E: int = 69
 
 # エスケープのヒント（C 版とまったく同じ文字列）。
 # ⚠️ バックスラッシュだらけなので、定数にして 1 か所に閉じ込めます。
@@ -38,6 +43,28 @@ def hex2(v: int) -> str:
     hi: int = (v // 16) % 16
     lo: int = v % 16
     return digits[hi] + digits[lo]
+
+
+# ── 浮動小数点リテラルの正規化（第34章）──────────────────────
+#
+# ★ C 版 src/lexer.c の normalize_float と**同じ文字列**を返すこと。
+#   ここがずれると 2 つの実装が違う IR を出し、tests/selfhost.sh の
+#   IR 比較と第20章の不動点が壊れます。
+#
+#   - 小数点が無ければ ".0" を足す（LLVM は 1e3 を double と認めない）
+#   - 小数点で始まる/終わるときは 0 を補う
+#   - 指数部は 'e' に統一する
+def normalize_float(digits: str, exp: str) -> str:
+    out: str = digits
+    if strings.startswith(out, "."):
+        out = "0" + out
+    if not strings.contains(out, "."):
+        out = out + ".0"
+    elif strings.endswith(out, "."):
+        out = out + "0"
+    if len(exp) > 0:
+        out = out + "e" + exp
+    return out
 
 # ── 文字の判定 ──────────────────────────────────────────────
 
@@ -268,6 +295,53 @@ class Lexer:
             self.fail_span(start, self.pos,
                            "数値リテラルに数字がありません",
                            "基数 " + str(base) + " で使える数字は " + valid + " です")
+        # ── 浮動小数点リテラルか？（10 進のときだけ）──
+        #
+        # ⚠️ **'.' の後に数字があるときだけ** float にします（C 版と同じ）。
+        #    `1.` を float にすると `1.foo` と区別できなくなるためです。
+        if base == 10:
+            mant: str = strings.substr(self.src, start, self.pos - start)
+            expo: str = ""
+            is_float: bool = False
+
+            if self.at() == B_DOT and is_digit(self.at_off(1)):
+                self.pos = self.pos + 1
+                fstart: int = self.pos
+                while is_digit(self.at()) or self.at() == B_UNDERSCORE:
+                    self.pos = self.pos + 1
+                mant = mant + "." + strings.replace(
+                    strings.substr(self.src, fstart, self.pos - fstart), "_", "")
+                is_float = True
+
+            # 指数部 e / E。'e' の後が数字か 符号+数字 のときだけ
+            e0: int = self.at()
+            if e0 == B_LOWER_E or e0 == B_UPPER_E:
+                s1: int = self.at_off(1)
+                ok: bool = is_digit(s1)
+                if s1 == B_PLUS or s1 == B_MINUS:
+                    ok = is_digit(self.at_off(2))
+                if ok:
+                    self.pos = self.pos + 1
+                    estart: int = self.pos
+                    if self.at() == B_PLUS or self.at() == B_MINUS:
+                        self.pos = self.pos + 1
+                    while is_digit(self.at()) or self.at() == B_UNDERSCORE:
+                        self.pos = self.pos + 1
+                    expo = strings.replace(
+                        strings.substr(self.src, estart, self.pos - estart), "_", "")
+                    is_float = True
+
+            if is_float:
+                if is_alpha(self.at()) or self.at() == B_UNDERSCORE:
+                    self.fail_span(start, self.pos + 1,
+                                   "数値リテラルの直後に文字が続いています",
+                                   "数値と識別子の間に空白が必要かもしれません")
+                ft: token.Token = self.push(token.TK_FLOAT, start,
+                                            strings.substr(self.src, start,
+                                                           self.pos - start))
+                ft.text = normalize_float(strings.replace(mant, "_", ""), expo)
+                return
+
         if is_alpha(self.at()) or self.at() == B_UNDERSCORE:
             self.fail_span(start, self.pos + 1,
                            "数値リテラルの直後に文字が続いています",

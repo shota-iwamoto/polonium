@@ -19,6 +19,8 @@ TY_CLASS: int = 5
 TY_OPT: int = 6      # T | None（第15章）
 TY_NULL: int = 7     # None リテラルの型（変数の型にはならない）
 TY_RC: int = 8       # rc[T]（共有所有。第28章）
+# ⚠️ 9 は TY_PTR（C 版だけが持つ低レベル型）。値をずらさないよう空けます。
+TY_FLOAT: int = 10   # float → double（第34章）
 
 
 class Type:
@@ -83,6 +85,7 @@ class Prims:
     bool_: Type | None
     none_: Type | None
     str_: Type | None
+    float_: Type | None
     null_: Type | None
 
     def init(self) -> None:
@@ -90,6 +93,7 @@ class Prims:
         self.bool_ = Type(TY_BOOL)
         self.none_ = Type(TY_NONE)
         self.str_ = Type(TY_STR)
+        self.float_ = Type(TY_FLOAT)
         self.null_ = Type(TY_NULL)
 
 
@@ -182,6 +186,8 @@ def type_name(t: Type) -> str:
         return "None"
     if t.kind == TY_STR:
         return "str"
+    if t.kind == TY_FLOAT:
+        return "float"
     if t.kind == TY_LIST:
         return "list[" + type_name(elem_of(t)) + "]"
     if t.kind == TY_CLASS:
@@ -204,7 +210,7 @@ def type_align(t: Type) -> int:
     return type_size(t)
 
 def type_name_list() -> str:
-    return "int, bool, str, None, list[T], T | None"
+    return "int, float, bool, str, None, list[T], T | None"
 
 
 # ── ノードの種類（C 版 NodeKind と同じ順序・同じ値）──
@@ -242,6 +248,8 @@ ND_NONE: int = 28
 ND_TRY: int = 29     # try 文    → body, els（except の並び）
 ND_EXCEPT: int = 30  # except 節 → type_ref, name（as の名前）, body
 ND_RAISE: int = 31   # raise 文  → lhs
+# ⚠️ 32 / 33 は ND_UNSAFE / ND_PRAGMA（C 版だけが持つ低レベル文）。
+ND_FLOAT: int = 34   # 浮動小数点リテラル → sval（正規化済みの文字列。第34章）
 
 # ── 仮引数の受け取り方（C 版 ParamMode と同じ順序・同じ値。第21章）──
 PM_BORROW: int = 0   # 既定。読むだけ借りる
@@ -447,6 +455,13 @@ def new_bool_node(tok: token.Token | None, value: bool) -> Node:
         n.ival = 1
     return n
 
+# ★ float は **文字列**で持ちます（値ではありません）。理由は selfhost/lexer.po
+#   の normalize_float を参照（Polonium 自身に float が無くても実装できる）。
+def new_float_node(tok: token.Token | None, text: own str) -> Node:
+    n: Node = Node(ND_FLOAT, tok)
+    n.sval = text
+    return n
+
 def new_str_node(tok: token.Token | None, bytes_: str, slen: int) -> Node:
     n: Node = Node(ND_STR, tok)
     n.sval = copy(bytes_)
@@ -499,6 +514,9 @@ def dump(n: Node | None, depth: int) -> None:
 
     if n.kind == ND_INT:
         print(pad + "(int " + str(n.ival) + ")")
+    elif n.kind == ND_FLOAT:
+        # ★ 第34章：正規化済みの文字列をそのまま出す（C 版と同じ形）
+        print(pad + "(float " + n.sval + ")")
     elif n.kind == ND_BOOL:
         if n.ival != 0:
             print(pad + "(bool True)")

@@ -158,6 +158,7 @@ static char *new_tmp(Emitter *e) {
 static const char *llvm_type(Type *t) {
     switch (t->kind) {
         case TY_INT: return "i64";
+        case TY_FLOAT: return "double";  // IEEE 754 倍精度
         case TY_BOOL: return "i1";   // レジスタ上は 1 ビット
         case TY_NONE: return "void";  // 値がない（第8章）
         case TY_STR: return "ptr";    // 参照型（第9章）
@@ -179,6 +180,7 @@ static const char *llvm_type(Type *t) {
 static const char *llvm_mem_type(Type *t) {
     switch (t->kind) {
         case TY_INT: return "i64";
+        case TY_FLOAT: return "double";
         case TY_BOOL: return "i8";  // メモリ上は 1 バイト
         case TY_STR: return "ptr";  // ポインタをそのまま置く（第9章）
         case TY_LIST: return "ptr"; // 第10章
@@ -204,6 +206,19 @@ static const char *llvm_mem_type(Type *t) {
 //    sdiv / srem / ashr（udiv / urem / lshr ではない）。
 //    間違えると負数で誤った結果になります。
 static const char *llvm_binop(Node *n) {
+    // ★ float は別命令です。整数の add / sub / mul / sdiv とは
+    //   ビット列の意味がまるで違うので、LLVM も別の命令を用意しています。
+    //   （fadd などに 's' が付かないのは、符号が指数部と仮数部に
+    //     分かれていて「符号付き/なし」の区別が要らないためです）
+    if (n->lhs && n->lhs->type && n->lhs->type->kind == TY_FLOAT) {
+        switch (n->op) {
+            case OP_ADD: return "fadd";
+            case OP_SUB: return "fsub";
+            case OP_MUL: return "fmul";
+            case OP_TRUEDIV: return "fdiv";
+            default: UNREACHABLE();  // OP_POW はランタイム呼び出しになる
+        }
+    }
     switch (n->op) {
         case OP_ADD: return "add";
         case OP_SUB: return "sub";
@@ -243,6 +258,19 @@ static const char *icmp_pred(OpKind op, Type *operand_type) {
         case OP_LE: return sign ? "sle" : "ule";
         case OP_GT: return sign ? "sgt" : "ugt";
         case OP_GE: return sign ? "sge" : "uge";
+        default: UNREACHABLE();
+    }
+}
+
+// float の比較述語（ordered。NaN が絡むと必ず False）。
+static const char *fcmp_pred(OpKind op) {
+    switch (op) {
+        case OP_EQ: return "oeq";
+        case OP_NE: return "one";
+        case OP_LT: return "olt";
+        case OP_LE: return "ole";
+        case OP_GT: return "ogt";
+        case OP_GE: return "oge";
         default: UNREACHABLE();
     }
 }
@@ -409,6 +437,12 @@ static char *gen_field(Emitter *e, Node *n);
 
 static char *gen_expr(Emitter *e, Node *n) {
     switch (n->kind) {
+        case ND_FLOAT:
+            // ★ 字句解析器が正規化した文字列を**そのまま**出します。
+            //   double を経由しないので、C 版と Polonium 版で 1 バイトも
+            //   ずれません（tests/selfhost.sh の IR 比較が効きます）。
+            return n->sval;
+
         case ND_INT: {
             // 整数リテラルは命令を出す必要すらありません。
             // LLVM は即値をオペランドに直接書けるので（add i64 42, 1）、
@@ -476,7 +510,15 @@ static char *gen_expr(Emitter *e, Node *n) {
                 return t;
             }
 
-            if (is_compare(n->op))
+            // ★ float の比較は fcmp です。しかも述語に 'o'（ordered）を
+            //   付けます。NaN が絡むと「どちらでもない」が正しい答えなので、
+            //   ordered を選ぶと NaN との比較はすべて False になります
+            //   （unordered の 'u' を選ぶと逆にすべて True になり、
+            //     NaN != NaN が成り立たなくなります）。
+            if (is_compare(n->op) && ot->kind == TY_FLOAT)
+                sb_printf(&e->fn, "  %s = fcmp %s double %s, %s\n", t,
+                          fcmp_pred(n->op), l, r);
+            else if (is_compare(n->op))
                 sb_printf(&e->fn, "  %s = icmp %s %s %s, %s\n", t,
                           icmp_pred(n->op, ot), llvm_type(ot), l, r);
             else
@@ -536,7 +578,11 @@ static char *gen_expr(Emitter *e, Node *n) {
             if (n->op == OP_POS) return v;
 
             char *t = new_tmp(e);
-            if (n->op == OP_NEG) {
+            if (n->op == OP_NEG && n->type && n->type->kind == TY_FLOAT) {
+                // ★ float には専用の否定命令 fneg があります（符号ビットを
+                //   反転するだけ。0.0 - x とは -0.0 の扱いが違います）。
+                sb_printf(&e->fn, "  %s = fneg double %s\n", t, v);
+            } else if (n->op == OP_NEG) {
                 // ⚠️ LLVM に整数の neg 命令はありません。0 からの減算で表現します。
                 sb_printf(&e->fn, "  %s = sub i64 0, %s\n", t, v);
             } else if (n->op == OP_BITNOT) {
@@ -621,6 +667,15 @@ static bool elem_is_ptr(Type *elem) {
 
 // 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる。規約 R5）
 static char *elem_to_slot(Emitter *e, Type *elem, char *v) {
+    // ★ float はビットパターンのまま i64 のスロットに入れます。
+    //   list の中身は「ポインタ 1 個か i64 1 個」という第10章の作りを
+    //   変えずに済みます（double も 8 バイトなので過不足なく入ります）。
+    //   ⚠️ 数値としての変換（sitofp）ではありません。bitcast です。
+    if (elem->kind == TY_FLOAT) {
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = bitcast double %s to i64\n", t, v);
+        return t;
+    }
     if (elem->kind != TY_BOOL) return v;
     char *t = new_tmp(e);
     sb_printf(&e->fn, "  %s = zext i1 %s to i64\n", t, v);
@@ -629,6 +684,11 @@ static char *elem_to_slot(Emitter *e, Type *elem, char *v) {
 
 // ランタイムから受け取った値を「Polonium の値」に戻す（bool は i1 に縮める）
 static char *slot_to_elem(Emitter *e, Type *elem, char *v) {
+    if (elem->kind == TY_FLOAT) {
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = bitcast i64 %s to double\n", t, v);
+        return t;
+    }
     if (elem->kind != TY_BOOL) return v;
     char *t = new_tmp(e);
     sb_printf(&e->fn, "  %s = trunc i64 %s to i1\n", t, v);
@@ -1926,6 +1986,13 @@ static void gen_global(Emitter *e, Node *n) {
     if (n->type->kind == TY_STR) {
         char *lab = intern_str(e, n->rhs->sval, n->rhs->slen);
         sb_printf(&e->globals, "%s = global ptr %s\n", n->ir_name, lab);
+        return;
+    }
+    // ★ float は値ではなく、字句解析器が正規化した文字列を出します
+    //   （src/lexer.c の read_number 参照）。
+    if (n->type->kind == TY_FLOAT) {
+        sb_printf(&e->globals, "%s = global double %s\n", n->ir_name,
+                  n->rhs->sval);
         return;
     }
     sb_printf(&e->globals, "%s = global %s %lld\n", n->ir_name,

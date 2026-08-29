@@ -4,7 +4,7 @@
 > **迷ったらここに書いてあるルールに従う**ことで、コード生成器が一貫した形に保たれます。
 >
 > LLVM IR そのものの文法を知らない場合は、先に
-> [../reference/llvm-ir-primer.md](../reference/llvm-ir-primer.md) を読んでください。
+> [../../old/reference/llvm-ir-primer.md](../../old/reference/llvm-ir-primer.md) を読んでください。
 
 ---
 
@@ -164,7 +164,7 @@ entry:
 ### ⚠️ 第13章から `.ll` はモジュールごとに 1 本
 
 `import` を入れると「1 ファイル = 1 モジュール = 1 `.ll`」になります
-（[ch13](../chapters/ch13-modules.md) 13.7 節）。上の構成はそのままで、
+（[ch13](../../old/chapters/ch13-modules.md) 13.7 節）。上の構成はそのままで、
 **②〜⑤に「他モジュールのもの」が混ざる**点だけが変わります。
 
 | 要素 | 自分のモジュール | import したモジュール |
@@ -763,7 +763,7 @@ entry:
 ```
 
 `len(s)` と `s[i]` が毎回 `strlen` していたため、1 文字ずつ回るコードが
-O(n²) になっていたからです（[ch15](../chapters/ch15-nullable.md) 15.7 節で実測）。
+O(n²) になっていたからです（[ch15](../../old/chapters/ch15-nullable.md) 15.7 節で実測）。
 長さを 8 バイト手前に置くと `pl_str_len` が O(1) になります。
 
 **値が指すのはデータの先頭のまま**なので、C から見れば今までどおり

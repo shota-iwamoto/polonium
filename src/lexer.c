@@ -132,6 +132,57 @@ static Token span_token(Lexer *lx, const char *start, const char *end) {
     return t;
 }
 
+// ── 浮動小数点リテラル ──────────────────────────────────────
+//
+// ★ **値ではなく、正規化した文字列で持ちます。** 理由は 2 つあります。
+//
+//   ① セルフホスト版（Polonium で書いたコンパイラ）は float を扱えません。
+//      Polonium 自身に float が無いのだから当然です。文字列で持てば、
+//      **実装言語に float が無くても float を実装できます**。
+//   ② IR に出す文字列が 2 つの実装で 1 バイトも違ってはいけません
+//      （tests/selfhost.sh の IR 比較と、第20章の不動点）。double を
+//      経由すると printf の丸めに依存してしまいます。
+//
+// 正規化の規則（**両実装で同一**。仕様 2.7）:
+//   - 桁区切りの '_' を落とす
+//   - 小数点が無ければ ".0" を足す（LLVM は 1e3 を double と認めないため）
+//   - 小数点で始まる/終わるときは 0 を補う（.5 → 0.5 / 1. → 1.0）
+//   - 指数部の 'E' は 'e' に統一する
+static void normalize_float(char *dst, size_t cap, const char *digits,
+                            const char *exp) {
+    // 仮数部の前後に 0 を補う
+    const char *dot = strchr(digits, '.');
+    size_t n = 0;
+    if (digits[0] == '.') dst[n++] = '0';
+    for (const char *q = digits; *q && n + 4 < cap; q++) dst[n++] = *q;
+    if (!dot) {              // 1e3 → 1.0e3
+        dst[n++] = '.';
+        dst[n++] = '0';
+    } else if (dst[n - 1] == '.') {  // 1. → 1.0
+        dst[n++] = '0';
+    }
+    if (exp && *exp) {
+        dst[n++] = 'e';
+        for (const char *q = exp; *q && n + 1 < cap; q++) dst[n++] = *q;
+    }
+    dst[n] = '\0';
+}
+
+// 10 進の数字列（'_' を飛ばしながら）を buf に集める。読んだ桁数を返す。
+static int collect_digits(Lexer *lx, char *buf, int *n, int cap) {
+    int got = 0;
+    while (is_digit(*lx->p) || *lx->p == '_') {
+        if (*lx->p == '_') {
+            lx->p++;
+            continue;
+        }
+        if (*n < cap - 1) buf[(*n)++] = *lx->p;
+        lx->p++;
+        got++;
+    }
+    return got;
+}
+
 // ── 数値リテラルの読み取り ──────────────────────────────────
 
 static void read_int(Lexer *lx) {
@@ -169,6 +220,52 @@ static void read_int(Lexer *lx) {
                                        : "0-1";
         error_at_hint(&tmp, diag_fmt("基数 %d で使える数字は %s です", base, valid),
                       "数値リテラルに数字がありません");
+    }
+
+    // ── 浮動小数点リテラルか？（10 進のときだけ）──
+    //
+    // ⚠️ **'.' の後に数字があるときだけ** float にします。`1.` を float に
+    //    してしまうと、将来 int にメソッドを生やしたときに `1.foo` と
+    //    区別できなくなるためです（Python は許しますが、ここでは許しません）。
+    if (base == 10) {
+        char mant[80];
+        int mn = 0;
+        for (int i = 0; i < n && mn < (int)sizeof(mant) - 1; i++) mant[mn++] = digits[i];
+
+        bool is_float = false;
+        if (lx->p[0] == '.' && is_digit(lx->p[1])) {
+            mant[mn++] = '.';
+            lx->p++;                       // '.' を読み飛ばす
+            collect_digits(lx, mant, &mn, (int)sizeof(mant));
+            is_float = true;
+        }
+
+        // 指数部 e / E（符号は省略可）。'e' の後が数字か符号+数字のときだけ。
+        char expbuf[32];
+        int en = 0;
+        if ((lx->p[0] == 'e' || lx->p[0] == 'E') &&
+            (is_digit(lx->p[1]) ||
+             ((lx->p[1] == '+' || lx->p[1] == '-') && is_digit(lx->p[2])))) {
+            lx->p++;                       // 'e' を読み飛ばす
+            if (*lx->p == '+' || *lx->p == '-') expbuf[en++] = *lx->p++;
+            collect_digits(lx, expbuf, &en, (int)sizeof(expbuf));
+            is_float = true;
+        }
+        expbuf[en] = '\0';
+        mant[mn] = '\0';
+
+        if (is_float) {
+            if (isalpha((unsigned char)*lx->p) || *lx->p == '_') {
+                Token tmp = span_token(lx, start, lx->p + 1);
+                error_at_hint(&tmp, "数値と識別子の間に空白が必要かもしれません",
+                              "数値リテラルの直後に文字が続いています");
+            }
+            char norm[128];
+            normalize_float(norm, sizeof(norm), mant, expbuf);
+            Token *ft = tv_push(lx, TK_FLOAT, start, (int)(lx->p - start));
+            ft->text = xstrndup(norm, strlen(norm));
+            return;
+        }
     }
 
     // 数字の直後が識別子文字なら、それは 123abc や 0xFFg のような不正なリテラル
@@ -605,6 +702,7 @@ const char *token_kind_name(TokenKind kind) {
     switch (kind) {
         case TK_EOF: return "EOF";
         case TK_INT: return "INT";
+        case TK_FLOAT: return "FLOAT";
         case TK_PUNCT: return "PUNCT";
         case TK_IDENT: return "IDENT";
         case TK_KEYWORD: return "KEYWORD";
@@ -633,6 +731,10 @@ void dump_tokens(TokenVec toks) {
         switch (t->kind) {
             case TK_INT:
                 printf("%lld", t->ival);
+                break;
+            // ★ 正規化した後の文字列を出します（ソースのままではありません）
+            case TK_FLOAT:
+                printf("%s", t->text);
                 break;
             // 仮想トークンと EOF は長さ 0 なので表示する実体がない
             case TK_EOF:

@@ -15,6 +15,14 @@ Node *new_int_node(Token *tok, long long value) {
     return n;
 }
 
+// ★ float は **文字列**で持ちます（値ではありません）。理由は src/lexer.c の
+//   read_number を参照。sval には正規化済みの LLVM リテラルが入ります。
+Node *new_float_node(Token *tok, char *text) {
+    Node *n = new_node(ND_FLOAT, tok);
+    n->sval = text;
+    return n;
+}
+
 Node *new_bool_node(Token *tok, bool value) {
     Node *n = new_node(ND_BOOL, tok);
     n->ival = value ? 1 : 0;
@@ -300,6 +308,11 @@ static void dump(Node *n, int depth) {
             dump(n->lhs, depth + 1);
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
+            break;
+        // ★ 第34章：正規化済みの文字列をそのまま出します
+        //   （selfhost/ast.po の dump と同じ形にすること）
+        case ND_FLOAT:
+            printf("(float %s)\n", n->sval);
             break;
         case ND_IMPORT:  // 第13章
             printf("(import %s)\n", n->name);

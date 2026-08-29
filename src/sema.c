@@ -595,6 +595,20 @@ static bool op_supports(OpKind op, Type *t) {
         // 言語仕様 4.2：int に '/' は使えない（'//' を使う）
         return op != OP_TRUEDIV;
     }
+    // ★ float は int のちょうど裏返しです。
+    //   '/' が使えて、'//' '%' とビット演算が使えません。
+    //   ⚠️ 切り捨てが要るなら int に変換してから（暗黙変換はしない）。
+    if (t->kind == TY_FLOAT) {
+        switch (op) {
+            case OP_ADD: case OP_SUB: case OP_MUL: case OP_TRUEDIV:
+                return true;
+            // ⚠️ '**' は int 専用です。float のべき乗には pow が要り、
+            //    ランタイムは libc 無しで動く必要があるためまだ持ちません。
+
+            default:
+                return false;
+        }
+    }
     // str に許すのは連結の '+' だけ（言語仕様 4.2 の表）。
     // ⚠️ Python の "ab" * 3 は便利だが、v1 では採用しない。
     if (t->kind == TY_STR) return op == OP_ADD;
@@ -728,6 +742,13 @@ static Type *check_unary(Sema *s, Node *n) {
         return ty_bool;
     }
 
+    // ★ float には - と + が使えます（~ はビット演算なので int だけ）。
+    if (t->kind == TY_FLOAT) {
+        if (n->op == OP_NEG || n->op == OP_POS) return t;
+        error_at(n->tok, "型 '%s' に単項演算子 '%s' は適用できません", type_name(t),
+                 op_symbol(n->op));
+    }
+
     // - + ~ は int のみ
     if (t->kind != TY_INT)
         error_at(n->tok, "型 '%s' に単項演算子 '%s' は適用できません", type_name(t),
@@ -775,6 +796,7 @@ static Type *check_expr(Sema *s, Node *n) {
     Type *t;
     switch (n->kind) {
         case ND_INT: t = ty_int; break;
+        case ND_FLOAT: t = ty_float; break;
         case ND_BOOL: t = ty_bool; break;
         case ND_STR: t = ty_str; break;
         case ND_NONE: t = ty_null; break;  // 第15章：ヌルポインタという「値」
@@ -1102,11 +1124,16 @@ const Builtin BUILTINS[] = {
     {"print", TY_INT, TY_NONE, "pl_print_int"},
     {"print", TY_STR, TY_NONE, "pl_print_str"},
     {"print", TY_BOOL, TY_NONE, "pl_print_bool"},
+    {"print", TY_FLOAT, TY_NONE, "pl_print_float"},
     {"len", TY_STR, TY_INT, "pl_str_len"},
     {"len", TY_LIST, TY_INT, "pl_list_len"},  // 第10章（要素型は見ない）
     {"str", TY_INT, TY_STR, "pl_str_from_int"},
     {"str", TY_BOOL, TY_STR, "pl_str_from_bool"},
+    {"str", TY_FLOAT, TY_STR, "pl_str_from_float"},
     {"int", TY_STR, TY_INT, "pl_str_to_int"},
+    // 第34章：int ↔ float。⚠️ 暗黙変換はしないので、必ずここを通します。
+    {"int", TY_FLOAT, TY_INT, "pl_int_from_float"},
+    {"float", TY_INT, TY_FLOAT, "pl_float_from_int"},
     {"ord", TY_STR, TY_INT, "pl_ord"},
     {"chr", TY_INT, TY_STR, "pl_chr"},
     {"exit", TY_INT, TY_NONE, "pl_exit"},
@@ -2487,11 +2514,12 @@ static void declare_global(Sema *s, Node *n) {
     // ⚠️ 初期化式はコンパイル時定数のみ（言語仕様 6.2 の v1 制限）。
     //    計算を許すと「どちらを先に初期化するか」という初期化順序問題が起きます。
     if (n->rhs->kind != ND_INT && n->rhs->kind != ND_BOOL &&
-        n->rhs->kind != ND_STR) {
+        n->rhs->kind != ND_STR && n->rhs->kind != ND_FLOAT) {
         Diag d = {0};
         d.message = "グローバル変数の初期化式は定数でなければなりません";
         d.primary.tok = n->rhs->tok;
-        d.primary.label = "ここには整数・True / False・文字列リテラルだけが書けます";
+        d.primary.label =
+            "ここには整数・浮動小数点数・True / False・文字列リテラルだけが書けます";
         d.hint = "計算が必要なら main の中でローカル変数にしてください";
         diag_fail(&d);
     }

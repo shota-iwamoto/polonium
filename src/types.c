@@ -8,6 +8,7 @@ Type *ty_int;
 Type *ty_bool;
 Type *ty_none;
 Type *ty_str;
+Type *ty_float;
 Type *ty_null;
 
 static Type *new_type(TypeKind kind) {
@@ -19,6 +20,7 @@ static Type *new_type(TypeKind kind) {
 void types_init(void) {
     ty_int = new_type(TY_INT);
     ty_bool = new_type(TY_BOOL);
+    ty_float = new_type(TY_FLOAT);
     ty_none = new_type(TY_NONE);
     ty_str = new_type(TY_STR);
     ty_null = new_type(TY_NULL);
@@ -99,6 +101,7 @@ int type_size(Type *t) {
     switch (t->kind) {
         case TY_BOOL: return 1;  // メモリ上は i8（規約 R5）
         case TY_INT:
+        case TY_FLOAT:  // double も 8 バイト
         case TY_STR:
         case TY_LIST:
         case TY_CLASS:
@@ -143,6 +146,7 @@ const char *type_name(Type *t) {
     switch (t->kind) {
         case TY_INT: return "int";
         case TY_BOOL: return "bool";
+        case TY_FLOAT: return "float";
         case TY_NONE: return "None";
         case TY_STR: return "str";
         case TY_LIST: {
@@ -180,6 +184,7 @@ const char *type_name(Type *t) {
 Type *type_from_name(const char *name) {
     if (strcmp(name, "int") == 0) return ty_int;
     if (strcmp(name, "bool") == 0) return ty_bool;
+    if (strcmp(name, "float") == 0) return ty_float;
     if (strcmp(name, "None") == 0) return ty_none;
     if (strcmp(name, "str") == 0) return ty_str;
     return NULL;  // 未知の型名
@@ -189,6 +194,7 @@ Type *type_from_kind(int kind) {
     switch (kind) {
         case TY_INT: return ty_int;
         case TY_BOOL: return ty_bool;
+        case TY_FLOAT: return ty_float;
         case TY_NONE: return ty_none;
         case TY_STR: return ty_str;
         default: UNREACHABLE();
@@ -196,5 +202,5 @@ Type *type_from_kind(int kind) {
 }
 
 const char *type_name_list(void) {
-    return "int, bool, str, None, list[T], T | None";
+    return "int, float, bool, str, None, list[T], T | None";
 }
