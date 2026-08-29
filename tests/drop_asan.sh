@@ -5,8 +5,13 @@
 #   リンクして実行します。通常のテスト（run_tests.sh）では観測できない
 #   **二重解放・解放後の使用**を、実行時に捕まえるための網です。
 #
-# ⚠️ LeakSanitizer は macOS では使えません（Linux のみ）。
-#    リークは「壊れない」種類の間違いなので、まず壊れないことを確かめます。
+# ⚠️ **リーク検査（LeakSanitizer）は既定で切ります。**
+#    この検査で見たいのは「二重解放」と「解放後の使用」——**壊れる間違い**です。
+#    リークは第25章で宿題として残してあるもの（式の途中の一時値など）なので、
+#    ここで落とすと「壊れていないのに赤い」状態が続いてしまいます。
+#
+#    ★ リークを数えたいときは `tests/drop_asan.sh --leaks` か `make drop-leak`。
+#      Linux でだけ動きます（macOS の ASan に LeakSanitizer は入っていません）。
 #
 # 使い方:
 #   tests/drop_asan.sh                     drop_*.po を全部
@@ -20,6 +25,13 @@ PLC_CC="${PLC_CC:-$ROOT/build/poloniumc}"
 [ -x "$PLC_CC" ] || [ ! -x "$PLC_CC.exe" ] || PLC_CC="$PLC_CC.exe"
 TMP="$ROOT/tests/tmp"
 mkdir -p "$TMP"
+
+DETECT_LEAKS=0
+if [ "${1:-}" = "--leaks" ]; then
+    DETECT_LEAKS=1
+    shift
+fi
+export ASAN_OPTIONS="detect_leaks=$DETECT_LEAKS"
 
 if [ $# -gt 0 ]; then
     CASES=("$@")
@@ -82,7 +94,12 @@ done
 echo
 echo "────────────────────────────────"
 if [ "$fail" -eq 0 ]; then
-    printf "%s全 %d 件が AddressSanitizer で問題なし%s\n" "$C_OK" "$pass" "$C_END"
+    if [ "$DETECT_LEAKS" = "1" ]; then
+        printf "%s全 %d 件がリーク無しで通りました%s\n" "$C_OK" "$pass" "$C_END"
+    else
+        printf "%s全 %d 件が AddressSanitizer で問題なし（二重解放・解放後の使用）%s\n" \
+               "$C_OK" "$pass" "$C_END"
+    fi
     exit 0
 else
     printf "%s%d 件パス / %d 件失敗%s\n" "$C_NG" "$pass" "$fail" "$C_END"

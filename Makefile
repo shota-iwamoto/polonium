@@ -4,6 +4,7 @@
 #   make            コンパイラをビルド
 #   make test       テストを全部実行（C 版のテスト + 解放の検査 + セルフホストの検証）
 #   make drop-asan  --drop で生成したプログラムを AddressSanitizer で検査（第25章）
+#   make drop-leak  そのうえでリークも数える（Linux のみ。第25章の宿題の残量）
 #   make kernel     ベアメタル（RISC-V）のカーネルをビルド（第32章）
 #   make qemu       そのカーネルを QEMU で動かす（Ctrl-A X で終了）
 #   make qemu-test  カーネルの出力を自動で検証する（第32〜33章）
@@ -118,7 +119,7 @@ OBJS    := $(SRCS:src/%.c=build/%.o)
 DEPS    := $(OBJS:.o=.d)
 TARGET  := build/$(LANG_CC)$(EXEEXT)
 
-.PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan drop-asan info
+.PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan drop-asan drop-leak info
 
 all: $(TARGET) $(RUNTIME_OBJ)
 
@@ -179,6 +180,11 @@ bootstrap-test: bootstrap
 # リンクして走らせます。**二重解放と解放後の使用**を実行時に捕まえる網です。
 drop-asan: $(TARGET)
 	@tests/drop_asan.sh
+
+# ★ リークの残り（第25章の宿題）を数える。Linux でだけ動きます
+#   （macOS の AddressSanitizer に LeakSanitizer は入っていません）。
+drop-leak: $(TARGET)
+	@tests/drop_asan.sh --leaks
 
 # ── AddressSanitizer ビルド ─────────────────────────────────
 # セグフォの原因が分からないときに使います。

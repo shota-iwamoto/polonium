@@ -48,6 +48,9 @@ make info       # 言語名・拡張子などの現在値
       解放の挿入を `selfhost/codegen.po` に移植（第25章ぶん）
 - [ ] **④** `--deny-*` と `--drop` を既定 on にし、`make bootstrap` が緑であることを確認
 - [ ] `unsafe` / `ptr[T]` / `asm` の移植（第30章ぶん。`# STAGE1-SKIP:` を外す）
+- [ ] **一時値の解放**（第25章の宿題）。Linux の CI が LeakSanitizer で検出できます:
+      `make drop-leak`（macOS の ASan には LeakSanitizer が入っていないので、
+      この宿題は Linux でしか測れません）
 
 **⚠️ 順序を守ること**：②（既存コードを直す）→ ③（検査を移植する）。
 逆にすると、移植した検査が自分自身に大量の警告を出して、
