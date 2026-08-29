@@ -108,7 +108,7 @@ v2 ではこれらに意味が付きます（`del` は第25章、`try` / `except
 | 16進整数 | `0xFF` `0xff` | `int` | ch2 |
 | 2進整数 | `0b1010` | `int` | ch2 |
 | 8進整数 | `0o755` | `int` | ch2 |
-| 浮動小数点 | `3.14` `1e-3` `2.0` | `float` | ch9 |
+| 浮動小数点 | `3.14` `1e-3` `2.0` | `float` | ch9（**⚠️ 未実装**） |
 | 真偽値 | `True` `False` | `bool` | ch6 |
 | 文字列 | `"hello"` `'hi'` | `str` | ch9 |
 | None | `None` | `None` | ch12 |
@@ -154,7 +154,7 @@ and or  not
 |---|---|---|---|---|
 | `int` | `i64` | 8 | 64bit 符号付き整数。オーバーフローは 2 の補数でラップ | ch1 |
 | `bool` | `i1`（メモリ上は `i8`） | 1 | `True` / `False` | ch6 |
-| `float` | `double` | 8 | IEEE 754 倍精度 | ch9 |
+| `float` | `double` | 8 | IEEE 754 倍精度。**⚠️ 未実装**（`1.5` は構文エラー。字句解析器が小数リテラルを読まない） | ch9 |
 | `str` | `ptr` | 8 | NUL 終端 UTF-8 バイト列へのポインタ。**不変** | ch9 |
 | `None` | `void` | 0 | 値を持たない型。戻り値なし関数の戻り型 | ch8 |
 
@@ -528,7 +528,7 @@ counter: int = 0
 | `len` | `(str) -> int`<br>`(list[T]) -> int` | 長さ | ch9 |
 | `str` | `(int) -> str`<br>`(bool) -> str`<br>`(float) -> str` | 文字列化 | ch9 |
 | `int` | `(str) -> int`<br>`(float) -> int` | 整数化（パース失敗は実行時エラー） | ch9 |
-| `float` | `(int) -> float` | 浮動小数点化 | ch9 |
+| `float` | `(int) -> float` | 浮動小数点化。**⚠️ 未実装** | ch9 |
 | `ord` | `(str) -> int` | 先頭 1 バイトのコード | ch9 |
 | `chr` | `(int) -> str` | 1 バイト文字列を作る | ch9 |
 | `exit` | `(int) -> None` | プロセス終了 | ch9 |
