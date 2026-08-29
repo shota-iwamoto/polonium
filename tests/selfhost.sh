@@ -211,10 +211,12 @@ for f in "${FILES[@]}"; do
         continue
     fi
     # ⚠️ 万一無限ループしても比較全体を止めないよう、時間を区切る
-    m_out="$(timeout 10 "$TMP/m.bin" 2>/dev/null)"; m_rc=$?
+    # ⚠️ 標準入力は **必ず /dev/null に繋ぎます**。繋がないと端末や CI の
+    #    標準入力を読んでしまい、結果が環境で変わります（第35章）。
+    m_out="$(timeout 10 "$TMP/m.bin" < /dev/null 2>/dev/null)"; m_rc=$?
 
     "$PLC_CC" "$f" -o "$TMP/c.bin" 2>/dev/null
-    c_out="$(timeout 10 "$TMP/c.bin" 2>/dev/null)"; c_rc=$?
+    c_out="$(timeout 10 "$TMP/c.bin" < /dev/null 2>/dev/null)"; c_rc=$?
 
     if [ "$m_out" != "$c_out" ] || [ "$m_rc" -ne "$c_rc" ]; then
         fail=$((fail + 1)); failed_names+=("$name")

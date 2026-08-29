@@ -16,7 +16,7 @@ def main() -> int:
 | モジュール | 内容 |
 |---|---|
 | [`strings`](#strings) | 文字列の操作 |
-| [`io`](#io) | ファイルと標準出力・標準エラー |
+| [`io`](#io) | ファイル・標準出力・標準エラー・標準入力 |
 | [`sys`](#sys) | コマンドライン引数・環境変数・外部コマンド |
 | [`dict`](#dict) | 文字列を鍵とするハッシュ表 |
 
@@ -82,6 +82,8 @@ def main() -> int:
 | `remove(path: str) -> None` | 消す |
 | `print_raw(s: str) -> None` | 標準出力へ**改行を足さずに**書く |
 | `eprint(s: str) -> None` | 標準エラーへ書く |
+| `read_line() -> str \| None` | 標準入力から 1 行。**改行は含まない**。読めなければ `None` |
+| `read_all() -> str` | 標準入力を最後まで。何も無ければ空文字列 |
 
 ```python
 import io
@@ -93,7 +95,39 @@ def main() -> int:
     return 0
 ```
 
-> **標準入力を読む関数はまだありません**（[roadmap](../roadmap.md) 優先度 B）。
+### 標準入力
+
+`read_line` は 1 行ずつ読み、**EOF で `None` を返します**。これが繰り返しの終わり方です。
+
+```python
+import io
+
+def main() -> int:
+    n: int = 0
+    line: str | None = io.read_line()
+    while line is not None:
+        n = n + 1
+        print(str(n) + ": " + line)
+        line = io.read_line()
+    return 0
+```
+
+```
+$ printf 'hello\nworld\n' | ./count
+1: hello
+2: world
+```
+
+| | |
+|---|---|
+| 改行 | `read_line` の戻り値に**含まれません** |
+| CRLF | 行末の `\r` は落とします（Windows で作った入力でも同じ結果） |
+| 最終行 | 改行で終わっていなくても 1 行として読めます |
+| 空の入力 | `read_line` は `None`、`read_all` は `""` |
+
+> **⚠️ ベアメタルでは使えません。** 標準入力は `runtime/hosted.c`（PC 用）にしかなく、
+> カーネル側（`runtime/core.c` の 4 フック）には含めていません。
+> 入力の無い環境に「使わないのに実装させる」ことを避けるためです。
 
 ---
 

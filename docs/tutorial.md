@@ -307,7 +307,8 @@ def main() -> int:
 
 ### io
 
-`read_file` / `write_file` / `remove` / `exists` / `print_raw`（改行なし）/ `eprint`（stderr）。
+`read_file` / `write_file` / `remove` / `exists` / `print_raw`（改行なし）/ `eprint`（stderr）、
+および標準入力の `read_line` / `read_all`。
 
 ```python
 import io
@@ -316,6 +317,20 @@ def main() -> int:
     io.write_file("memo.txt", "hello\n")
     print(io.read_file("memo.txt"))
     io.remove("memo.txt")
+    return 0
+```
+
+標準入力は `read_line` を **`None` が返るまで**繰り返します（それが EOF です）。
+戻り値に改行は含まれません。
+
+```python
+import io
+
+def main() -> int:
+    line: str | None = io.read_line()
+    while line is not None:
+        print("> " + line)
+        line = io.read_line()
     return 0
 ```
 
@@ -710,6 +725,5 @@ $ ./wc examples/sample.txt
 | タプル・集合・内包表記 | `list` と `for` |
 | 例外 | `raises` / `try` / `except`（§10） |
 | 文字列の書式化（f-string） | `+` と `str(...)` |
-| 標準入力の読み取り | `io.read_file` |
 
 言語の現在地と今後は [roadmap.md](roadmap.md) と [design/future-features.md](design/future-features.md) にあります。

@@ -68,6 +68,6 @@ def main() -> int:
 |---|---|
 | 処理系 | C 実装（stage0）約 11,000 行 ＋ Polonium 実装（stage1）約 7,500 行 |
 | セルフホスト | **到達済み** — stage2 と stage3 がバイト単位で一致（不動点） |
-| テスト | 388 件 ＋ 2 実装の出力比較 236 件 ＋ AddressSanitizer 11 件 |
+| テスト | 399 件 ＋ 2 実装の出力比較 245 件 ＋ AddressSanitizer 11 件 |
 | 対応環境 | Linux / macOS / Windows（MSYS2）、RISC-V ベアメタル |
 | CI | 4 ジョブすべて GitHub Actions で常時検証 |

@@ -87,7 +87,7 @@ for f in "${CASES[@]}"; do
         continue
     fi
 
-    out="$("$TMP/$base.asan" 2>"$TMP/$base.asan.err")"
+    out="$("$TMP/$base.asan" < /dev/null 2>"$TMP/$base.asan.err")"
     rc=$?
 
     # ASan は問題を見つけると stderr に "ERROR: AddressSanitizer" を出して

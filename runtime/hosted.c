@@ -103,6 +103,73 @@ char *pl_read_file(const char *path) {
     return buf;
 }
 
+// ── 標準入力（第35章）────────────────────────────────────────
+//
+// ⚠️ **core.c ではなく、ここ（hosted.c）に置きます。**
+//    ベアメタルには標準入力がありません。core.c に置くと、カーネル側に
+//    「使わないのに実装しなければならないフック」を強いることになります
+//    （docs/design/os-support.md の 4 フックを増やさない、という判断）。
+
+// 1 行読む。改行は**含めません**。EOF で 1 行も読めなければ NULL
+// （Polonium 側では str | None の None になります）。
+char *pl_read_line(void) {
+    long long cap = 128;
+    long long n = 0;
+    char *buf = (char *)malloc((size_t)cap);
+    if (!buf) pl_panic("out of memory");
+
+    int c = fgetc(stdin);
+    if (c == EOF) {
+        free(buf);
+        return NULL;
+    }
+    // ⚠️ 改行の直前の '\r' を落とします。Windows で作ったファイルを
+    //    読んだときに、末尾に見えない文字が残らないようにするためです。
+    while (c != EOF && c != '\n') {
+        if (n + 1 >= cap) {
+            cap *= 2;
+            char *g = (char *)realloc(buf, (size_t)cap);
+            if (!g) pl_panic("out of memory");
+            buf = g;
+        }
+        buf[n++] = (char)c;
+        c = fgetc(stdin);
+    }
+    if (n > 0 && buf[n - 1] == '\r') n--;
+
+    char *out = pl_str_alloc(n);
+    memcpy(out, buf, (size_t)n);
+    out[n] = '\0';
+    free(buf);
+    return out;
+}
+
+// 標準入力を最後まで読む。何も無ければ空文字列。
+char *pl_read_all(void) {
+    long long cap = 4096;
+    long long n = 0;
+    char *buf = (char *)malloc((size_t)cap);
+    if (!buf) pl_panic("out of memory");
+
+    while (1) {
+        if (n == cap) {
+            cap *= 2;
+            char *g = (char *)realloc(buf, (size_t)cap);
+            if (!g) pl_panic("out of memory");
+            buf = g;
+        }
+        size_t got = fread(buf + n, 1, (size_t)(cap - n), stdin);
+        if (got == 0) break;
+        n += (long long)got;
+    }
+
+    char *out = pl_str_alloc(n);
+    memcpy(out, buf, (size_t)n);
+    out[n] = '\0';
+    free(buf);
+    return out;
+}
+
 void pl_write_file(const char *path, const char *text) {
     FILE *fp = fopen(path, "wb");
     if (!fp) {

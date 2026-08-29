@@ -20,7 +20,7 @@ Polonium が**いまどこまで来ていて、次に何を入れるか**です�
 | エラー処理 | `raises` / `try` / `except` / `raise`（アンワインドなし。戻り値検査） |
 | None 安全 | `T \| None` と `is not None` による絞り込み |
 | 低レベル | `unsafe:` ブロック・生ポインタ・volatile 読み書き・インライン `asm` |
-| 標準ライブラリ | `strings` / `io` / `sys` / `dict`（すべて Polonium で記述） |
+| 標準ライブラリ | `strings` / `io`（ファイル・標準入出力）/ `sys` / `dict`（すべて Polonium で記述） |
 
 ### 処理系
 
@@ -29,7 +29,7 @@ Polonium が**いまどこまで来ていて、次に何を入れるか**です�
 | 実装 | C 版（stage0）約 11,000 行 ＋ Polonium 版（stage1）約 7,500 行 |
 | バックエンド | LLVM IR のテキストを出力し、アセンブル・リンクは clang に委譲 |
 | セルフホスト | **到達済み** — stage2 と stage3 がバイト単位で一致（不動点） |
-| 検証 | テスト 396 件 ＋ 2 実装の出力比較 242 件 ＋ ASan 11 件 |
+| 検証 | テスト 399 件 ＋ 2 実装の出力比較 245 件 ＋ ASan 11 件 |
 | 対応環境 | Linux / macOS（Intel・Apple Silicon）/ Windows（MSYS2）/ RISC-V ベアメタル |
 
 ### 到達していないところ
@@ -67,7 +67,6 @@ Polonium が**いまどこまで来ていて、次に何を入れるか**です�
 | **`in` 演算子** | `x in xs` / `k in d` / `sub in s` |
 | **三項演算子** | `a if cond else b` |
 | **文字列の書式化** | f-string 相当 |
-| **標準入力** | `io.read_line()` / `io.read_all()` |
 | **`assert`** | 条件が偽なら `panic` |
 
 ### 優先度 C — その先
@@ -108,5 +107,5 @@ Polonium が**いまどこまで来ていて、次に何を入れるか**です�
 
 | 版 | 内容 |
 |---|---|
-| **0.2.0**（予定） | `float`・docs の再編 |
+| **0.2.0**（予定） | `float`・**標準入力**（`io.read_line` / `io.read_all`）・docs の再編 |
 | 0.1.0 | 最初の公開。セルフホスト・安全性検査・ベアメタル・3 OS 対応 |

@@ -10,6 +10,8 @@ extern def pl_file_exists(path: str) -> int
 extern def pl_eprint(s: str) -> None
 extern def pl_print_raw(s: str) -> None
 extern def pl_remove(path: str) -> None
+extern def pl_read_line() -> str | None
+extern def pl_read_all() -> str
 
 # ファイル全体を読む（開けなければ実行時エラーで終了する）
 def read_file(path: str) -> str:
@@ -36,3 +38,16 @@ def eprint(s: str) -> None:
 
 def exists(path: str) -> bool:
     return pl_file_exists(path) == 1
+
+
+# ── 標準入力（第35章）────────────────────────────────────────
+
+# 1 行読む。**改行は含みません**。もう読めなければ None。
+#
+# ⚠️ 行末の '\r' は落とします（Windows で作った入力でも同じ結果になるように）。
+def read_line() -> str | None:
+    return pl_read_line()
+
+# 標準入力を最後まで読む。何も無ければ空文字列。
+def read_all() -> str:
+    return pl_read_all()

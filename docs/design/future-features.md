@@ -263,19 +263,14 @@ print(f"hello, {name} ({len(name)})")
 
 ---
 
-## 8. 標準入力
+## 8. 標準入力 — **実装済み**（0.2.0）
 
-```python
-import io
+`io.read_line()` / `io.read_all()` として入りました。仕様は
+[spec/stdlib.md](../spec/stdlib.md#標準入力) を参照してください。
 
-line: str | None = io.read_line()     # EOF なら None
-all: str = io.read_all()
-```
-
-`runtime/hosted.c` に読み取りのフックを足します。
-**⚠️ ベアメタルには標準入力がありません。** `core.c` には置かず、
-`pl_hook_read` を 5 つ目のフックとして足すか、`hosted.c` 限定の関数にします。
-**後者を採ります**（ベアメタル側に空実装を書かせたくないため）。
+**決めたとおり `runtime/hosted.c` に置き、`core.c` の 4 フックは増やしませんでした。**
+ベアメタルには標準入力が無く、カーネル側に「使わないのに実装しなければならない
+フック」を強いることになるためです。
 
 ---
 

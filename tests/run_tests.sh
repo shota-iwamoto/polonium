@@ -5,6 +5,7 @@
 #
 #   # EXIT: 42        → コンパイル・実行して終了コードが 42 であること
 #   # OUTPUT: hello   → 標準出力が "hello" であること（複数行は行ごとに書く）
+#   # STDIN: abc      → 標準入力に "abc\n" を与える（複数行は行ごとに書く）
 #   # ERROR: メッセージ → コンパイルが失敗し、stderr にその文字列を含むこと
 #                       （複数行書くと、そのすべてを含むことを要求する）
 #   # TOKENS: INT PUNCT INT NEWLINE EOF
@@ -111,6 +112,14 @@ for case_file in "${CASES[@]}"; do
     want_error="$(sed -n 's/^# *ERROR: *//p' "$case_file" | strip_cr)"
     # OUTPUT は複数行を許す
     want_output="$(sed -n 's/^# *OUTPUT: *//p' "$case_file" | strip_cr)"
+    # ★ 標準入力を与えるケース（第35章）。
+    #   ⚠️ 与えないケースでも **必ず /dev/null に繋ぎます**。繋がないと
+    #     端末や CI の標準入力をそのまま読んでしまい、結果が環境で変わります。
+    stdin_file="$TMP/$(basename "$case_file" .po).stdin"
+    sed -n 's/^# *STDIN: *//p' "$case_file" > "$stdin_file"
+    if [ ! -s "$stdin_file" ]; then
+        : > "$stdin_file"
+    fi
     # TOKENS は複数行書けるので、空白 1 個で連結して 1 行にする
     want_tokens="$(sed -n 's/^# *TOKENS: *//p' "$case_file" \
                    | tr '\n' ' ' | tr -s ' ' | sed 's/ *$//')"
@@ -257,7 +266,7 @@ $compile_err"
     # ⚠️ パイプで受けると $? が最後のコマンド（tr）のものになります。
     #    終了コードは**プログラム自身**のものを見なければ意味がないので、
     #    先に受け取ってから \r を落とします。
-    actual_output="$("$exe" 2>/dev/null)"
+    actual_output="$("$exe" < "$stdin_file" 2>/dev/null)"
     actual_exit=$?
     actual_output="$(printf '%s' "$actual_output" | strip_cr)"
 
