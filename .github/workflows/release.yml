@@ -28,9 +28,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ★ 展開したときのフォルダ名は、配布物の名前と揃えます。
+          #   既定は `uname -s` 由来で、MSYS2 だと
+          #   polonium-MINGW64_NT-10.0-26100-x86_64 のように
+          #   **Windows のビルド番号まで入って**しまうためです。
           - name: linux-x86_64
             os: ubuntu-latest
             shell: bash
+            make_flags: DIST_NAME=polonium-linux-x86_64
           # ★ macOS は **ユニバーサル**（Intel と Apple Silicon の両対応）で作ります。
           #   GitHub の macos-latest は Apple Silicon なので、普通に作ると
           #   arm64 専用になり、Intel Mac では "bad CPU type" で動きません。
@@ -41,6 +46,7 @@ jobs:
           - name: windows-x86_64
             os: windows-latest
             shell: 'msys2 {0}'
+            make_flags: DIST_NAME=polonium-windows-x86_64
     defaults:
       run:
         shell: ${{ matrix.shell }}
