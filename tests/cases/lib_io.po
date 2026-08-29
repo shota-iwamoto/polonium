@@ -7,10 +7,11 @@ import io
 import strings
 
 def main() -> int:
-    path: str = "/tmp/polonium_lib_io_test.txt"
+    # ⚠️ 絶対パス（/tmp）は Windows には無いので、作業ディレクトリに作ります
+    path: str = "polonium_lib_io_test.txt"
     io.write_file(path, "a,b,c")
     print(io.read_file(path) == "a,b,c")
     print(io.exists(path))
-    print(io.exists("/tmp/polonium_no_such_file_12345.txt"))
+    print(io.exists("polonium_no_such_file_12345.txt"))
     print(len(strings.split(io.read_file(path), ",")))
     return 0

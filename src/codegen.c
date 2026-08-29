@@ -1970,7 +1970,15 @@ static void gen_c_main(Emitter *e, const char *main_ir_name) {
     char *t1 = new_tmp(e);
     sb_printf(&e->body, "  %s = trunc i64 %s to i32\n", t1, t0);
 
-    sb_printf(&e->body, "  ret i32 %s\n", t1);
+    // ★ 第31章：下位 8 ビットに切り詰めます（言語仕様 6.1）。
+    //   POSIX は終了コードを勝手に & 0xFF しますが、Windows は 32 ビットを
+    //   そのまま返すので、-3 が 0xFFFFFFFD になって「異常終了」に見えます。
+    //   ここで揃えておけば、**どの OS でも同じ終了コード**になります
+    //   （CI の Windows ジョブが見つけた差）。
+    char *t2 = new_tmp(e);
+    sb_printf(&e->body, "  %s = and i32 %s, 255\n", t2, t1);
+
+    sb_printf(&e->body, "  ret i32 %s\n", t2);
     sb_printf(&e->body, "}\n");
 }
 

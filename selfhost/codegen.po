@@ -1355,7 +1355,13 @@ class Emitter:
         t1: str = self.new_tmp()
         out.append("  " + t1 + " = trunc i64 " + t0 + " to i32\n")
 
-        out.append("  ret i32 " + t1 + "\n")
+        # ★ 第31章：下位 8 ビットに切り詰める（言語仕様 6.1）。
+        #   POSIX は終了コードを勝手に & 0xFF するが、Windows は 32 ビットを
+        #   そのまま返すので、揃えておかないと OS で結果が変わる。
+        t2: str = self.new_tmp()
+        out.append("  " + t2 + " = and i32 " + t1 + ", 255\n")
+
+        out.append("  ret i32 " + t2 + "\n")
         out.append("}\n")
         self.body.append(strings.join(out, ""))
 
