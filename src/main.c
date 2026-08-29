@@ -26,8 +26,22 @@
 
 // ビルド時に Makefile が -DPLC_RUNTIME_O=... で渡してきます（第9章）。
 #ifndef PLC_RUNTIME_O
-#define PLC_RUNTIME_O "build/runtime.o"
+#define PLC_RUNTIME_O "build/runtime.a"
 #endif
+
+// 生成物をリンクするのに使う clang（第31章）。
+// ★ clang-18 のように名前が違う環境があるので、ビルド時に埋め込み、
+//   環境変数 PLC_CLANG でも上書きできるようにします。
+#ifndef PLC_CLANG
+#define PLC_CLANG "clang"
+#endif
+
+// 実際に使う clang を返す（環境変数 → ビルド時の埋め込み）。
+static const char *clang_cmd(void) {
+    const char *env = getenv("PLC_CLANG");
+    if (env && env[0]) return env;
+    return PLC_CLANG;
+}
 
 static void usage(int status) {
     FILE *out = status == 0 ? stdout : stderr;
@@ -131,14 +145,64 @@ static Options parse_args(int argc, char **argv) {
     return o;
 }
 
-// ランタイム（runtime.o）の場所。
-// ★ 第20章：環境変数 PLC_RUNTIME_O があればそちらを使います。
-//   stage1（Polonium 版）はビルド時に埋め込めないので、**両方が同じ規則で探す**
-//   ようにするためです（第18章の PLC_LIB_DIR と同じ手）。
+// ── ランタイムと標準ライブラリの探し方 ─────────────────────
+//
+// ★ 探す順番は 3 つ（第31章で「配って使える」ようにするため足しました）。
+//   ① 環境変数（PLC_RUNTIME_O / PLC_LIB_DIR）
+//   ② ビルド時に埋め込んだ絶対パス（ソースの木の中で使うとき）
+//   ③ **実行ファイルからの相対**（インストールしたとき / 配布物を展開したとき）
+//
+//      <prefix>/bin/poloniumc
+//      <prefix>/lib/polonium/runtime.a
+//      <prefix>/lib/polonium/lib/*.po
+//
+// ⚠️ ③ が無いと、ビルドした場所を動かした瞬間に動かなくなります。
+//    「ダウンロードして展開したら動く」ためには、この規則が要ります。
+static bool file_exists(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    fclose(fp);
+    return true;
+}
+
+// argv[0] から実行ファイルのあるディレクトリを求める（無理なら NULL）
+static char *exe_dir(const char *argv0) {
+    if (!argv0 || !argv0[0]) return NULL;
+    const char *slash = NULL;
+    for (const char *c = argv0; *c; c++)
+        if (*c == '/' || *c == '\\') slash = c;
+    if (!slash) return NULL;  // PATH 経由で起動された（相対を諦める）
+    return xstrndup(argv0, (size_t)(slash - argv0));
+}
+
+static char *g_exe_dir;  // main が最初に埋める
+
+// <exe>/../lib/polonium/<name> を組み立てる
+static char *installed_path(const char *name) {
+    if (!g_exe_dir) return NULL;
+    StrBuf sb;
+    sb_init(&sb);
+    sb_printf(&sb, "%s/../lib/polonium/%s", g_exe_dir, name);
+    return sb_str(&sb);
+}
+
+// module.c が「標準ライブラリの場所」を聞きに来る（第31章）
+const char *plc_installed_lib_dir(void) {
+    char *p = installed_path("lib");
+    if (!p) return NULL;
+    StrBuf probe;
+    sb_init(&probe);
+    sb_printf(&probe, "%s/strings" PLC_LANG_EXT, p);
+    return file_exists(sb_str(&probe)) ? p : NULL;
+}
+
 static const char *runtime_o(void) {
     const char *env = getenv("PLC_RUNTIME_O");
     if (env && env[0]) return env;
-    return PLC_RUNTIME_O;
+    if (file_exists(PLC_RUNTIME_O)) return PLC_RUNTIME_O;
+    char *p = installed_path("runtime.a");
+    if (p && file_exists(p)) return p;
+    return PLC_RUNTIME_O;  // 見つからないときは、埋め込んだ値でエラーを出させる
 }
 
 // 出力ファイル名とモジュール名から .ll のパスを作る。
@@ -153,6 +217,7 @@ static char *ll_path_for(const char *output, const char *mod_name) {
 }
 
 int main(int argc, char **argv) {
+    g_exe_dir = exe_dir(argv[0]);  // ★ 配布物でも動くように（上の runtime_o を参照）
     Options opt = parse_args(argc, argv);
 
     // プリミティブ型のシングルトンを用意する（types.h 参照）
@@ -256,10 +321,11 @@ int main(int argc, char **argv) {
         sb_init(&oc);
         // ★ RISC-V などは Apple の clang が対応していないことがあるので、
         //   PLC_CLANG で使う clang を差し替えられるようにします。
-        const char *cc = getenv("PLC_CLANG");
-        if (!cc || !cc[0]) cc = "clang";
-        sb_printf(&oc, "%s %s -Wno-override-module -c '%s' -o '%s'", cc, opt.opt_level,
-                  entry->ll_path, opt.output);
+        const char *cc = clang_cmd();
+        // ⚠️ 引用は "…" にします。Windows の system() は cmd.exe を通すので、
+        //    '…' は引用符として扱われません（POSIX の sh は "…" も理解します）。
+        sb_printf(&oc, "%s %s -Wno-override-module -c \"%s\" -o \"%s\"", cc,
+                  opt.opt_level, entry->ll_path, opt.output);
         if (triple) sb_printf(&oc, " --target=%s", triple);
         const char *extra = getenv("PLC_CFLAGS");
         if (extra && extra[0]) sb_printf(&oc, " %s", extra);
@@ -276,14 +342,26 @@ int main(int argc, char **argv) {
 
     // ── ⑤ clang に丸投げして実行ファイルを作る ──
     //
+    // ★ Windows では拡張子が無いと実行できないので、`.` を含まない
+    //   出力名には .exe を足します（gcc / clang と同じふるまい）。
+    const char *out_path = opt.output;
+#ifdef _WIN32
+    if (!strchr(opt.output, '.')) {
+        StrBuf w;
+        sb_init(&w);
+        sb_printf(&w, "%s.exe", opt.output);
+        out_path = sb_str(&w);
+    }
+#endif
+    //
     // ★ 第13章：.ll を全部並べて渡します。モジュール修飾のおかげで、
     //   別ファイルの同名関数があっても duplicate symbol になりません。
     StrBuf cmd;
     sb_init(&cmd);
-    sb_printf(&cmd, "clang %s", opt.opt_level);
-    for (Module *m = mods; m; m = m->next) sb_printf(&cmd, " '%s'", m->ll_path);
+    sb_printf(&cmd, "%s %s", clang_cmd(), opt.opt_level);
+    for (Module *m = mods; m; m = m->next) sb_printf(&cmd, " \"%s\"", m->ll_path);
     // ★ 第9章：ランタイム（runtime/runtime.c をコンパイルしたもの）をリンクする。
-    sb_printf(&cmd, " '%s' -o '%s'", runtime_o(), opt.output);
+    sb_printf(&cmd, " \"%s\" -o \"%s\"", runtime_o(), out_path);
 
     int rc = system(sb_str(&cmd));
     if (rc != 0) {

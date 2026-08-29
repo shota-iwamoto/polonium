@@ -1,6 +1,8 @@
 // module.c — import をたどってモジュールを読み込む（第13章）
 #include "module.h"
 
+#include "langinfo.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,9 +109,20 @@ static char *join_path(const char *dir, const char *name) {
 // ★ 第18章：環境変数 PLC_LIB_DIR があればそちらを使います。
 //   stage1（Polonium 版）にはプリプロセッサが無く、ビルド時に埋め込めないので、
 //   **両方が同じ規則で探す**ようにするためです。
+// ★ 第31章：配布物でも動くように、実行ファイルからの相対も見ます。
+//   探す順番は runtime と同じ（環境変数 → 埋め込み → <exe>/../lib/polonium/lib）。
+const char *plc_installed_lib_dir(void);  // main.c が教えてくれる（無ければ NULL）
+
 static const char *lib_dir(void) {
     const char *env = getenv("PLC_LIB_DIR");
     if (env && env[0]) return env;
+
+    char *probe = join_path(PLC_LIB_DIR, "strings" PLC_LANG_EXT);
+    bool baked_ok = file_exists(probe);
+    if (baked_ok) return PLC_LIB_DIR;
+
+    const char *installed = plc_installed_lib_dir();
+    if (installed) return installed;
     return PLC_LIB_DIR;
 }
 

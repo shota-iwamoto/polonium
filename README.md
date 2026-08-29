@@ -28,18 +28,83 @@ def main() -> int:
 
 ---
 
-## ビルドと実行
+## 使ってみる（Linux / macOS / Windows）
+
+### 必要なもの
+
+**clang だけです。** このコンパイラは LLVM IR のテキストを出力し、
+アセンブルとリンクを clang に任せる作りなので、clang があればどの OS でも同じように動きます。
+
+| OS | 入れるもの |
+|---|---|
+| **Linux** | `sudo apt install clang llvm make`（Debian / Ubuntu）<br>`sudo dnf install clang llvm make`（Fedora） |
+| **macOS** | `xcode-select --install`（Apple clang で足ります） |
+| **Windows** | [MSYS2](https://www.msys2.org/) を入れて、MINGW64 シェルで<br>`pacman -S mingw-w64-x86_64-clang mingw-w64-x86_64-lld make diffutils grep coreutils` |
+
+> **⚠️ Windows は MSYS2（または WSL）の上で使ってください。**
+> テストとビルドが bash と make に依存しているためです。
+> WSL を使う場合は「Linux」の手順がそのまま使えます。
+
+### A. 配布物をダウンロードして使う（ビルド不要）
+
+[Releases](https://github.com/shota-iwamoto/polonium/releases) から
+OS に合う `.tar.gz` を取って展開します。
 
 ```bash
-make                       # コンパイラをビルド（build/poloniumc）
-./build/poloniumc examples/wordcount.po -o wc && ./wc examples/sample.txt
+tar xzf polonium-linux-x86_64.tar.gz
+cd polonium-*
 
-make test                  # 全テスト + セルフホスト比較
-make bootstrap             # 3 段ビルドと不動点の検証（stage2 == stage3）
-make info                  # 言語名・拡張子などの現在値
+printf 'def main() -> int:\n    print("hello")\n    return 0\n' > hello.po
+./bin/poloniumc hello.po -o hello
+./hello                      # → hello
 ```
 
-必要なもの：clang、LLVM ツール（`opt` / `lli`）、make。
+中身はこの 3 つだけです。**展開した場所がどこでも動きます**
+（コンパイラが実行ファイルからの相対で標準ライブラリを探すため）。
+
+```
+bin/poloniumc
+lib/polonium/runtime.a
+lib/polonium/lib/*.po        ← 標準ライブラリ（io / strings / dict / sys）
+```
+
+### B. ソースからビルドする
+
+```bash
+git clone https://github.com/shota-iwamoto/polonium.git
+cd polonium
+make                         # → build/poloniumc
+
+./build/poloniumc examples/wordcount.po -o wc
+./wc examples/sample.txt
+```
+
+### C. インストールする（PATH に置く）
+
+```bash
+sudo make install            # 既定は /usr/local
+make install PREFIX=$HOME/.local   # 自分の環境だけに入れるなら
+
+poloniumc hello.po -o hello  # どこからでも呼べる
+```
+
+### よく使うコマンド
+
+```bash
+make test                  # 全テスト + 解放の検査 + セルフホスト比較
+make bootstrap             # 3 段ビルドと不動点の検証（stage2 == stage3）
+make dist                  # 配布用のディレクトリを build/dist に作る
+make qemu-test             # ベアメタル（RISC-V）の検証（第32〜33章）
+make info                  # 使っている clang・triple などの現在値
+```
+
+環境変数で差し替えられます。
+
+| 変数 | 用途 |
+|---|---|
+| `PLC_CLANG` | 使う clang（`clang-18` など名前が違うとき） |
+| `PLC_RUNTIME_O` / `PLC_LIB_DIR` | ランタイムと標準ライブラリの場所 |
+| `make CC=gcc` | コンパイラ本体のビルドに使う C コンパイラ |
 
 ---
 

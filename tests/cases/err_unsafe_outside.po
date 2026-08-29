@@ -1,3 +1,4 @@
+# STAGE0-ONLY: unsafe / ptr[T] は C 版だけ（移植は第29章の続き）
 # STAGE1-SKIP: stage1 はまだ unsafe / ptr[T] を解析できない
 # ERROR: error[E-UNSAFE-1]: 'ptr_at' は unsafe: の中でしか使えません
 # ERROR: unsafe: ブロックで囲んでください

@@ -20,7 +20,7 @@ BOOT="$ROOT/build/boot"
 # ★ C 版がビルド時に埋め込む値を、stage1 には環境変数で渡します
 #   （両者とも環境変数を先に見る規則。ch18 18.6 / ch20 20.2）
 export PLC_LIB_DIR="$ROOT/lib"
-export PLC_RUNTIME_O="$ROOT/build/runtime.o"
+export PLC_RUNTIME_O="$ROOT/build/runtime.a"
 export PLC_TARGET_TRIPLE="$("$PLC_CC" -S "$ROOT/tests/cases/int_42.po" \
     | sed -n 's/^target triple = "\(.*\)"$/\1/p')"
 
@@ -75,15 +75,35 @@ printf "%s★ stage2 と stage3 が出す IR が完全一致（%d 本）%s\n" "$
 
 # ── ② 実行ファイルも一致するか ──
 #
-# ⚠️ macOS のリンカは実行ファイルに UUID（毎回変わる 16 バイト）を埋めます。
-#    そのままだと必ず差が出るので、比較のときだけ -Wl,-no_uuid で作り直します。
+# ⚠️ リンカは実行ファイルに「毎回変わる印」を埋めます。
+#    そのままだと必ず差が出るので、比較のときだけ止めます。
+#      macOS … UUID           → -Wl,-no_uuid
+#      Linux … build-id       → -Wl,--build-id=none
 #    ★ 「違いが出た」ではなく「どこが違うのか」を調べてから判断すること。
-if ! clang -O0 "$BOOT"/stage2.*.ll "$PLC_RUNTIME_O" -Wl,-no_uuid \
+#
+# ⚠️ この比較は「おまけ」です。**本体は ① の IR の一致**なので、
+#    印を止められない環境（Windows など）では飛ばします。
+CLANG="${PLC_CLANG:-clang}"
+case "$(uname -s 2>/dev/null || echo Unknown)" in
+    Darwin) NOSTAMP="-Wl,-no_uuid" ;;
+    Linux)  NOSTAMP="-Wl,--build-id=none" ;;
+    *)      NOSTAMP="" ;;
+esac
+
+if [ -z "$NOSTAMP" ]; then
+    printf "%s（実行ファイルの比較は、この環境では飛ばします）%s\n" "$C_DIM" "$C_END"
+    echo
+    printf "%s★ 不動点に到達しました（stage2 == stage3）%s\n" "$C_OK" "$C_END"
+    printf "%s   Polonium コンパイラは、自分自身をコンパイルできます。%s\n" "$C_DIM" "$C_END"
+    exit 0
+fi
+
+if ! "$CLANG" -O0 "$BOOT"/stage2.*.ll "$PLC_RUNTIME_O" $NOSTAMP \
         -o "$BOOT/cmp2" 2>/dev/null; then
     echo "比較用のリンクに失敗しました"
     exit 1
 fi
-clang -O0 "$BOOT"/stage3.*.ll "$PLC_RUNTIME_O" -Wl,-no_uuid -o "$BOOT/cmp3" 2>/dev/null
+"$CLANG" -O0 "$BOOT"/stage3.*.ll "$PLC_RUNTIME_O" $NOSTAMP -o "$BOOT/cmp3" 2>/dev/null
 
 if cmp -s "$BOOT/cmp2" "$BOOT/cmp3"; then
     printf "%s★ 実行ファイルもバイト単位で一致（UUID を除く）%s\n" "$C_OK" "$C_END"

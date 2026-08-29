@@ -44,6 +44,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 #   PLC_CC=build/stage2 tests/run_tests.sh とすれば、
 #   **Polonium 製コンパイラでテスト全部を通す**ことができます。
 PLC_CC="${PLC_CC:-$ROOT/build/poloniumc}"
+# ★ Windows（MSYS2）では .exe が付きます
+[ -x "$PLC_CC" ] || [ ! -x "$PLC_CC.exe" ] || PLC_CC="$PLC_CC.exe"
 TMP="$ROOT/tests/tmp"
 
 if [ ! -x "$PLC_CC" ]; then
@@ -246,6 +248,8 @@ $compile_err"
     fi
 
     # ── 実行 ──
+    # ★ Windows（MSYS2）では実行ファイルに .exe が付きます
+    [ -x "$exe" ] || [ ! -x "$exe.exe" ] || exe="$exe.exe"
     actual_output="$("$exe" 2>/dev/null)"
     actual_exit=$?
 

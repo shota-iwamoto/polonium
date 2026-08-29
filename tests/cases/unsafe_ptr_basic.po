@@ -1,3 +1,4 @@
+# STAGE0-ONLY: unsafe / ptr[T] は C 版だけ（移植は第29章の続き）
 # STAGE1-SKIP: stage1 はまだ unsafe / ptr[T] を解析できない（第31章以降で移植）
 # EXIT: 10
 # 第30章：unsafe: の中では生ポインタを触れる（OS 開発の入口）

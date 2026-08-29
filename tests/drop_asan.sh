@@ -16,6 +16,8 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLC_CC="${PLC_CC:-$ROOT/build/poloniumc}"
+# ★ Windows（MSYS2）では .exe が付きます
+[ -x "$PLC_CC" ] || [ ! -x "$PLC_CC.exe" ] || PLC_CC="$PLC_CC.exe"
 TMP="$ROOT/tests/tmp"
 mkdir -p "$TMP"
 
@@ -51,7 +53,7 @@ for f in "${CASES[@]}"; do
     fi
 
     # ★ ランタイムも一緒に ASan でビルドする（解放するのはランタイム側なので）
-    if ! clang -fsanitize=address -O0 "$TMP/$base.drop".*.ll "$ROOT/runtime/core.c" "$ROOT/runtime/hosted.c" \
+    if ! "${PLC_CLANG:-clang}" -fsanitize=address -O0 "$TMP/$base.drop".*.ll "$ROOT/runtime/core.c" "$ROOT/runtime/hosted.c" \
             -o "$TMP/$base.asan" 2>"$TMP/$base.link"; then
         printf "  %sFAIL%s  %s（リンクに失敗）\n" "$C_NG" "$C_END" "$name"
         head -5 "$TMP/$base.link" | sed 's/^/          /'

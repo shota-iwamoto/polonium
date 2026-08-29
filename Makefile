@@ -11,9 +11,33 @@
 #   make bootstrap      3 段ビルドと不動点の検証（第20章）
 #   make bootstrap-test Polonium 製コンパイラでテストを全部通す
 #   make asan       AddressSanitizer 付きでビルド（メモリバグ調査用）
+#   make install    <prefix>/bin と <prefix>/lib/polonium に入れる（PREFIX=… で変更）
+#   make dist       配布用のディレクトリを build/dist に作る
 #   make clean      生成物を削除
 
-CC      := clang
+# ── 動かす環境（Linux / macOS / Windows）──────────────────────
+#
+# ★ このコンパイラは「LLVM IR のテキストを出して、clang に渡す」作りなので、
+#   clang さえあればどの OS でも同じように動きます。
+#   OS ごとに違うのは、ここに集めた 4 つだけです。
+UNAME_S := $(shell uname -s 2>/dev/null || echo Unknown)
+IS_MAC  := $(filter Darwin,$(UNAME_S))
+IS_WIN  := $(filter MINGW% MSYS% CYGWIN%,$(UNAME_S))
+
+# Windows（MSYS2 / Git Bash）では実行ファイルに .exe が付きます
+ifneq ($(IS_WIN),)
+  EXEEXT := .exe
+else
+  EXEEXT :=
+endif
+
+# ★ コンパイラ本体は C11 が通れば何でビルドしても構いません（gcc でも可）。
+#   ただし **IR を扱うのは clang** です（LLVM IR のテキストを読めるのは clang だけ）。
+#   make CC=gcc のように明示したときは、その指定を尊重します。
+ifeq ($(origin CC),default)
+  CC := clang
+endif
+CLANG ?= clang
 CFLAGS  := -std=c11 -g -O0 -Wall -Wextra -Wno-unused-parameter
 
 # ── 言語の名前と拡張子（★ 改名するときはここだけ）───────────
@@ -36,14 +60,21 @@ CFLAGS  += -DPLC_LANG_NAME='"$(LANG_NAME)"' \
 #    macOS ではそれが返す値（x86_64-apple-darwin25.5.0）と、clang が実際に
 #    IR に書く値（x86_64-apple-macosx26.0.0）が異なり、警告の原因になります。
 #    「clang 自身に空の C ファイルの IR を吐かせて、そこから抜き出す」のが確実です。
-HOST_TRIPLE := $(shell $(CC) -S -emit-llvm -x c /dev/null -o - 2>/dev/null \
-                 | sed -n 's/^target triple = "\(.*\)"$$/\1/p')
+#    ⚠️ Windows には /dev/null が無いことがあるので、空ファイルを作って渡します。
+HOST_TRIPLE := $(shell printf '' > .plc-empty.c 2>/dev/null; \
+                 $(CLANG) -S -emit-llvm -x c .plc-empty.c -o - 2>/dev/null \
+                 | sed -n 's/^target triple = "\(.*\)"$$/\1/p'; \
+                 rm -f .plc-empty.c)
 CFLAGS  += -DPLC_TARGET_TRIPLE='"$(HOST_TRIPLE)"'
 
-# ── Homebrew LLVM のツール（opt / lli / llvm-as）─────────────
-# clang は Apple 版を使いますが、opt などは Homebrew 版が必要です。
-# Linux など brew がない環境では PATH から探します。
+# ── LLVM のツール（opt / lli / llvm-as / ld.lld）──────────────
+#
+# ★ 探す順番：① Homebrew（macOS）→ ② llvm-config → ③ PATH。
+#   Linux では distro の LLVM がそのまま PATH にあります。
 LLVM_BIN := $(shell brew --prefix llvm 2>/dev/null)/bin
+ifeq ($(wildcard $(LLVM_BIN)/opt),)
+  LLVM_BIN := $(shell llvm-config --bindir 2>/dev/null)
+endif
 ifeq ($(wildcard $(LLVM_BIN)/opt),)
   LLVM_BIN := $(patsubst %/,%,$(dir $(shell which opt 2>/dev/null)))
 endif
@@ -61,8 +92,18 @@ LLVM_AS  := $(LLVM_BIN)/llvm-as
 #    ランタイムは「ユーザーのプログラムの一部」として動くからです。
 RUNTIME_CORE := runtime/core.c
 RUNTIME_HOSTED := runtime/hosted.c
-RUNTIME_OBJ := build/runtime.o
+
+# ★ 静的ライブラリ（.a）にまとめます。
+#   ⚠️ 以前は `ld -r`（部分リンク）でしたが、Windows では使えません。
+#     `ar` はどの環境にもあり、clang のリンク行にそのまま渡せます。
+RUNTIME_OBJ := build/runtime.a
+AR ?= ar
 RUNTIME_CFLAGS := -std=c11 -O2 -Wall -Wextra
+
+# ★ 生成したプログラムをリンクするのに使う clang（実行時に呼ぶ相手）。
+#   ⚠️ clang-18 のように名前が違う環境があるので、埋め込みつつ
+#     環境変数 PLC_CLANG で上書きできるようにします。
+CFLAGS  += -DPLC_CLANG='"$(CLANG)"'
 
 # コンパイラにランタイムの場所を教える。
 # ⚠️ stage0 だけの割り切り（ビルドツリー内で完結すればよい）。第20章で見直します。
@@ -75,7 +116,7 @@ CFLAGS  += -DPLC_LIB_DIR='"$(abspath lib)"'
 SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=build/%.o)
 DEPS    := $(OBJS:.o=.d)
-TARGET  := build/$(LANG_CC)
+TARGET  := build/$(LANG_CC)$(EXEEXT)
 
 .PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan drop-asan info
 
@@ -84,14 +125,14 @@ all: $(TARGET) $(RUNTIME_OBJ)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $^ -o $@
 
-# ★ 2 つを 1 つのオブジェクトにまとめます（ld -r ＝ 部分リンク）。
-#   こうしておくと、コンパイラ側は「ランタイムは .o が 1 本」という
-#   第9章からの前提のままで済みます。
+# ★ 2 つを 1 つの静的ライブラリにまとめます。
+#   こうしておくと、コンパイラ側は「ランタイムは 1 本のファイル」という
+#   第9章からの前提のままで済みます（.o でも .a でも clang に渡せます）。
 $(RUNTIME_OBJ): $(RUNTIME_CORE) $(RUNTIME_HOSTED) runtime/core.h
 	@mkdir -p build
 	$(CC) $(RUNTIME_CFLAGS) -c $(RUNTIME_CORE) -o build/core.o
 	$(CC) $(RUNTIME_CFLAGS) -c $(RUNTIME_HOSTED) -o build/hosted.o
-	ld -r -o $@ build/core.o build/hosted.o
+	$(AR) rcs $@ build/core.o build/hosted.o
 
 # -MMD -MP でヘッダの依存関係を自動生成する。
 # これがないと、ヘッダを直したのに再ビルドされず不思議なバグに悩まされます。
@@ -156,7 +197,14 @@ asan: $(RUNTIME_OBJ)
 #
 # 使うもの: brew install llvm riscv64-elf-binutils qemu
 LLVM_CLANG := $(LLVM_BIN)/clang
-RV_LD      := riscv64-elf-ld
+ifeq ($(wildcard $(LLVM_CLANG)),)
+  LLVM_CLANG := $(CLANG)
+endif
+
+# ★ リンカは環境にあるものを使います。
+#   ld.lld（LLVM に付属。Linux で入れやすい）→ riscv64-elf-ld（Homebrew の cross binutils）
+RV_LD := $(shell command -v ld.lld 2>/dev/null || command -v riscv64-elf-ld 2>/dev/null \
+           || echo riscv64-elf-ld)
 RV_TRIPLE  := riscv64-unknown-elf
 RV_ARCH    := -march=rv64g -mabi=lp64 -mcmodel=medany -mno-relax
 RV_CFLAGS  := --target=$(RV_TRIPLE) $(RV_ARCH) -ffreestanding -O2
@@ -188,6 +236,42 @@ qemu: kernel
 qemu-test: kernel
 	@tests/qemu.sh
 
+# ── インストールと配布（第31章）──────────────────────────────
+#
+# ★ 配る形（どの OS でも同じ）:
+#     <prefix>/bin/poloniumc
+#     <prefix>/lib/polonium/runtime.a
+#     <prefix>/lib/polonium/lib/*.po
+#
+#   コンパイラは「実行ファイルからの相対」でこの 2 つを探すので、
+#   展開した場所がどこでも動きます（src/main.c の runtime_o を参照）。
+PREFIX ?= /usr/local
+DESTDIR ?=
+
+.PHONY: install uninstall dist
+
+install: all
+	@mkdir -p "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/lib/polonium/lib"
+	cp $(TARGET) "$(DESTDIR)$(PREFIX)/bin/"
+	cp $(RUNTIME_OBJ) "$(DESTDIR)$(PREFIX)/lib/polonium/"
+	cp lib/*$(LANG_EXT) "$(DESTDIR)$(PREFIX)/lib/polonium/lib/"
+	@echo "インストールしました: $(DESTDIR)$(PREFIX)/bin/$(LANG_CC)$(EXEEXT)"
+
+uninstall:
+	rm -f "$(DESTDIR)$(PREFIX)/bin/$(LANG_CC)$(EXEEXT)"
+	rm -rf "$(DESTDIR)$(PREFIX)/lib/polonium"
+
+# 配布用のディレクトリ（そのまま zip / tar.gz にできる形）
+DIST_NAME ?= polonium-$(UNAME_S)-$(shell uname -m 2>/dev/null || echo unknown)
+dist: all
+	rm -rf build/dist/$(DIST_NAME)
+	@mkdir -p build/dist/$(DIST_NAME)/bin build/dist/$(DIST_NAME)/lib/polonium/lib
+	cp $(TARGET) build/dist/$(DIST_NAME)/bin/
+	cp $(RUNTIME_OBJ) build/dist/$(DIST_NAME)/lib/polonium/
+	cp lib/*$(LANG_EXT) build/dist/$(DIST_NAME)/lib/polonium/lib/
+	cp README.md LICENSE build/dist/$(DIST_NAME)/ 2>/dev/null || 	  cp README.md build/dist/$(DIST_NAME)/
+	@echo "配布物: build/dist/$(DIST_NAME)"
+
 # ── 情報表示 ────────────────────────────────────────────────
 info:
 	@echo "CC           = $(CC)"
@@ -197,6 +281,9 @@ info:
 	@echo "LANG_NAME    = $(LANG_NAME)"
 	@echo "LANG_EXT     = $(LANG_EXT)"
 	@echo "LANG_CC      = $(LANG_CC)"
+	@echo "UNAME_S      = $(UNAME_S)"
+	@echo "CLANG        = $(CLANG)"
+	@echo "RUNTIME      = $(RUNTIME_OBJ)"
 
 clean:
 	rm -rf build a.out a.out.ll tests/tmp

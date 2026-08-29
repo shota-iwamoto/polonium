@@ -1,0 +1,121 @@
+# Release — タグを打つと、3 つの OS 向けの配布物を作って Release に貼ります。
+#
+# ★ 配る形はどの OS でも同じです。
+#     bin/poloniumc
+#     lib/polonium/runtime.a
+#     lib/polonium/lib/*.po
+#   コンパイラは実行ファイルからの相対でこの 2 つを探すので、
+#   **展開した場所がどこでも動きます**（src/main.c の runtime_o を参照）。
+#
+# ⚠️ 使う側には clang が必要です（このコンパイラは LLVM IR を出して
+#    clang にリンクを任せる作りなので）。README の「必要なもの」を参照。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'つけるタグ（例: v0.1.0）'
+        required: true
+
+jobs:
+  build:
+    name: 配布物（${{ matrix.name }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            shell: bash
+          - name: macos
+            os: macos-latest
+            shell: bash
+          - name: windows-x86_64
+            os: windows-latest
+            shell: 'msys2 {0}'
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 道具を入れる（Linux）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
+
+      - name: 道具を入れる（Windows / MSYS2）
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: make diffutils grep coreutils
+          pacboy: clang:p lld:p
+
+      - name: ビルドとテスト
+        run: |
+          make
+          make test
+
+      - name: 配布物を作る
+        run: make dist
+
+      - name: 動くことを確かめる（展開した場所から）
+        run: |
+          cd build/dist
+          d=$(ls -d polonium-*)
+          printf 'def main() -> int:\n    print("release ok")\n    return 0\n' > t.po
+          "./$d/bin/poloniumc" t.po -o t
+          ./t*
+
+      - name: まとめる
+        run: |
+          cd build/dist
+          d=$(ls -d polonium-*)
+          tar czf "polonium-${{ matrix.name }}.tar.gz" "$d"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polonium-${{ matrix.name }}
+          path: build/dist/polonium-${{ matrix.name }}.tar.gz
+
+  release:
+    name: Release に貼る
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 一覧
+        run: ls -R dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*.tar.gz
+          body: |
+            ## 使い方
+
+            1. お使いの OS の `.tar.gz` を展開します
+            2. `bin/poloniumc hello.po -o hello` でコンパイルします
+
+            **必要なもの: clang**（このコンパイラは LLVM IR を出して、
+            リンクを clang に任せる作りです）。
+
+            ```bash
+            tar xzf polonium-linux-x86_64.tar.gz
+            cd polonium-*
+            printf 'def main() -> int:\n    print("hello")\n    return 0\n' > hello.po
+            ./bin/poloniumc hello.po -o hello && ./hello
+            ```

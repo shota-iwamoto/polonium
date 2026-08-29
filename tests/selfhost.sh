@@ -12,6 +12,8 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLC_CC="$ROOT/build/poloniumc"
+# ★ Windows（MSYS2）では .exe が付きます
+[ -x "$PLC_CC" ] || [ ! -x "$PLC_CC.exe" ] || PLC_CC="$PLC_CC.exe"
 STAGE1="$ROOT/build/stage1-lexer"
 STAGE1_AST="$ROOT/build/stage1-ast"
 STAGE1_CHECK="$ROOT/build/stage1-check"
@@ -202,7 +204,7 @@ for f in "${FILES[@]}"; do
     if grep -q '^; ── module:' "$TMP/c.ll"; then
         continue
     fi
-    if ! clang "$TMP/m.ll" "$ROOT/build/runtime.o" -o "$TMP/m.bin" 2>/dev/null; then
+    if ! "${PLC_CLANG:-clang}" "$TMP/m.ll" "$ROOT/build/runtime.a" -o "$TMP/m.bin" 2>/dev/null; then
         fail=$((fail + 1)); failed_names+=("$name")
         printf "  %sFAIL%s  %s（stage1 の IR がリンクできない）\n" \
                "$C_NG" "$C_END" "$name"
