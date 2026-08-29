@@ -98,18 +98,25 @@ if [ -z "$NOSTAMP" ]; then
     exit 0
 fi
 
+# ⚠️ **出力の「名前」まで同じにします。**
+#    Apple Silicon の macOS はリンク時に ad-hoc 署名を付け、その中に
+#    **実行ファイル名から作った識別子**が入ります。cmp2 / cmp3 という
+#    違う名前で作ると、中身が同じでも署名が変わって必ず差が出ます
+#    （Intel の macOS では署名されないので気づけませんでした。CI が見つけた差）。
+mkdir -p "$BOOT/cmp/a" "$BOOT/cmp/b"
 if ! "$CLANG" -O0 "$BOOT"/stage2.*.ll "$PLC_RUNTIME_O" $NOSTAMP \
-        -o "$BOOT/cmp2" 2>/dev/null; then
+        -o "$BOOT/cmp/a/poloniumc" 2>/dev/null; then
     echo "比較用のリンクに失敗しました"
     exit 1
 fi
-"$CLANG" -O0 "$BOOT"/stage3.*.ll "$PLC_RUNTIME_O" $NOSTAMP -o "$BOOT/cmp3" 2>/dev/null
+"$CLANG" -O0 "$BOOT"/stage3.*.ll "$PLC_RUNTIME_O" $NOSTAMP \
+    -o "$BOOT/cmp/b/poloniumc" 2>/dev/null
 
-if cmp -s "$BOOT/cmp2" "$BOOT/cmp3"; then
+if cmp -s "$BOOT/cmp/a/poloniumc" "$BOOT/cmp/b/poloniumc"; then
     printf "%s★ 実行ファイルもバイト単位で一致（UUID を除く）%s\n" "$C_OK" "$C_END"
 else
     printf "%s✗ 実行ファイルが違います%s\n" "$C_NG" "$C_END"
-    cmp "$BOOT/cmp2" "$BOOT/cmp3" | head -3
+    cmp "$BOOT/cmp/a/poloniumc" "$BOOT/cmp/b/poloniumc" | head -3
     exit 1
 fi
 
