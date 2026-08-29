@@ -10,6 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+// ⚠️ WIFEXITED / WEXITSTATUS は POSIX の <sys/wait.h> にあります。
+//    macOS では <stdlib.h> が連れてきますが、Linux では明示しないと通りません
+//    （CI の Linux ジョブが最初に見つけた移植性の穴です）。
+//    Windows にはこのヘッダが無いので、system() の戻り値をそのまま使います。
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+
 #include "core.h"
 
 // core.c が使う関数のうち、ここでも使うもの
@@ -121,9 +129,14 @@ char *pl_getenv(const char *name) {
 long long pl_system(const char *cmd) {
     int st = system(cmd);
     if (st == -1) return -1;
+#ifdef _WIN32
+    // Windows の system() は終了コードをそのまま返します
+    return (long long)st;
+#else
     if (WIFEXITED(st)) return (long long)WEXITSTATUS(st);
     if (WIFSIGNALED(st)) return (long long)(128 + WTERMSIG(st));
     return (long long)st;
+#endif
 }
 
 // argv を list[str] にして返す（第14章）。
