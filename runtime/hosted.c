@@ -16,6 +16,14 @@
 //    Windows にはこのヘッダが無いので、system() の戻り値をそのまま使います。
 #ifndef _WIN32
 #include <sys/wait.h>
+#else
+// ⚠️ Windows の標準出力は既定で「テキストモード」で、\n を \r\n に書き換えます。
+//    それでは **書いたバイトと出るバイトが違う**ことになり、
+//    「どの OS でも同じ結果」という約束が崩れます（CI の Windows ジョブが
+//    出力の不一致で見つけました）。binary モードに切り替えて、
+//    print が書いた通りのバイトを出します。
+#include <fcntl.h>
+#include <io.h>
 #endif
 
 #include "core.h"
@@ -40,6 +48,14 @@ void *pl_hook_alloc(long long size) { return calloc(1, (size_t)size); }
 void pl_hook_free(void *p) { free(p); }
 
 void pl_hook_write(const char *s, long long len) {
+#ifdef _WIN32
+    static int mode_set = 0;
+    if (!mode_set) {
+        mode_set = 1;
+        _setmode(_fileno(stdout), _O_BINARY);
+        _setmode(_fileno(stderr), _O_BINARY);
+    }
+#endif
     fwrite(s, 1, (size_t)len, stdout);
 }
 
@@ -57,7 +73,12 @@ static char **g_argv;
 //
 // ★ コンパイラは診断を stderr に書きます。print は stdout なので、
 //   セルフホストの診断にはこれが要ります（移植で見つかった穴）。
-void pl_eprint(const char *s) { fputs(s, stderr); }
+void pl_eprint(const char *s) {
+#ifdef _WIN32
+    _setmode(_fileno(stderr), _O_BINARY);  // 上と同じ理由（第31章）
+#endif
+    fputs(s, stderr);
+}
 
 _Noreturn void pl_exit(long long code) { exit((int)code); }
 

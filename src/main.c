@@ -217,6 +217,7 @@ static char *ll_path_for(const char *output, const char *mod_name) {
 }
 
 int main(int argc, char **argv) {
+    plc_use_binary_streams();      // Windows の \r\n 変換を止める（第31章）
     g_exe_dir = exe_dir(argv[0]);  // ★ 配布物でも動くように（上の runtime_o を参照）
     Options opt = parse_args(argc, argv);
 

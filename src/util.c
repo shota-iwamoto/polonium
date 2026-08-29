@@ -1,5 +1,12 @@
 #include "util.h"
 
+// ⚠️ Windows の標準出力・標準エラーは既定で \n を \r\n に書き換えます。
+//    診断や --dump-ast の出力が OS によって変わってしまうので、binary に揃えます。
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +14,14 @@
 #include "langinfo.h"
 
 // ── メモリ確保 ──────────────────────────────────────────────
+
+// 標準出力・標準エラーを binary モードにする（Windows だけの都合。第31章）
+void plc_use_binary_streams(void) {
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+#endif
+}
 
 void *xmalloc(size_t size) {
     // calloc でゼロ初期化する。Node のような大きな構造体で

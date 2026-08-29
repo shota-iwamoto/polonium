@@ -8,6 +8,10 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+// 標準出力・標準エラーを binary モードにする（Windows で \r\n に化けるのを防ぐ）。
+// ★ main の最初に 1 回だけ呼びます（第31章）。
+void plc_use_binary_streams(void);
+
 // ── メモリ確保 ──────────────────────────────────────────────
 // free() は一切呼びません（docs/design/memory-model.md 第8節）。
 // calloc を使うので、確保された領域は必ず 0 / NULL で初期化されています。
