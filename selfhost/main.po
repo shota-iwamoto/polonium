@@ -112,6 +112,15 @@ def ll_path_for(output: str, mod_name: str) -> str:
 def target_triple() -> str:
     return sys.getenv("PLC_TARGET_TRIPLE")
 
+def clang_cmd() -> str:
+    # ★ C 版（src/main.c）と同じく、環境変数を先に見ます。
+    #   MSYS2 のように clang が別名で入っている環境のための逃げ道です。
+    env: str = sys.getenv("PLC_CLANG")
+    if len(env) > 0:
+        return env
+    return "clang"
+
+
 def runtime_o() -> str:
     env: str = sys.getenv("PLC_RUNTIME_O")
     if len(env) > 0:
@@ -185,14 +194,24 @@ def main() -> int:
     #
     # ★ 第13章：.ll を全部並べて渡します。モジュール修飾のおかげで、
     #   別ファイルの同名関数があっても duplicate symbol になりません。
+    #
+    # ★ Windows では拡張子が無いと実行できないので、`.` を含まない出力名には
+    #   .exe を足します（gcc / clang と同じふるまい。C 版 src/main.c と対）。
+    out_path: str = opt.output
+    if strings.contains(triple, "windows") and not strings.contains(out_path, "."):
+        out_path = out_path + ".exe"
+
+    # ⚠️ 引用は "…" にします。Windows の system() は cmd.exe を通すので、
+    #    '…' は引用符として扱われず、そのままファイル名の一部になります
+    #    （POSIX の sh は "…" も理解するので、これで両方に効きます）。
     parts: list[str] = []
-    parts.append("clang " + opt.opt_level)
+    parts.append(clang_cmd() + " " + opt.opt_level)
     m2: module.Module | None = mods
     while m2 is not None:
         mm2: module.Module = m2
-        parts.append(" '" + mm2.ll_path + "'")
+        parts.append(" \"" + mm2.ll_path + "\"")
         m2 = mm2.next
-    parts.append(" '" + runtime_o() + "' -o '" + opt.output + "'")
+    parts.append(" \"" + runtime_o() + "\" -o \"" + out_path + "\"")
 
     rc: int = sys.run(strings.join(parts, ""))
     if rc != 0:
