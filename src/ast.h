@@ -61,6 +61,11 @@ typedef enum {
     // ── 第15章：nullable ──
     ND_NONE,  // None リテラル（ヌルポインタという「値」）
 
+    // ── 第27章：エラー処理 ──
+    ND_TRY,     // try 文    → body（try の中身）, els（except の並び）
+    ND_EXCEPT,  // except 節 → type_ref（エラー型）, name（as で束縛する名前）, body
+    ND_RAISE,   // raise 文  → lhs（エラーオブジェクトの式）
+
     // ── 第14章以降で追加していく ──
 } NodeKind;
 
@@ -230,6 +235,22 @@ struct Node {
     // 仮引数の受け取り方（ND_PARAM。第21章）。
     // ★ 既定は PM_BORROW なので、new_node の calloc がそのまま初期値になります。
     ParamMode mode;
+
+    // ── 第25章：解放（drop）のために ownck が書き込む記録 ──
+    //
+    // ★ 第9章の builtin・第12章の cls と同じ形です。
+    //   「どう扱うか」の判断は解析パスが済ませ、codegen は読むだけ。
+    //   ⚠️ --dump-ast には出しません（第17章から積み上げた AST 比較を壊さないため）。
+    bool moved_out;     // ND_VAR : この参照で値が移動した（drop フラグを落とす）
+    bool binds_borrow;  // ND_VARDECL : 借りものを束縛している（所有していない＝ drop しない）
+
+    // ── 第27章：エラー処理（raises / try / except）──
+    //
+    // ★ 失敗しうる呼び出しには、codegen が「タグを見て分岐する」コードを挿します。
+    //   どの関数が失敗しうるかは sema が決めるので、その記録をここに置きます。
+    Node *raises;     // ND_FUNC : raises 節に書かれた型注釈の並び（next で連結）
+    bool can_fail;    // ND_CALL / ND_METHOD : 呼び出し先が raises 関数か
+    int err_tag;      // ND_EXCEPT : 捕まえるエラー型の ID（sema が割り当てる）
 
     // 型注釈に書かれた名前（ND_TYPEREF）。
     // 「int」のような文字列で、sema が Type * に解決します。

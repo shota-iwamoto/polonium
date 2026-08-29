@@ -212,8 +212,9 @@ void diag_emit(const Diag *d) {
     const char *sev = d->severity ? d->severity : "error";
     int gw = gutter_width(d);
 
-    // ① 主メッセージ
-    fprintf(stderr, "%s: %s\n", sev, d->message);
+    // ① 主メッセージ（診断コードがあれば error[E-MOVE-1]: の形で出す）
+    if (d->code) fprintf(stderr, "%s[%s]: %s\n", sev, d->code, d->message);
+    else fprintf(stderr, "%s: %s\n", sev, d->message);
 
     // ② 主要な位置
     render_block(&d->primary, gw);

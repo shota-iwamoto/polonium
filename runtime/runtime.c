@@ -82,6 +82,20 @@ void pl_print_bool(long long v) { printf("%s\n", v ? "True" : "False"); }
 //     NUL 終端の char * です（extern に渡してもそのまま使えます）。
 //     長さは p[-1] の位置（8 バイト手前）にあります。
 
+// 文字列リテラルの印（第25章）。
+//
+// ★ なぜ必要か
+//   `s: str = "abc"` の "abc" は **プログラムに埋め込まれた定数**（.rodata）で、
+//   ヒープではありません。解放しようとすると落ちます。
+//   実行時にポインタだけを見て「ヒープか定数か」を判定する移植性のある方法は
+//   無いので、**長さのヘッダに 1 ビットの印**を付けて区別します。
+//
+//   ヘッダ（8 バイト手前）:  [ 静的ビット | 長さ ]
+//
+// ⚠️ 印を付けるのは codegen（--drop のとき）です。ランタイム側で作る文字列は
+//    すべてヒープなので、印は付きません。
+#define PL_STR_STATIC (1LL << 62)
+
 // 長さ len のバイト列を置ける str を確保する（NUL の分も含めて確保）。
 char *pl_str_alloc(long long len) {
     char *base = pl_alloc(8 + len + 1);
@@ -98,7 +112,12 @@ char *pl_str_from_cstr(const char *s) {
 }
 
 // ★ O(1) になりました（第15章）。
-long long pl_str_len(const char *s) { return ((const long long *)s)[-1]; }
+//
+// ⚠️ 第25章：ヘッダの最上位ビットの 1 つを「静的な文字列」の印に使うので、
+//    長さを読むときは必ず落とします（下の PL_STR_STATIC を参照）。
+long long pl_str_len(const char *s) {
+    return ((const long long *)s)[-1] & ~PL_STR_STATIC;
+}
 
 char *pl_str_concat(const char *a, const char *b) {
     long long la = pl_str_len(a);
@@ -423,4 +442,125 @@ char *pl_str_index(const char *s, long long i) {
     p[0] = s[i];
     p[1] = '\0';
     return p;
+}
+
+// ── 複製（第26章）───────────────────────────────────────────
+//
+// ★ 借りたものを保存したいときの逃げ道です（決定 D8）。
+//   `copy(s)` は **ヒープに新しい文字列**を作るので、呼び出し側が所有できます。
+//   リテラルを複製しても「静的」の印は付きません（複製はヒープにあるため）。
+char *pl_str_copy(const char *s) {
+    if (!s) return NULL;
+    long long n = pl_str_len(s);
+    char *p = pl_str_alloc(n);
+    memcpy(p, s, (size_t)n + 1);
+    return p;
+}
+
+// ── 共有所有 rc[T]（第28章）─────────────────────────────────
+//
+// ★ 所有者を 1 つに決められないデータのための逃げ道です（仕様 v2 §7）。
+//
+//   ┌──────────┬──────────┬──────────────┐
+//   │ strong   │ borrow   │ 中身へのポインタ │
+//   │ i64      │ i64      │ ptr           │
+//   └──────────┴──────────┴──────────────┘
+//
+// ⚠️ 設計（ownership.md §7）では「中身を埋め込む」形にしていましたが、
+//    Polonium の所有型はすべてポインタなので、**ポインタを 1 本持つ**ほうが
+//    型ごとのレイアウト計算が要らず、どの型でも同じ形になります。
+typedef struct {
+    long long strong;
+    long long borrow;
+    void *value;
+} PlRc;
+
+void *pl_rc_new(void *value) {
+    PlRc *r = pl_alloc((long long)sizeof(PlRc));
+    r->strong = 1;
+    r->borrow = 0;
+    r->value = value;
+    return r;
+}
+
+void *pl_rc_get(void *p) {
+    if (!p) pl_panic("rc: None の中身は読めません");
+    return ((PlRc *)p)->value;
+}
+
+void *pl_rc_retain(void *p) {
+    if (p) ((PlRc *)p)->strong++;
+    return p;
+}
+
+// カウントを 1 減らし、0 になったら中身を解放する。
+// ★ 中身の解放のしかたは型ごとに違うので、関数ポインタで受け取ります
+//   （pl_drop_list と同じ形）。
+void pl_rc_release(void *p, void (*value_drop)(void *)) {
+    if (!p) return;
+    PlRc *r = p;
+    r->strong--;
+    if (r->strong > 0) return;
+    if (r->borrow > 0) pl_panic("rc: 借用したまま解放されました");
+    if (value_drop) value_drop(r->value);
+    free(r);
+}
+
+// 借用の数え札（仕様 §7.2。検査は**実行時**）
+void *pl_rc_borrow(void *p) {
+    if (!p) pl_panic("rc: None は借用できません");
+    ((PlRc *)p)->borrow++;
+    return ((PlRc *)p)->value;
+}
+
+void *pl_rc_borrow_mut(void *p) {
+    if (!p) pl_panic("rc: None は借用できません");
+    PlRc *r = p;
+    if (r->borrow != 0)
+        pl_panic("rc: 既に借用されているので、可変で借りられません");
+    r->borrow++;
+    return r->value;
+}
+
+void pl_rc_unborrow(void *p) {
+    if (p) ((PlRc *)p)->borrow--;
+}
+
+// ── 解放（第25章）───────────────────────────────────────────
+//
+// ★ v1 は「解放しない」設計でした（docs/design/memory-model.md）。
+//   所有権（第22〜24章）で「誰が所有者か」が静的に決まったので、
+//   ここで初めて free() を入れます。
+//
+// ⚠️ どれも「NULL を渡してよい」ようにしてあります。
+//    T | None のフィールドや、まだ入っていない値をそのまま渡せるからです。
+
+void pl_drop_str(char *s) {
+    if (!s) return;
+    // ★ 文字列リテラル（.rodata）は解放しない
+    if (((long long *)s)[-1] & PL_STR_STATIC) return;
+    free(s - 8);  // 確保したのはヘッダの先頭（pl_str_alloc を参照）
+}
+
+// リストを解放する。
+//
+// ★ elem_drop は「要素 1 つを解放する関数」。要素がコピー型（int / bool）なら
+//   NULL を渡します。所有型なら codegen が適切な関数を渡します
+//   （str なら pl_drop_str、クラスなら生成した @drop.C）。
+void pl_drop_list(PlList *l, void (*elem_drop)(void *)) {
+    if (!l) return;
+    if (elem_drop) {
+        void **items = (void **)l->data;
+        for (long long i = 0; i < l->len; i++) elem_drop(items[i]);
+    }
+    free(l->data);
+    free(l);
+}
+
+// クラスのインスタンスそのものを解放する。
+// ★ フィールドの解放と drop メソッドの呼び出しは、codegen が生成する
+//   @drop.C の中で先に済ませてあります。
+void pl_drop_obj(void *p) {
+    if (!p) return;
+    free(p);
 }

@@ -5,6 +5,7 @@
 // パイプライン（第13章から）：
 //   load_modules（import をたどって読み込み・構文解析）
 //     → sema_program（全モジォールをまとめて検査）
+//     → ownck_program（所有権の検査。第22章）
 //     → codegen（モジュールごとに .ll）
 //     → clang（.ll を全部渡してリンク）
 #include <stdio.h>
@@ -16,6 +17,7 @@
 #include "codegen.h"
 #include "lexer.h"
 #include "module.h"
+#include "ownck.h"
 #include "parser.h"
 #include "langinfo.h"
 #include "sema.h"
@@ -41,6 +43,11 @@ static void usage(int status) {
             "  --dump-ast      AST を S 式で表示して終了（構文解析のデバッグ用）\n"
             "  --keep-ll       実行ファイル生成後も .ll を残す\n"
             "  --check         型検査までで止める（エラーが無ければ何も出さない）\n"
+            "  --deny-move     移動済みの値の使用を警告ではなくエラーにする\n"
+            "  --deny-borrow   借用した値の保存・返却を警告ではなくエラーにする\n"
+            "  --deny-mut      読み取り専用の借用への書き換えを警告ではなくエラーにする\n"
+            "  --explain-mut   呼び出しで変更される実引数を一覧表示して終了\n"
+            "  --drop          スコープの出口に解放（drop）を挿入する\n"
             "  -O0|-O1|-O2|-O3 clang に渡す最適化レベル（既定: -O0）\n"
             "  -h, --help      この使い方を表示\n");
     exit(status);
@@ -53,6 +60,7 @@ typedef enum {
     STAGE_DUMP_AST,     // 構文解析まで
     STAGE_EMIT_IR,      // コード生成まで（-S）
     STAGE_CHECK,        // 意味解析まで（--check。第18章）
+    STAGE_EXPLAIN_MUT,  // 所有権検査まで。変更される実引数を並べる（--explain-mut。第24章）
 } Stage;
 
 typedef struct {
@@ -61,6 +69,10 @@ typedef struct {
     const char *opt_level;
     Stage stage;
     int keep_ll;
+    int deny_move;    // --deny-move（第22章）
+    int deny_borrow;  // --deny-borrow（第23章）
+    int deny_mut;     // --deny-mut（第24章）
+    int drop;         // --drop（第25章。解放を挿入する）
 } Options;
 
 static Options parse_args(int argc, char **argv) {
@@ -86,6 +98,14 @@ static Options parse_args(int argc, char **argv) {
         // ★ 第18章：型検査までで止める。stage1（Polonium 版）と
         //   「エラーが出るか / 出ないか」を突き合わせるために使います。
         if (strcmp(a, "--check") == 0) { o.stage = STAGE_CHECK; continue; }
+        // ★ 第22章：所有権の検査（ownck）の結果をエラーに昇格させる。
+        if (strcmp(a, "--deny-move") == 0) { o.deny_move = 1; continue; }
+        if (strcmp(a, "--deny-borrow") == 0) { o.deny_borrow = 1; continue; }
+        if (strcmp(a, "--deny-mut") == 0) { o.deny_mut = 1; continue; }
+        // ★ 第25章：解放（drop）の挿入。既定では入れません（決定 D16）。
+        if (strcmp(a, "--drop") == 0) { o.drop = 1; continue; }
+        // ★ 第24章：呼び出し側に mut を書かせない代わりの道具（仕様 §5.3）。
+        if (strcmp(a, "--explain-mut") == 0) { o.stage = STAGE_EXPLAIN_MUT; continue; }
 
         if (strcmp(a, "-O0") == 0 || strcmp(a, "-O1") == 0 ||
             strcmp(a, "-O2") == 0 || strcmp(a, "-O3") == 0) {
@@ -155,7 +175,25 @@ int main(int argc, char **argv) {
     sema_program(mods, entry);
 
     // --check : ここで終わり（エラーがあれば sema が既に終了している）
+    //
+    // ⚠️ --check は「③ 型検査まで」です。所有権の検査（④）は走りません。
+    //    stage1（Polonium 版）にはまだ ownck が無く、--check の出力を
+    //    突き合わせて比較しているためです（tests/selfhost.sh）。
+    //    第29章で移植したら、ここも ownck を通すように変えます。
     if (opt.stage == STAGE_CHECK) return 0;
+
+    // ── ④ 所有権の検査（第22章）──
+    //
+    // ★ 既定は警告です。移動済みの値を使っていても、生成される IR は
+    //   v1 のまま変わりません（解放の挿入は第25章）。
+    OwnckOptions own = {0};
+    own.deny_move = opt.deny_move;
+    own.deny_borrow = opt.deny_borrow;
+    own.deny_mut = opt.deny_mut;
+    own.explain_mut = opt.stage == STAGE_EXPLAIN_MUT;
+    ownck_program(mods, &own);
+
+    if (opt.stage == STAGE_EXPLAIN_MUT) return 0;
 
     // 入口モジュールの main の IR 名（@main のラッパが呼ぶ相手）
     StrBuf main_ir;
@@ -164,7 +202,7 @@ int main(int argc, char **argv) {
 
     // ── ④ コード生成（モジュールごとに 1 本の .ll）──
     for (Module *m = mods; m; m = m->next) {
-        char *ir = codegen(m, m == entry ? sb_str(&main_ir) : NULL);
+        char *ir = codegen(m, m == entry ? sb_str(&main_ir) : NULL, opt.drop != 0);
 
         if (opt.stage == STAGE_EMIT_IR) {
             // -S : IR を出して終了。複数モジュールなら区切りを入れて並べる。

@@ -61,6 +61,15 @@ class Emitter:
 
     triple: str
 
+    # ── 第27章：エラー処理 ──
+    fn_raises: bool          # 生成中の関数が raises を宣言しているか
+    fn_ret: ast.Type | None  # 生成中の関数の戻り型（失敗時の既定値に使う）
+    err_slot_done: bool      # この関数で %err.slot を alloca 済みか
+    err_type_emitted: bool   # %pl.err の型定義を出したか
+    prop_used: bool          # 伝播ブロックが使われたか
+    try_stack: list[ast.Node]      # 今いる try（入れ子）
+    try_labels: list[str]          # その振り分けラベル
+
     def init(self, triple: str) -> None:
         self.header = []
         self.globals_ = []
@@ -75,6 +84,13 @@ class Emitter:
         self.emitted_types = []
         self.str_counter = 0
         self.triple = triple
+        # ── 第27章 ──
+        self.fn_raises = False
+        self.err_slot_done = False
+        self.err_type_emitted = False
+        self.prop_used = False
+        self.try_stack = []
+        self.try_labels = []
 
     # プリミティブ型（型検査は終わっているので、ここでは「表現」だけ要る）
     def int_type(self) -> ast.Type:
@@ -84,12 +100,12 @@ class Emitter:
         return ast.Type(ast.TY_BOOL)
 
     # ⚠️ 第17章：名前に '.' を入れる（利用者の変数と衝突しないため）
-    def new_tmp(self) -> str:
+    def new_tmp(mut self) -> str:
         t: str = "%t." + str(self.tmp_counter)
         self.tmp_counter = self.tmp_counter + 1
         return t
 
-    def emit(self, line: str) -> None:
+    def emit(mut self, line: str) -> None:
         self.fn.append(line)
 
     # ── 型のマッピング ──────────────────────────────────────
@@ -110,6 +126,8 @@ class Emitter:
             return "ptr"
         if t.kind == ast.TY_OPT:
             return "ptr"
+        if t.kind == ast.TY_RC:
+            return "ptr"
         if t.kind == ast.TY_NULL:
             return "ptr"
         panic("codegen: 未知の型です")
@@ -129,6 +147,8 @@ class Emitter:
         if t.kind == ast.TY_CLASS:
             return "ptr"
         if t.kind == ast.TY_OPT:
+            return "ptr"
+        if t.kind == ast.TY_RC:
             return "ptr"
         panic("codegen: メモリ上の表現を持たない型です")
         return "i64"
@@ -186,7 +206,7 @@ class Emitter:
     #
     # ★ zext / trunc はこの 2 つの関数の中だけに閉じ込める
 
-    def gen_load(self, ty: ast.Type, ptr: str) -> str:
+    def gen_load(mut self, ty: ast.Type, ptr: str) -> str:
         t: str = self.new_tmp()
         self.emit("  " + t + " = load " + self.llvm_mem_type(ty) + ", ptr " +
                   ptr + "\n")
@@ -196,7 +216,7 @@ class Emitter:
         self.emit("  " + t2 + " = trunc i8 " + t + " to i1\n")
         return t2
 
-    def gen_store(self, ty: ast.Type, val: str, ptr: str) -> None:
+    def gen_store(mut self, ty: ast.Type, val: str, ptr: str) -> None:
         v: str = val
         if ty.kind == ast.TY_BOOL:
             t: str = self.new_tmp()
@@ -207,23 +227,23 @@ class Emitter:
 
     # ── 基本ブロック（規約 R6 / R7）────────────────────────
 
-    def emit_label(self, label: str) -> None:
+    def emit_label(mut self, label: str) -> None:
         if not self.terminated:
             self.emit("  br label %" + label + "\n")
         self.emit(label + ":\n")
         self.terminated = False
 
-    def emit_br(self, label: str) -> None:
+    def emit_br(mut self, label: str) -> None:
         self.emit("  br label %" + label + "\n")
         self.terminated = True
 
-    def emit_cond_br(self, cond: str, then_l: str, else_l: str) -> None:
+    def emit_cond_br(mut self, cond: str, then_l: str, else_l: str) -> None:
         self.emit("  br i1 " + cond + ", label %" + then_l + ", label %" +
                   else_l + "\n")
         self.terminated = True
 
     # 終端済みのブロックの後ろにコードを置くときのラベル（規約 R7）
-    def ensure_block(self) -> None:
+    def ensure_block(mut self) -> None:
         if not self.terminated:
             return
         l: str = "dead." + str(self.label_counter)
@@ -234,13 +254,13 @@ class Emitter:
 
     # IR の文字列に 1 バイト出力する
     # ⚠️ ASCII 印字可能文字以外はすべて \XX にする
-    def emit_ir_byte(self, parts: list[str], c: int) -> None:
+    def emit_ir_byte(self, parts: mut list[str], c: int) -> None:
         if c >= 32 and c < 127 and c != 34 and c != 92:
             parts.append(chr(c))
         else:
             parts.append("\\" + hex2(c))
 
-    def intern_str(self, bytes_: str) -> str:
+    def intern_str(mut self, bytes_: str) -> str:
         sl: StrLit | None = self.strs
         while sl is not None:
             s: StrLit = sl
@@ -273,7 +293,7 @@ class Emitter:
         return ref
 
     # ランタイム関数を宣言する（1 回だけ）
-    def declare_rt(self, sig: str) -> None:
+    def declare_rt(mut self, sig: str) -> None:
         i: int = 0
         while i < len(self.decled):
             if self.decled[i] == sig:
@@ -283,7 +303,7 @@ class Emitter:
         self.decled.append(sig)
 
     # 別モジュールの関数を declare する（引数の型は呼び出しから作る）
-    def declare_extern(self, ret: str, ir_name: str, param_types: str) -> None:
+    def declare_extern(mut self, ret: str, ir_name: str, param_types: str) -> None:
         self.declare_rt(ret + " @" + ir_name + "(" + param_types + ")")
 
     # ── 式の生成 ────────────────────────────────────────────
@@ -295,7 +315,7 @@ class Emitter:
     #   C 版は NULL を返しますが、Polonium では str の None を避けて空文字列に
     #   しました（**呼び出し側は結果を使わないと分かっている**場所だけです）。
 
-    def gen_expr(self, n: ast.Node) -> str:
+    def gen_expr(mut self, n: ast.Node) -> str:
         if n.kind == ast.ND_INT:
             # 整数リテラルは命令を出す必要すらない（即値をそのまま書ける）
             return str(n.ival)
@@ -343,7 +363,7 @@ class Emitter:
         panic("codegen: 式ではないノードです")
         return ""
 
-    def gen_binop(self, n: ast.Node) -> str:
+    def gen_binop(mut self, n: ast.Node) -> str:
         lhs: ast.Node = node_of(n.lhs)
         rhs: ast.Node = node_of(n.rhs)
 
@@ -402,7 +422,7 @@ class Emitter:
                       self.llvm_type(ot) + " " + l + ", " + r + "\n")
         return t
 
-    def gen_unary(self, n: ast.Node) -> str:
+    def gen_unary(mut self, n: ast.Node) -> str:
         v: str = self.gen_expr(node_of(n.lhs))
 
         # +x は何もしない
@@ -426,7 +446,7 @@ class Emitter:
     # 🤔 なぜ phi を使わないのか（規約 R3）
     #   alloca に置いて最後に読む方式なら「どのブロックから来たか」を
     #   覚えなくて済みます。mem2reg が phi に変換してくれます。
-    def gen_logical(self, n: ast.Node) -> str:
+    def gen_logical(mut self, n: ast.Node) -> str:
         # ⚠️ 番号は最初に 1 回だけ確保する
         id_: int = self.label_counter
         self.label_counter = self.label_counter + 1
@@ -467,7 +487,7 @@ class Emitter:
     def elem_is_ptr(self, elem: ast.Type) -> bool:
         return (elem.kind == ast.TY_STR or elem.kind == ast.TY_LIST or
                 elem.kind == ast.TY_CLASS or elem.kind == ast.TY_OPT or
-                elem.kind == ast.TY_NULL)
+                elem.kind == ast.TY_RC or elem.kind == ast.TY_NULL)
 
     def slot_ty(self, elem: ast.Type) -> str:
         if self.elem_is_ptr(elem):
@@ -475,14 +495,14 @@ class Emitter:
         return "i64"
 
     # 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる）
-    def elem_to_slot(self, elem: ast.Type, v: str) -> str:
+    def elem_to_slot(mut self, elem: ast.Type, v: str) -> str:
         if elem.kind != ast.TY_BOOL:
             return v
         t: str = self.new_tmp()
         self.emit("  " + t + " = zext i1 " + v + " to i64\n")
         return t
 
-    def slot_to_elem(self, elem: ast.Type, v: str) -> str:
+    def slot_to_elem(mut self, elem: ast.Type, v: str) -> str:
         if elem.kind != ast.TY_BOOL:
             return v
         t: str = self.new_tmp()
@@ -490,7 +510,7 @@ class Emitter:
         return t
 
     # [1, 2, 3] は「空リストを作って append を繰り返す」に脱糖する
-    def gen_list_lit(self, n: ast.Node) -> str:
+    def gen_list_lit(mut self, n: ast.Node) -> str:
         elem: ast.Type = ast.elem_of(type_of(n))
 
         self.declare_rt("ptr @pl_list_new()")
@@ -512,7 +532,7 @@ class Emitter:
             el = e.next
         return l
 
-    def gen_index(self, n: ast.Node) -> str:
+    def gen_index(mut self, n: ast.Node) -> str:
         obj_node: ast.Node = node_of(n.lhs)
         ot: ast.Type = type_of(obj_node)
         obj: str = self.gen_expr(obj_node)
@@ -538,7 +558,7 @@ class Emitter:
                   ", i64 " + idx + ")\n")
         return self.slot_to_elem(elem, t)
 
-    def gen_index_store(self, target: ast.Node, val: str) -> None:
+    def gen_index_store(mut self, target: ast.Node, val: str) -> None:
         obj_node: ast.Node = node_of(target.lhs)
         elem: ast.Type = ast.elem_of(type_of(obj_node))
         obj: str = self.gen_expr(obj_node)
@@ -557,7 +577,7 @@ class Emitter:
     # ── 呼び出し ────────────────────────────────────────────
 
     # 引数を評価して "型 値, 型 値" と "型, 型"（declare 用）を作る
-    def gen_args(self, args: ast.Node | None, vals: list[str], atypes: list[str],
+    def gen_args(mut self, args: ast.Node | None, vals: mut list[str], atypes: mut list[str],
                  first: bool) -> None:
         is_first: bool = first
         a: ast.Node | None = args
@@ -573,17 +593,53 @@ class Emitter:
             a = arg.next
 
     # 呼び出しを 1 行出す（戻り値が None なら値を返さない）
-    def emit_call(self, n: ast.Node, args: str) -> str:
+    def emit_call(mut self, n: ast.Node, args: str) -> str:
         rt: ast.Type = type_of(n)
+
+        # ── 第27章：失敗しうる呼び出し ──
+        #   ① タグを 0 にする ② スロットを渡す ③ 戻ってタグを見る
+        full: str = args
+        slot: str = ""
+        if n.can_fail:
+            slot = self.err_slot()
+            tp: str = self.new_tmp()
+            self.emit("  " + tp + " = getelementptr %pl.err, ptr " + slot +
+                      ", i32 0, i32 0\n")
+            self.emit("  store i64 0, ptr " + tp + "\n")
+            if len(args) > 0:
+                full = args + ", ptr " + slot
+            else:
+                full = "ptr " + slot
+
+        t: str = ""
         if rt.kind == ast.TY_NONE:
-            self.emit("  call void @" + n.ir_name + "(" + args + ")\n")
-            return ""
-        t: str = self.new_tmp()
-        self.emit("  " + t + " = call " + self.llvm_type(rt) + " @" + n.ir_name +
-                  "(" + args + ")\n")
+            self.emit("  call void @" + n.ir_name + "(" + full + ")\n")
+        else:
+            t = self.new_tmp()
+            self.emit("  " + t + " = call " + self.llvm_type(rt) + " @" +
+                      n.ir_name + "(" + full + ")\n")
+
+        if n.can_fail:
+            cid: int = self.label_counter
+            self.label_counter = self.label_counter + 1
+            ok_l: str = "call.ok." + str(cid)
+            tag: str = self.load_tag(slot)
+            bad: str = self.new_tmp()
+            self.emit("  " + bad + " = icmp ne i64 " + tag + ", 0\n")
+            fl: str = self.fail_label()
+            if len(fl) > 0:
+                self.emit_cond_br(bad, fl, ok_l)
+            else:
+                # 到達しない経路（sema が保証）。専用ブロックに落とす
+                un_l: str = "call.unreach." + str(cid)
+                self.emit_cond_br(bad, un_l, ok_l)
+                self.emit_label(un_l)
+                self.emit("  unreachable\n")
+                self.terminated = True
+            self.emit_label(ok_l)
         return t
 
-    def gen_method(self, n: ast.Node) -> str:
+    def gen_method(mut self, n: ast.Node) -> str:
         # ★ 第13章：'.' の左がモジュールだった場合
         if len(n.mod_name) > 0:
             if n.cls is not None:
@@ -593,16 +649,22 @@ class Emitter:
             atypes: list[str] = []
             self.gen_args(n.args, vals, atypes, True)
             if n.is_extern:
-                self.declare_extern(self.llvm_type(type_of(n)), n.ir_name,
-                                    strings.join(atypes, ""))
+                ats0: str = strings.join(atypes, "")
+                if n.can_fail:
+                    if len(ats0) > 0:
+                        ats0 = ats0 + ", ptr"
+                    else:
+                        ats0 = "ptr"
+                self.declare_extern(self.llvm_type(type_of(n)), n.ir_name, ats0)
             return self.emit_call(n, strings.join(vals, ""))
 
         obj_node: ast.Node = node_of(n.lhs)
         ot: ast.Type = type_of(obj_node)
 
         # クラスのメソッド（第12章）。self を第 1 引数に渡すだけ
-        if ot.kind == ast.TY_CLASS:
-            obj: str = self.gen_expr(obj_node)
+        # ★ 第28章：rc[T] の中身のメソッドも同じように呼べる
+        if ot.kind == ast.TY_CLASS or ot.kind == ast.TY_RC:
+            obj: str = self.deref_rc(ot, self.gen_expr(obj_node))
 
             vals2: list[str] = []
             atypes2: list[str] = []
@@ -612,8 +674,10 @@ class Emitter:
 
             # ★ 第13章：import したクラスのメソッドは declare が要る
             if n.is_extern:
-                self.declare_extern(self.llvm_type(type_of(n)), n.ir_name,
-                                    strings.join(atypes2, ""))
+                ats2: str = strings.join(atypes2, "")
+                if n.can_fail:
+                    ats2 = ats2 + ", ptr"
+                self.declare_extern(self.llvm_type(type_of(n)), n.ir_name, ats2)
             return self.emit_call(n, strings.join(vals2, ""))
 
         # list.append（第10章。sema が保証している）
@@ -634,10 +698,15 @@ class Emitter:
     # ── class の生成（第12章）──────────────────────────────
 
     # フィールドのアドレスを求める（読み出しにも代入にも使う）
-    def gen_field_ptr(self, n: ast.Node) -> str:
+    def gen_field_ptr(mut self, n: ast.Node) -> str:
         obj_node: ast.Node = node_of(n.lhs)
-        c: ast.Class = class_of(type_of(obj_node).cls)
-        obj: str = self.gen_expr(obj_node)
+        ot0: ast.Type = type_of(obj_node)
+        # ★ 第28章：rc[T] は中身のように使える
+        cty: ast.Type = ot0
+        if ot0.kind == ast.TY_RC:
+            cty = ast.elem_of(ot0)
+        c: ast.Class = class_of(cty.cls)
+        obj: str = self.deref_rc(ot0, self.gen_expr(obj_node))
 
         # ⚠️ クラス型のフィールドは NULL から始まる（12.6 節）
         self.declare_rt("ptr @pl_check_not_none(ptr)")
@@ -652,7 +721,7 @@ class Emitter:
         return t
 
     # 他モジュールのグローバル変数は external で宣言する
-    def declare_extern_global(self, n: ast.Node) -> None:
+    def declare_extern_global(mut self, n: ast.Node) -> None:
         sig: str = (n.ir_name + " = external global " +
                     self.llvm_mem_type(type_of(n)))
         i: int = 0
@@ -663,7 +732,7 @@ class Emitter:
         self.globals_.append(sig + "\n")
         self.decled.append(sig)
 
-    def gen_field(self, n: ast.Node) -> str:
+    def gen_field(mut self, n: ast.Node) -> str:
         # ★ 第13章：'.' の左がモジュールなら、グローバル変数の読み出し
         if len(n.mod_name) > 0:
             if n.is_extern:
@@ -673,7 +742,7 @@ class Emitter:
         return self.gen_load(type_of(n), self.gen_field_ptr(n))
 
     # インスタンス生成 Token(1, "x")
-    def gen_new(self, n: ast.Node) -> str:
+    def gen_new(mut self, n: ast.Node) -> str:
         c: ast.Class = class_of(n.cls)
 
         self.declare_rt("ptr @pl_alloc(i64)")
@@ -724,7 +793,7 @@ class Emitter:
     #
     # ⚠️ LLVM の型定義はモジュールローカル。import したクラスを使う
     #   モジュールにも、同じ定義を書き直す必要があります（13.7 節）。
-    def gen_class_type(self, c: ast.Class) -> None:
+    def gen_class_type(mut self, c: ast.Class) -> None:
         i: int = 0
         while i < len(self.emitted_types):
             if self.emitted_types[i] == c.ir_name:
@@ -748,13 +817,13 @@ class Emitter:
         self.header.append(strings.join(parts, ""))
 
     # クラスの型名を返す（まだ出していなければ定義も出す）
-    def class_type(self, c: ast.Class) -> str:
+    def class_type(mut self, c: ast.Class) -> str:
         self.gen_class_type(c)
         return c.ir_name
 
     # ── 制御構文（規約 6.3 / 6.4 / 6.5）────────────────────
 
-    def gen_if(self, n: ast.Node) -> None:
+    def gen_if(mut self, n: ast.Node) -> None:
         id_: int = self.label_counter    # ★ 番号は最初に 1 回だけ確保する
         self.label_counter = self.label_counter + 1
 
@@ -783,7 +852,7 @@ class Emitter:
 
         self.emit_label(end_l)
 
-    def gen_while(self, n: ast.Node) -> None:
+    def gen_while(mut self, n: ast.Node) -> None:
         id_: int = self.label_counter
         self.label_counter = self.label_counter + 1
 
@@ -824,7 +893,7 @@ class Emitter:
 
     # ── 組み込み関数の呼び出し（第9章）────────────────────
 
-    def gen_builtin_call(self, n: ast.Node) -> str:
+    def gen_builtin_call(mut self, n: ast.Node) -> str:
         arg_node: ast.Node = node_of(n.args)
         at: ast.Type = type_of(arg_node)
         rt: ast.Type = type_of(n)
@@ -850,11 +919,110 @@ class Emitter:
                   "(" + argty + " " + v + ")\n")
         return t
 
-    def gen_call(self, n: ast.Node) -> str:
+    # ── エラー処理の道具（第27章）──────────────────────────
+    #
+    # ★ 失敗しうる関数は、末尾に「エラー出力ポインタ」を 1 本余分に取ります。
+    #   %pl.err = type { i64, ptr }  … { タグ, エラーオブジェクト }
+    #   タグ 0 は「エラー無し」に予約。
+
+    def ensure_err_type(mut self) -> None:
+        if self.err_type_emitted:
+            return
+        self.err_type_emitted = True
+        self.header.append("%pl.err = type { i64, ptr }\n")
+
+    def err_slot(mut self) -> str:
+        self.ensure_err_type()
+        if not self.err_slot_done:
+            self.err_slot_done = True
+            self.allocas.append("  %err.slot = alloca %pl.err\n")
+        return "%err.slot"
+
+    # 型ごとの「使われない戻り値」（設計 §2 の表）。void なら空文字
+    def default_value(self, t: ast.Type) -> str:
+        if t.kind == ast.TY_NONE:
+            return ""
+        if t.kind == ast.TY_INT:
+            return "0"
+        if t.kind == ast.TY_BOOL:
+            return "false"
+        return "null"
+
+    def emit_default_ret(mut self) -> None:
+        rt: ast.Type = type_or_none(self.fn_ret)
+        dv: str = self.default_value(rt)
+        if len(dv) == 0:
+            self.emit("  ret void\n")
+        else:
+            self.emit("  ret " + self.llvm_type(rt) + " " + dv + "\n")
+        self.terminated = True
+
+    # 失敗したときの飛び先。無ければ空文字（到達しない）
+    def fail_label(mut self) -> str:
+        if len(self.try_labels) > 0:
+            return self.try_labels[len(self.try_labels) - 1]
+        if not self.fn_raises:
+            return ""
+        self.prop_used = True
+        return "err.propagate"
+
+    def emit_fail_br(mut self) -> None:
+        l: str = self.fail_label()
+        if len(l) > 0:
+            self.emit_br(l)
+        else:
+            self.emit("  unreachable\n")
+            self.terminated = True
+
+    def store_err(mut self, slot: str, tag: int, obj: str) -> None:
+        self.ensure_err_type()
+        tp: str = self.new_tmp()
+        self.emit("  " + tp + " = getelementptr %pl.err, ptr " + slot +
+                  ", i32 0, i32 0\n")
+        self.emit("  store i64 " + str(tag) + ", ptr " + tp + "\n")
+        pp: str = self.new_tmp()
+        self.emit("  " + pp + " = getelementptr %pl.err, ptr " + slot +
+                  ", i32 0, i32 1\n")
+        self.emit("  store ptr " + obj + ", ptr " + pp + "\n")
+
+    def load_tag(mut self, slot: str) -> str:
+        tp: str = self.new_tmp()
+        self.emit("  " + tp + " = getelementptr %pl.err, ptr " + slot +
+                  ", i32 0, i32 0\n")
+        tv: str = self.new_tmp()
+        self.emit("  " + tv + " = load i64, ptr " + tp + "\n")
+        return tv
+
+    def load_payload(mut self, slot: str) -> str:
+        pp: str = self.new_tmp()
+        self.emit("  " + pp + " = getelementptr %pl.err, ptr " + slot +
+                  ", i32 0, i32 1\n")
+        pv: str = self.new_tmp()
+        self.emit("  " + pv + " = load ptr, ptr " + pp + "\n")
+        return pv
+
+    # rc[T] なら中身を取り出す（第28章の自動デリファレンス）
+    def deref_rc(mut self, t: ast.Type, v: str) -> str:
+        if t.kind != ast.TY_RC:
+            return v
+        self.declare_rt("ptr @pl_rc_get(ptr)")
+        g: str = self.new_tmp()
+        self.emit("  " + g + " = call ptr @pl_rc_get(ptr " + v + ")\n")
+        return g
+
+    def gen_call(mut self, n: ast.Node) -> str:
         if len(n.builtin) > 0:
             return self.gen_builtin_call(n)
         if n.cls is not None:
             return self.gen_new(n)     # ★ 第12章：インスタンス生成
+
+        # ★ 第28章：rc(x) — 数え札を付けてくるむ（sema が ir_name を付けない目印）
+        if len(n.ir_name) == 0 and n.name == "rc":
+            rv: str = self.gen_expr(node_of(n.args))
+            self.declare_rt("ptr @pl_rc_new(ptr)")
+            rt2: str = self.new_tmp()
+            self.emit("  " + rt2 + " = call ptr @pl_rc_new(ptr " + rv + ")\n")
+            return rt2
 
         # 引数を左から順に評価する（言語仕様 4.5）
         vals: list[str] = []
@@ -863,13 +1031,19 @@ class Emitter:
 
         # ★ 第13章：呼ぶ名前は sema が修飾済み
         if n.is_extern:
-            self.declare_extern(self.llvm_type(type_of(n)), n.ir_name,
-                                strings.join(atypes, ""))
+            ats: str = strings.join(atypes, "")
+            # ★ 第27章：失敗しうる関数は、エラー出力の ptr が 1 本増えている
+            if n.can_fail:
+                if len(ats) > 0:
+                    ats = ats + ", ptr"
+                else:
+                    ats = "ptr"
+            self.declare_extern(self.llvm_type(type_of(n)), n.ir_name, ats)
         return self.emit_call(n, strings.join(vals, ""))
 
     # ── 文の生成 ────────────────────────────────────────────
 
-    def gen_stmt(self, n: ast.Node) -> str:
+    def gen_stmt(mut self, n: ast.Node) -> str:
         # 終端済みブロックの後ろに来たら、到達不能ブロックを開く（規約 R7）
         self.ensure_block()
 
@@ -901,6 +1075,89 @@ class Emitter:
                 self.emit("  ret " + self.llvm_type(type_of(val)) + " " + v2 +
                           "\n")
             self.terminated = True
+            return ""
+
+        # ── 第27章：try / except ──
+        #
+        #   try の本体で失敗したら「振り分け」へ飛び、タグを見て except を選ぶ。
+        #   どの except にも当たらなければ、外側の飛び先（外の try か伝播）へ。
+        if n.kind == ast.ND_TRY:
+            tid: int = self.label_counter
+            self.label_counter = self.label_counter + 1
+            disp_l: str = "try.dispatch." + str(tid)
+            end_l: str = "try.end." + str(tid)
+
+            self.try_stack.append(n)
+            self.try_labels.append(disp_l)
+            self.gen_stmt(node_of(n.body))
+            self.try_stack = pop_nodes(self.try_stack)
+            self.try_labels = pop_strs(self.try_labels)
+            if not self.terminated:
+                self.emit_br(end_l)
+
+            # ── 振り分け ──
+            self.emit_label(disp_l)
+            slot2: str = self.err_slot()
+            tag2: str = self.load_tag(slot2)
+
+            k: int = 0
+            ex2: ast.Node | None = n.els
+            while ex2 is not None:
+                e3: ast.Node = ex2
+                hit_l: str = "except." + str(tid) + "." + str(k)
+                next_l: str = "try.next." + str(tid) + "." + str(k)
+                c2: str = self.new_tmp()
+                self.emit("  " + c2 + " = icmp eq i64 " + tag2 + ", " +
+                          str(e3.err_tag) + "\n")
+                self.emit_cond_br(c2, hit_l, next_l)
+                self.emit_label(next_l)
+                k = k + 1
+                ex2 = e3.next
+            # どの except にも当たらなかった → 外側へ渡す
+            self.emit_fail_br()
+
+            # ── 各 except の本体 ──
+            k2: int = 0
+            ex3: ast.Node | None = n.els
+            while ex3 is not None:
+                e4: ast.Node = ex3
+                hit2: str = "except." + str(tid) + "." + str(k2)
+                self.emit_label(hit2)
+                if len(e4.ir_name) > 0:
+                    pv2: str = self.load_payload(slot2)
+                    self.emit("  store ptr " + pv2 + ", ptr " + e4.ir_name + "\n")
+                self.gen_stmt(node_of(e4.body))
+                if not self.terminated:
+                    self.emit_br(end_l)
+                k2 = k2 + 1
+                ex3 = e4.next
+
+            self.emit_label(end_l)
+            return ""
+
+        # ── 第27章：raise ──
+        if n.kind == ast.ND_RAISE:
+            obj: str = self.gen_expr(node_of(n.lhs))
+
+            # ★ 同じ関数の中の try が捕まえるなら、そこへ飛ぶ（Python と同じ）
+            catcher: int = -1
+            i2: int = len(self.try_stack) - 1
+            while i2 >= 0:
+                t2: ast.Node = self.try_stack[i2]
+                exf: ast.Node | None = t2.els
+                while exf is not None:
+                    e5: ast.Node = exf
+                    if e5.err_tag == n.err_tag and catcher < 0:
+                        catcher = i2
+                    exf = e5.next
+                i2 = i2 - 1
+
+            if catcher >= 0:
+                self.store_err(self.err_slot(), n.err_tag, obj)
+                self.emit_br(self.try_labels[catcher])
+            else:
+                self.store_err("%err.out", n.err_tag, obj)
+                self.emit_default_ret()
             return ""
 
         if n.kind == ast.ND_PASS:
@@ -947,7 +1204,7 @@ class Emitter:
 
     # ── alloca の収集（規約 R1）────────────────────────────
 
-    def collect_allocas(self, n: ast.Node | None) -> None:
+    def collect_allocas(mut self, n: ast.Node | None) -> None:
         if n is None:
             return
         node: ast.Node = n
@@ -956,6 +1213,19 @@ class Emitter:
         if node.kind == ast.ND_VARDECL and not node.is_global:
             self.allocas.append("  " + node.ir_name + " = alloca " +
                                 self.llvm_mem_type(type_of(node)) + "\n")
+
+        # ★ 第27章：except ... as e で束縛する変数にも箱が要る
+        if node.kind == ast.ND_EXCEPT and len(node.ir_name) > 0:
+            self.allocas.append("  " + node.ir_name + " = alloca " +
+                                self.llvm_mem_type(type_of(node)) + "\n")
+
+        # ⚠️ except の並びは next で繋がっている（2 番目以降をここでたどる）
+        if node.kind == ast.ND_TRY and node.els is not None:
+            ex: ast.Node | None = node_of(node.els).next
+            while ex is not None:
+                e2: ast.Node = ex
+                self.collect_allocas(e2)
+                ex = e2.next
 
         self.collect_allocas(node.lhs)
         self.collect_allocas(node.rhs)
@@ -968,7 +1238,7 @@ class Emitter:
 
     # ── 関数の生成 ──────────────────────────────────────────
 
-    def gen_func(self, n: ast.Node) -> None:
+    def gen_func(mut self, n: ast.Node) -> None:
         # 関数ごとに状態をリセットする
         self.tmp_counter = 0
         self.label_counter = 0
@@ -976,6 +1246,16 @@ class Emitter:
         self.loop = None
         self.allocas = []
         self.fn = []
+
+        # ── 第27章：エラー処理の状態 ──
+        self.fn_raises = n.err_types is not None
+        self.fn_ret = n.type
+        self.err_slot_done = False
+        self.try_stack = []
+        self.try_labels = []
+        self.prop_used = False
+        if self.fn_raises:
+            self.ensure_err_type()
 
         ir_name: str = n.ir_name
 
@@ -993,6 +1273,17 @@ class Emitter:
 
         # ③ 本体
         self.gen_stmt(node_of(n.body))
+
+        # ── 第27章：伝播ブロック（呼び出し元へエラーをそのまま返す）──
+        #
+        # ★ 使われたときだけ出します（使わないブロックは LLVM が嫌がる）
+        if self.prop_used:
+            self.emit_label("err.propagate")
+            self.ensure_err_type()
+            ev: str = self.new_tmp()
+            self.emit("  " + ev + " = load %pl.err, ptr %err.slot\n")
+            self.emit("  store %pl.err " + ev + ", ptr %err.out\n")
+            self.emit_default_ret()
 
         # ④ 終端されていなければ終端する（規約 R6）
         if not self.terminated:
@@ -1017,6 +1308,12 @@ class Emitter:
                        ".arg")
             first = False
             pm2 = p2.next
+        # ★ 第27章：失敗しうる関数は、エラー出力ポインタを 1 本余分に取る
+        if self.fn_raises:
+            sep2: str = ", "
+            if first:
+                sep2 = ""
+            out.append(sep2 + "ptr %err.out")
         out.append(") {\nentry:\n")
         out.append(strings.join(self.allocas, ""))
         out.append(strings.join(self.fn, ""))
@@ -1024,7 +1321,7 @@ class Emitter:
         self.body.append(strings.join(out, ""))
 
     # グローバル変数を出力する（言語仕様 6.2）
-    def gen_global(self, n: ast.Node) -> None:
+    def gen_global(mut self, n: ast.Node) -> None:
         rhs: ast.Node = node_of(n.rhs)
         if type_of(n).kind == ast.TY_STR:
             lab: str = self.intern_str(rhs.sval)
@@ -1037,7 +1334,7 @@ class Emitter:
     # C の main を出力する（ir-conventions.md 7 節の方式 A）
     #
     # ⚠️ 第13章：これを出すのは入口モジュールだけ
-    def gen_c_main(self, main_ir_name: str) -> None:
+    def gen_c_main(mut self, main_ir_name: str) -> None:
         self.tmp_counter = 0
 
         # ★ 第14章：argc / argv を受け取り、ランタイムに預ける
@@ -1155,6 +1452,30 @@ def type_of(n: ast.Node) -> ast.Type:
     if t is None:
         panic("codegen: 型が埋まっていません（sema を通していない？）")
         return ast.Type(ast.TY_INT)
+    else:
+        return t
+
+# 生成中の関数の戻り型（第27章。まだ関数の外なら None 型として扱う）
+# スタックから最後の 1 つを外す（list に pop がまだ無いため。第27章）
+def pop_nodes(xs: list[ast.Node]) -> list[ast.Node]:
+    out: list[ast.Node] = []
+    i: int = 0
+    while i < len(xs) - 1:
+        out.append(xs[i])
+        i = i + 1
+    return out
+
+def pop_strs(xs: list[str]) -> list[str]:
+    out: list[str] = []
+    i: int = 0
+    while i < len(xs) - 1:
+        out.append(xs[i])
+        i = i + 1
+    return out
+
+def type_or_none(t: ast.Type | None) -> ast.Type:
+    if t is None:
+        return ast.Type(ast.TY_NONE)
     else:
         return t
 

@@ -30,7 +30,10 @@ bool type_can_be_opt(Type *t) {
     // ★ None はヌルポインタとして表すので、ポインタで表される型だけ。
     //   int を nullable にするには箱に入れる必要があり、そこから
     //   「int は値か参照か」という別の話が始まります（v1 では入れない）。
-    return t->kind == TY_STR || t->kind == TY_LIST || t->kind == TY_CLASS;
+    // ★ 第28章：rc[T] もポインタ 1 個なので nullable にできます
+    //   （木の「子が無い」を表すのに要ります）。
+    return t->kind == TY_STR || t->kind == TY_LIST || t->kind == TY_CLASS ||
+           t->kind == TY_RC;
 }
 
 Type *type_opt(Type *elem) {
@@ -64,6 +67,14 @@ Type *type_list(Type *elem) {
     return t;
 }
 
+// rc[T]（第28章）。★ list[T] と同じ作り（シングルトンにはしない）。
+Type *type_rc(Type *elem) {
+    Type *t = xmalloc(sizeof(Type));
+    t->kind = TY_RC;
+    t->elem = elem;
+    return t;
+}
+
 Type *type_class(char *name, struct Class *cls) {
     Type *t = new_type(TY_CLASS);
     t->name = name;
@@ -83,6 +94,7 @@ int type_size(Type *t) {
         case TY_STR:
         case TY_LIST:
         case TY_CLASS:
+        case TY_RC:   // 第28章：rc[T] もポインタ 1 個（指す先に数え札が付く）
         case TY_OPT: return 8;  // 第15章：T | None もポインタ 1 個
         default: UNREACHABLE();  // None は値を持たない
     }
@@ -100,6 +112,9 @@ bool type_equal(Type *a, Type *b) {
     //   ここが無いと「同じ型」と判定されてしまいます
     //   （第5章のコメントで予告していた穴）。
     if (a->kind == TY_LIST) return type_equal(a->elem, b->elem);
+
+    // ★ 第28章：rc[T] も中身まで見る（rc[Node] と rc[Token] は別の型）
+    if (a->kind == TY_RC) return type_equal(a->elem, b->elem);
 
     // ★ 第12章：クラスは「同じ定義か」で比べます。名前の一致ではありません。
     //   今は 1 ファイルなので同名クラスは 1 つだけですが、第13章で import が
@@ -129,6 +144,12 @@ const char *type_name(Type *t) {
             return sb_str(&sb);
         }
         case TY_CLASS: return t->name;  // 第12章
+        case TY_RC: {  // 第28章
+            StrBuf sb;
+            sb_init(&sb);
+            sb_printf(&sb, "rc[%s]", type_name(t->elem));
+            return sb_str(&sb);
+        }
         case TY_OPT: {  // 第15章
             StrBuf sb;
             sb_init(&sb);

@@ -37,13 +37,16 @@ class Label:
 # 1 件の診断（C 版の Diag と同じ形）
 class Diag:
     severity: str
+    # 診断コード（"E-RAISE-5"）。空なら出力しない（第22章で C 版に足したもの）
+    code: str
     message: str
     primary: Label | None
     related: Label | None
     hint: str
 
-    def init(self, message: str) -> None:
+    def init(self, message: own str) -> None:
         self.severity = "error"
+        self.code = ""
         self.message = message
         self.hint = ""
 
@@ -240,8 +243,11 @@ def emit(d: Diag) -> None:
     gw: int = gutter_width(d)
     parts: list[str] = []
 
-    # ① 主メッセージ
-    parts.append(d.severity + ": " + d.message + "\n")
+    # ① 主メッセージ（診断コードがあれば error[E-MOVE-1]: の形で出す）
+    if len(d.code) > 0:
+        parts.append(d.severity + "[" + d.code + "]: " + d.message + "\n")
+    else:
+        parts.append(d.severity + ": " + d.message + "\n")
 
     # ② 主要な位置
     p: Label | None = d.primary
@@ -283,6 +289,28 @@ def error_at_hint(tok: token.Token, hint: str, msg: str) -> None:
     d.primary = Label(tok, "")
     d.hint = hint
     fail(d)
+
+# 診断コード付きのエラー（第27章）。
+def error_code_full(tok: token.Token, code: own str, msg: own str, label: own str,
+                    rel: token.Token | None, rel_label: own str,
+                    hint: own str) -> None:
+    d: Diag = Diag(msg)
+    d.code = code
+    d.primary = Label(tok, label)
+    if rel is not None:
+        d.related = Label(rel, rel_label)
+    d.hint = hint
+    fail(d)
+
+# 警告（終了しない）。第27章の E-RAISE-5 で使う。
+def warn_full(tok: token.Token, code: own str, msg: own str, label: own str,
+              hint: own str) -> None:
+    d: Diag = Diag(msg)
+    d.severity = "warning"
+    d.code = code
+    d.primary = Label(tok, label)
+    d.hint = hint
+    emit(d)
 
 # 位置つきラベル・note・ヒントを全部使う形
 def error_full(tok: token.Token, msg: str, label: str,

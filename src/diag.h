@@ -46,6 +46,9 @@ typedef struct {
 // 使わないフィールドは 0 / NULL のままにしておけます（= {0} で初期化する）。
 typedef struct {
     const char *severity;  // "error" / "warning"。NULL なら "error"
+    const char *code;      // 診断コード（"E-MOVE-1"）。NULL なら出力しない
+                           // ★ 第22章：仕様書が診断コードで規則を指せるように
+                           //   しました（safety-spec.md §1 の S1〜S8）。
     const char *message;   // 主メッセージ（必須）
 
     DiagLabel primary;  // 主要な位置（必須）

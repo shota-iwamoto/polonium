@@ -673,6 +673,18 @@ static Node *simple_stmt(Parser *p) {
     if (tok_is_kw(t0, "continue")) { advance(p); return new_node(ND_CONTINUE, t0); }
     if (tok_is_kw(t0, "pass")) { advance(p); return new_node(ND_PASS, t0); }
 
+    // raise_stmt ::= "raise" expr（第27章）
+    //
+    // ★ 仕様 §8 には try / except / raises しか書かれていませんでしたが、
+    //   **エラーを作る側の構文**が必要です（さもないと誰もエラーを起こせません）。
+    //   仕様のほうに raise を足しました。
+    if (tok_is_kw(t0, "raise")) {
+        advance(p);
+        Node *n = new_node(ND_RAISE, t0);
+        n->lhs = expr(p);
+        return n;
+    }
+
     // return_stmt ::= "return" [ expr ]
     if (tok_is_kw(t0, "return")) {
         advance(p);
@@ -982,6 +994,49 @@ static Node *while_stmt(Parser *p) {
     return n;
 }
 
+// try_stmt ::= "try" ":" block { except_clause }
+// except_clause ::= "except" type [ "as" IDENT ] ":" block
+//
+// ★ 第27章：見た目は Python の例外ですが、実体は戻り値の検査です
+//   （docs/design/error-handling.md）。アンワインドはしません。
+static Node *try_stmt(Parser *p) {
+    Token *kw = advance(p);  // "try"
+    expect_colon(p, "try");
+
+    Node *n = new_node(ND_TRY, kw);
+    n->body = block(p);
+
+    Node head = {0};
+    Node *cur = &head;
+    while (tok_is_kw(peek(p), "except")) {
+        Token *ek = advance(p);
+        Node *ex = new_node(ND_EXCEPT, ek);
+        ex->type_ref = type_ref(p, "except には捕まえるエラーの型名を書きます"
+                                   "（例: except IOError:）");
+        // as で受け取る名前（省略できる）
+        if (tok_is_kw(peek(p), "as")) {
+            advance(p);
+            Token *nm = peek(p);
+            if (nm->kind != TK_IDENT)
+                error_at_hint(nm, "as の後には変数名を書きます（例: except IOError as e:）",
+                              "変数名が必要です");
+            advance(p);
+            ex->name = nm->text;
+        }
+        expect_colon(p, "except");
+        ex->body = block(p);
+        cur->next = ex;
+        cur = ex;
+    }
+
+    if (!head.next)
+        error_at_hint(peek(p),
+                      "try には except を 1 つ以上書きます（例: except IOError as e:）",
+                      "この try には except がありません");
+    n->els = head.next;
+    return n;
+}
+
 // stmt ::= simple_stmt NEWLINE | if_stmt | while_stmt
 //
 // 第8章で return と def が加わります。
@@ -991,6 +1046,7 @@ static Node *stmt(Parser *p) {
     if (tok_is_kw(t, "if")) return if_stmt(p);
     if (tok_is_kw(t, "while")) return while_stmt(p);
     if (tok_is_kw(t, "for")) return for_stmt(p);
+    if (tok_is_kw(t, "try")) return try_stmt(p);
 
     // 対応する if が無い elif / else。
     // 放っておいても primary() の「予約語は変数名として使えません」に
@@ -1068,6 +1124,27 @@ static Node *type_ref(Parser *p, const char *what) {
         advance(p);
         n->nullable = true;
         n->tok = bar;
+    }
+    return n;
+}
+
+// raises に書けるのは「エラー型の名前」だけ（第27章）。
+//
+// ⚠️ type_ref は使えません。`raises A | B` の '|' を
+//    「T | None」の '|' と読んでしまうからです。
+//    **同じ記号でも、読む文脈が違えば別の文法**です（第15章の判断と同じ）。
+static Node *raises_type(Parser *p) {
+    Token *t = type_name_token(p, "raises にはエラーの型名を書きます"
+                                 "（例: raises IOError）");
+    Node *n = new_node(ND_TYPEREF, t);
+    n->name = t->text;
+
+    if (tok_is(peek(p), ".")) {  // モジュール修飾（例: errors.IOError）
+        advance(p);
+        Token *m = type_name_token(p, "モジュール修飾の後には型名を書きます");
+        n->mod_name = n->name;
+        n->name = m->text;
+        n->tok = m;
     }
     return n;
 }
@@ -1195,6 +1272,26 @@ static Node *func_def(Parser *p, bool in_class) {
                       "'->' と戻り型が必要です");
 
     n->type_ref = type_ref(p, "戻り型には型名を書きます（例: -> int / -> None）");
+
+    // ── 第27章：raises 節 ──
+    //
+    //   def read(path: str) -> Config raises IOError:
+    //   def load(path: str) -> Config raises IOError | ParseError:
+    //
+    // ★ 戻り型の「後ろ」に置きます（言語仕様 v2 §11）。
+    //   前に置くと `-> raises IOError Config` のようになり、
+    //   「何を返すのか」が読みにくくなります。
+    if (tok_is_kw(peek(p), "raises")) {
+        advance(p);
+        Node rhead = {0};
+        Node *rcur = &rhead;
+        for (;;) {
+            rcur->next = raises_type(p);
+            rcur = rcur->next;
+            if (!consume(p, "|")) break;
+        }
+        n->raises = rhead.next;
+    }
 
     expect_colon(p, "def の宣言");
     n->body = block(p);

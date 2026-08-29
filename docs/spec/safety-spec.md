@@ -96,6 +96,17 @@ v1 は Python と同じ「どこからでも同じオブジェクトを指せる
 | フィールドへの代入 | `self.xs = a` | ✅ する |
 | `list.append` の要素 | `xs.append(a)` | ✅ する（コンテナが所有する） |
 | `for` の要素 | `for x in xs:` | ❌ しない（`x` は借用） |
+| **フィールドからの取り出し** | `b = a.f` | ❌ **できない**（`E-MOVE-2`） |
+| 添字からの取り出し | `b = xs[i]` | ❌ しない（`b` は借用。取り出すには `pop()`） |
+| グローバルの読み出し | `b = mod.g` | ❌ しない（`b` は借用。グローバルは常に生きている） |
+
+**🤔 なぜフィールドから取り出せないのか**（第25章で決定）
+
+オブジェクトを解放するときは、フィールドもまとめて解放します。
+途中で 1 つだけ持ち出せると、「どのフィールドがまだ残っているか」を
+**フィールドごとの実行時フラグ**で覚える必要が出てきます（Rust はそうしています）。
+v2 は「フィールドは借りて使う」で足りるので、その複雑さを買いません。
+値そのものが必要なら `copy(a.f)` を使います。
 
 ### 3.2 移動後の変数
 
@@ -362,6 +373,23 @@ def main() -> int:
 「成功値 or エラー値」のタグ付きの値を返し、呼び出し側に分岐が挿入されるだけです。
 そのため **OS カーネルでもそのまま使えます**（§10）。詳細は [design/error-handling.md](../design/error-handling.md)。
 
+### 8.1.1 `raise` — エラーを起こす（第27章で追加）
+
+> **⚠️ この節は第27章で足しました。** §8.1 の例は「失敗が伝播する側」しか
+> 書いておらず、**エラーを作る構文がありませんでした**。実装して初めて気づいた欠落です。
+
+```python
+def read(path: str) -> str raises IOError:
+    if len(path) == 0:
+        raise IOError("空のパスです")     # ← エラーを起こす
+    return io.read_file(path)
+```
+
+- `raise` の後ろは**エラークラスのインスタンス**（ふつうの式）
+- `raise` はその経路を終わらせます（`return` と同じで、後ろは実行されません）
+- 同じ関数の中の `try` が捕まえるなら、そこへ飛びます（Python と同じ）
+- 捕まえる `try` が無ければ、呼び出し元へ伝播します（`raises` の宣言が必要）
+
 ### 8.2 握りつぶせない
 
 - `raises E` を宣言していない関数の中で、`raises` 関数を呼ぶ → **コンパイルエラー**
@@ -449,9 +477,10 @@ param        = IDENT ":" [ "own" | "mut" ] type
 funcdef      = "def" IDENT "(" [ params ] ")" "->" type [ raises ] ":" block ;
 raises       = "raises" errtype { "|" errtype } ;
 
-(* try / except *)
-trystmt      = "try" ":" block { exceptclause } ;
+(* try / except / raise *)
+trystmt      = "try" ":" block exceptclause { exceptclause } ;
 exceptclause = "except" errtype [ "as" IDENT ] ":" block ;
+raisestmt    = "raise" expr ;
 
 (* unsafe と pragma *)
 unsafestmt   = "unsafe" ":" block ;
@@ -461,7 +490,7 @@ pragmastmt   = "pragma" IDENT [ STRING | IDENT ] NEWLINE ;
 type         = ... | "rc" "[" type "]" | "ptr" "[" type "]" ;
 ```
 
-**追加キーワード**：`own`, `mut`, `raises`, `try`, `except`, `unsafe`, `pragma`, `del`, `with`
+**追加キーワード**：`own`, `mut`, `raises`, `raise`, `try`, `except`, `unsafe`, `pragma`, `del`, `with`
 
 **⚠️ `mut` と `own` は型の位置にしか現れないので、識別子としては引き続き使えません
 （v1 のキーワード表に追加します）。** 既存コードで `mut` / `own` を変数名に使っている箇所は
@@ -488,6 +517,24 @@ help: どうしても両方で持ちたいなら 'ys = copy(xs)' か 'rc[list[in
 
 エラーコード体系：`E-MOVE-*`（移動）、`E-BORROW-*`（借用）、`E-MUT-*`（可変性）、
 `E-DROP-*`（解放）、`E-RAISE-*`（エラー処理）、`E-UNSAFE-*`。
+
+**実装済みのコード**（章の順）：
+
+| コード | 意味 | 章 |
+|---|---|---|
+| `E-MOVE-1` | 移動済みの値を使っている | 22 |
+| `E-BORROW-1` | 借用した値は移動できない | 23 |
+| `E-BORROW-3` | 借用した値をフィールド／リストに保存できない | 23 |
+| `E-BORROW-4` | 借用した値は返せない | 23 |
+| `E-MUT-1` | 読み取り専用の借用を書き換えている | 24 |
+| `E-BORROW-5` | 同じ場所を可変借用と他の借用で同時に渡している | 24 |
+| `E-BORROW-6` | 借りたものが貸し手より長生きする | 26 |
+| `E-RAISE-1` | 失敗しうる呼び出しを処理していない | 27 |
+| `E-RAISE-2` | 宣言されていないエラーが漏れる | 27 |
+| `E-RAISE-4` | `main` に `raises` がある | 27 |
+| `E-RAISE-5` | 失敗しない `try`（警告） | 27 |
+
+**⚠️ `E-MOVE-2`（第25章）は第26章で撤回しました**（フィールドの読み出しは借用。D18）。
 
 ---
 

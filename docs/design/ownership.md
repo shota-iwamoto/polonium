@@ -191,7 +191,25 @@ codegen が、各スコープの**出口すべて**に drop を挿入します�
 v1 は解放しない設計でした（[memory-model.md](memory-model.md)）。この章で
 memory-model.md も改訂します。
 
-### 6.3 drop フラグ
+### 6.3 drop フラグ → **持たない**（第25章で見直し）
+
+> ⚠️ **この節は第25章の実装で見直しました。** 当初は Rust に倣って
+> 「`MaybeMoved` の Place は `alloca i1` のフラグを持つ」と決めていましたが、
+> **Polonium の所有型（`str` / `list[T]` / class）はすべてポインタ**なので、
+> **移動したときにスロットへ `null` を書けば同じことができます**（決定 D17）。
+> 解放関数はどれも `null` を受け取れるので、フラグの `alloca` も分岐も要りません。
+>
+> ```llvm
+>   %ys = load ptr, ptr %xs           ; ys = xs（移動）
+>   store ptr null, ptr %xs           ; ★ これが drop フラグの代わり
+>   ...
+>   %v = load ptr, ptr %xs            ; スコープ終端
+>   call void @drop.list.0(ptr %v)    ; null なら何もしない
+> ```
+>
+> 分岐で片方だけ移動した場合も、そのまま正しく動きます
+> （移動した経路だけがスロットを `null` にする）。
+> 以下は当初の設計です。**採用していません。**
 
 `MaybeMoved` の Place だけ、`alloca i1` のフラグを持ちます。
 

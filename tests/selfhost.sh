@@ -71,11 +71,22 @@ else
 fi
 
 pass=0; errpass=0; astpass=0; asterrpass=0; chkpass=0; chkerrpass=0
-irpass=0; runpass=0; fail=0
+irpass=0; runpass=0; fail=0; skipped=0
 failed_names=()
 
 for f in "${FILES[@]}"; do
     name="${f#$ROOT/}"
+
+    # ★ 第27章：**C 版にしか無い構文**を使うケースは比較できないので飛ばす。
+    #   stage1（Polonium 版）にはまだ raises / try / except がありません。
+    #   第29章で移植したら、この印を外します。
+    #
+    # ⚠️ `# STAGE0-ONLY:`（run_tests.sh 用）とは別の印です。所有権のテストは
+    #    構文が v1 のままなので、**比較はできます**（既定の IR は変わらないため）。
+    if head -8 "$f" | grep -q "^# *STAGE1-SKIP:"; then
+        skipped=$((skipped + 1))
+        continue
+    fi
 
     # ⚠️ わざと壊してあるケースは C 版の字句解析が失敗する。
     #   トークン列は比べられないが、**エラーの位置**は比べられる。
@@ -197,10 +208,11 @@ for f in "${FILES[@]}"; do
                "$C_NG" "$C_END" "$name"
         continue
     fi
-    m_out="$("$TMP/m.bin" 2>/dev/null)"; m_rc=$?
+    # ⚠️ 万一無限ループしても比較全体を止めないよう、時間を区切る
+    m_out="$(timeout 10 "$TMP/m.bin" 2>/dev/null)"; m_rc=$?
 
     "$PLC_CC" "$f" -o "$TMP/c.bin" 2>/dev/null
-    c_out="$("$TMP/c.bin" 2>/dev/null)"; c_rc=$?
+    c_out="$(timeout 10 "$TMP/c.bin" 2>/dev/null)"; c_rc=$?
 
     if [ "$m_out" != "$c_out" ] || [ "$m_rc" -ne "$c_rc" ]; then
         fail=$((fail + 1)); failed_names+=("$name")
@@ -224,6 +236,8 @@ if [ "$fail" -eq 0 ]; then
            "$C_OK" "$chkpass" "$chkerrpass" "$C_END"
     printf "%sIR 一致 %d 件 / stage1 の IR で実行して一致 %d 件%s\n" \
            "$C_OK" "$irpass" "$runpass" "$C_END"
+    [ "$skipped" -gt 0 ] && printf "%s（%d 件スキップ：C 版にしかない機能）%s\n" \
+                                   "$C_DIM" "$skipped" "$C_END"
     exit 0
 else
     printf "%s%d 件一致 / %d 件不一致%s\n" "$C_NG" "$pass" "$fail" "$C_END"

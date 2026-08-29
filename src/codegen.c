@@ -43,6 +43,22 @@ typedef struct {
     // 現在のループ（break / continue の飛び先）。第7章
     struct LoopCtx *loop;
 
+    // ── 第27章：エラー処理 ──
+    bool fn_raises;          // 生成中の関数が raises を宣言しているか
+    Type *fn_ret;            // 生成中の関数の戻り型（失敗時の既定値に使う）
+    bool err_slot;           // この関数で %err.slot を alloca 済みか
+    bool err_type_emitted;   // %pl.err の型定義を出したか
+    char prop_label[32];     // 伝播ブロックのラベル（err.propagate）
+    bool prop_used;          // 伝播ブロックが使われたか（使われたときだけ出す）
+    struct TryCtxG *try_ctx; // 今いる try（入れ子になるので鎖）
+
+    // ── 第25章：解放（drop）──
+    bool drop;              // --drop（解放を挿入するか）
+    struct ScopeCtx *scope; // 今いるスコープ（出口で解放するものの一覧）
+    StrBuf dropdefs;        // 生成した @drop.* の定義（モジュール末尾に出す）
+    struct StrLit *dropfns; // 生成済みの @drop.* （型ごとに 1 つ）
+    int drop_counter;       // @drop.list.N の連番
+
     // 文字列リテラルの共有と declare の重複排除（第9章）
     struct StrLit *strs;
     struct StrLit *decled;
@@ -72,7 +88,50 @@ struct LoopCtx {
     LoopCtx *outer;
     const char *break_label;     // while.end.N
     const char *continue_label;  // while.cond.N
+    struct ScopeCtx *scope;      // ループに入ったときのスコープ（第25章）
 };
+
+// try 1 つぶんの飛び先（第27章）。
+//
+// ★ LoopCtx と同じ形です。失敗した呼び出しは、内側の try の振り分けへ飛びます。
+//   その try が捕まえない型なら、振り分けの最後で外側の飛び先へ落ちます。
+typedef struct TryCtxG TryCtxG;
+struct TryCtxG {
+    TryCtxG *outer;
+    Node *node;              // ND_TRY
+    const char *dispatch;    // try.dispatch.N（失敗したときの飛び先）
+    struct ScopeCtx *scope;  // try に入ったときのスコープ（解放の巻き戻しに使う）
+};
+
+// ── スコープ（第25章）──────────────────────────────────────
+//
+// ★ LoopCtx と同じで、C の呼び出しスタックにそのまま乗せます。
+//   ブロックに入ったら push、出るときに **宣言と逆順**で解放します。
+typedef struct DropEnt DropEnt;
+struct DropEnt {
+    Node *decl;      // ND_VARDECL / ND_PARAM（ir_name と type を持っている）
+    DropEnt *next;   // ★ 先頭に足すので、たどると自然に「逆順」になります
+};
+
+typedef struct ScopeCtx ScopeCtx;
+struct ScopeCtx {
+    ScopeCtx *outer;
+    DropEnt *ents;
+};
+
+// ── 第27章：エラー処理の道具（実体は下のほうにあります）──
+static void ensure_err_type(Emitter *e);
+static const char *err_slot(Emitter *e);
+static const char *fail_label(Emitter *e);
+static void emit_fail_br(Emitter *e);
+static const char *default_value(Type *t);
+static void store_err(Emitter *e, const char *slot, int tag, const char *obj);
+static char *load_tag(Emitter *e, const char *slot);
+static char *load_payload(Emitter *e, const char *slot);
+static void emit_drops_until(Emitter *e, struct ScopeCtx *stop);
+static void emit_default_ret(Emitter *e);
+static char *deref_rc(Emitter *e, Type *t, char *v);  // 第28章
+static char *maybe_retain(Emitter *e, Node *rhs, char *val);
 
 // 新しい一時値の名前を返す（"%t0", "%t1", ...）
 //
@@ -109,6 +168,7 @@ static const char *llvm_type(Type *t) {
         case TY_LIST: return "ptr";   // PlList へのポインタ（第10章）
         case TY_CLASS: return "ptr";  // インスタンスへのポインタ（第12章）
         case TY_OPT: return "ptr";    // T | None（第15章）。None は null
+        case TY_RC: return "ptr";     // rc[T]（第28章）
         case TY_NULL: return "ptr";   // None リテラル
         default: UNREACHABLE();
     }
@@ -127,6 +187,7 @@ static const char *llvm_mem_type(Type *t) {
         case TY_LIST: return "ptr"; // 第10章
         case TY_CLASS: return "ptr";  // 第12章
         case TY_OPT: return "ptr";    // 第15章
+        case TY_RC: return "ptr";     // 第28章（数え札付きの箱へのポインタ）
         // ⚠️ TY_NONE はメモリ上の表現を持ちません。
         //    ここに来たら「None の変数を作ろうとしている」= コンパイラのバグ。
         default: UNREACHABLE();
@@ -288,9 +349,16 @@ static char *intern_str(Emitter *e, const char *bytes, int len) {
     // ⚠️ 配列の長さは「バイト数 + 1」。NUL の分を忘れない。
     StrBuf g;
     sb_init(&g);
+    // ★ 第25章：--drop のときは長さのヘッダに「静的」の印を立てます。
+    //   リテラルは .rodata にあるので、解放しようとすると落ちるためです
+    //   （runtime.c の PL_STR_STATIC を参照）。
+    //
+    // ⚠️ 印を立てるのは --drop のときだけです。既定の出力は v1 と 1 バイトも
+    //    変えない、というのがこの章の約束なので（第29章で移植したら常に立てます）。
+    long long hdr = e->drop ? ((long long)len | (1LL << 62)) : (long long)len;
     sb_printf(&g, "%s = private unnamed_addr constant { i64, [%d x i8] } "
-                  "{ i64 %d, [%d x i8] c\"",
-              sb_str(&lab), len + 1, len, len + 1);
+                  "{ i64 %lld, [%d x i8] c\"",
+              sb_str(&lab), len + 1, hdr, len + 1);
     for (int i = 0; i < len; i++) emit_ir_byte(&g, (unsigned char)bytes[i]);
     sb_printf(&g, "\\00\" }\n");
     sb_printf(&e->globals, "%s", sb_str(&g));
@@ -451,10 +519,17 @@ static char *gen_expr(Emitter *e, Node *n) {
         case ND_FIELD:
             return gen_field(e, n);
 
-        case ND_VAR:
+        case ND_VAR: {
             // 変数の読み出し（規約 R2）。bool なら i8 → i1 の変換も入る。
             // ★ n->name ではなく sema が割り当てた n->ir_name を使う（第7章）
-            return gen_load(e, n->type, n->ir_name);
+            char *v = gen_load(e, n->type, n->ir_name);
+
+            // ★ 第25章：ここで所有権が移ったなら、スロットに null を書きます。
+            //   これが drop フラグの代わりです（設計 §6.3 の見直し。決定 D17）。
+            if (e->drop && n->moved_out && !n->is_global)
+                sb_printf(&e->fn, "  store ptr null, ptr %s\n", n->ir_name);
+            return v;
+        }
 
         case ND_UNARY: {
             char *v = gen_expr(e, n->lhs);
@@ -540,9 +615,10 @@ static bool elem_is_ptr(Type *elem) {
     // ★ 第12章：クラスも参照（ポインタ）なので、ここに 1 語足すだけで
     //   list[Token] が動きます。第10章の設計がそのまま効いています。
     // ★ 第15章：T | None もポインタ（None は null）。
+    // ★ 第28章：rc[T] もポインタ（数え札付きの箱を指す）。
     return elem->kind == TY_STR || elem->kind == TY_LIST ||
            elem->kind == TY_CLASS || elem->kind == TY_OPT ||
-           elem->kind == TY_NULL;
+           elem->kind == TY_RC || elem->kind == TY_NULL;
 }
 
 // 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる。規約 R5）
@@ -645,13 +721,66 @@ static void gen_args(Emitter *e, Node *args, StrBuf *vals, StrBuf *types,
 
 // 呼び出しを 1 行出す（戻り値が None なら値を返さない）
 static char *emit_call(Emitter *e, Node *n, const char *args) {
-    if (n->type->kind == TY_NONE) {
-        sb_printf(&e->fn, "  call void @%s(%s)\n", n->ir_name, args);
-        return NULL;
+    // ── 第27章：失敗しうる呼び出し ──
+    //
+    //   ① エラースロットのタグを 0 にする
+    //   ② スロットのアドレスを最後の引数として渡す
+    //   ③ 戻ってきたらタグを見て、0 でなければ「失敗の飛び先」へ跳ぶ
+    StrBuf full;
+    sb_init(&full);
+    sb_printf(&full, "%s", args);
+    const char *slot = NULL;
+    if (n->can_fail) {
+        slot = err_slot(e);
+        char *tp = new_tmp(e);
+        sb_printf(&e->fn, "  %s = getelementptr %%pl.err, ptr %s, i32 0, i32 0\n", tp,
+                  slot);
+        sb_printf(&e->fn, "  store i64 0, ptr %s\n", tp);
+        sb_printf(&full, "%sptr %s", args[0] ? ", " : "", slot);
     }
-    char *t = new_tmp(e);
-    sb_printf(&e->fn, "  %s = call %s @%s(%s)\n", t, llvm_type(n->type), n->ir_name,
-              args);
+
+    char *t = NULL;
+    if (n->type->kind == TY_NONE) {
+        sb_printf(&e->fn, "  call void @%s(%s)\n", n->ir_name, sb_str(&full));
+    } else {
+        t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call %s @%s(%s)\n", t, llvm_type(n->type),
+                  n->ir_name, sb_str(&full));
+    }
+
+    if (n->can_fail) {
+        int id = e->label_counter++;
+        char ok_l[32];
+        snprintf(ok_l, sizeof(ok_l), "call.ok.%d", id);
+        char *tag = load_tag(e, slot);
+        char *bad = new_tmp(e);
+        sb_printf(&e->fn, "  %s = icmp ne i64 %s, 0\n", bad, tag);
+
+        // ⚠️ 解放が有効なら、失敗の経路でも「抜けるスコープ」を解放します。
+        //   分岐の辺には命令を置けないので、専用のブロックを 1 つ挟みます。
+        if (e->drop) {
+            char fail_l[32];
+            snprintf(fail_l, sizeof(fail_l), "call.fail.%d", id);
+            emit_cond_br(e, bad, fail_l, ok_l);
+            emit_label(e, fail_l);
+            emit_drops_until(e, e->try_ctx ? e->try_ctx->scope : NULL);
+            emit_fail_br(e);
+        } else {
+            const char *fl = fail_label(e);
+            if (fl) {
+                emit_cond_br(e, bad, fl, ok_l);
+            } else {
+                // 到達しない経路（sema が保証）。専用ブロックに落とす。
+                char un_l[32];
+                snprintf(un_l, sizeof(un_l), "call.unreach.%d", id);
+                emit_cond_br(e, bad, un_l, ok_l);
+                emit_label(e, un_l);
+                sb_printf(&e->fn, "  unreachable\n");
+                e->terminated = true;
+            }
+        }
+        emit_label(e, ok_l);
+    }
     return t;
 }
 
@@ -664,15 +793,18 @@ static char *gen_method(Emitter *e, Node *n) {
         sb_init(&args);
         sb_init(&types);
         gen_args(e, n->args, &args, &types, true);
-        if (n->is_extern)
+        if (n->is_extern) {
+            if (n->can_fail) sb_printf(&types, "%sptr", sb_str(&types)[0] ? ", " : "");
             declare_extern(e, llvm_type(n->type), n->ir_name, sb_str(&types));
+        }
         return emit_call(e, n, sb_str(&args));
     }
 
     // クラスのメソッド（第12章）。self を第 1 引数に渡すだけ。
     // ★ 呼ぶ関数名は sema が修飾済み（n->ir_name = "lexer.Token.show"）。
-    if (n->lhs->type->kind == TY_CLASS) {
-        char *obj = gen_expr(e, n->lhs);
+    // ★ 第28章：rc[T] の中身のメソッドも同じように呼べます（自動デリファレンス）。
+    if (n->lhs->type->kind == TY_CLASS || n->lhs->type->kind == TY_RC) {
+        char *obj = deref_rc(e, n->lhs->type, gen_expr(e, n->lhs));
 
         StrBuf args, types;
         sb_init(&args);
@@ -683,8 +815,10 @@ static char *gen_method(Emitter *e, Node *n) {
 
         // ★ 第13章：import したクラスのメソッドは、このモジュールには
         //   定義がないので declare する（sema が is_extern を立てている）。
-        if (n->is_extern)
+        if (n->is_extern) {
+            if (n->can_fail) sb_printf(&types, ", ptr");
             declare_extern(e, llvm_type(n->type), n->ir_name, sb_str(&types));
+        }
 
         return emit_call(e, n, sb_str(&args));
     }
@@ -700,7 +834,7 @@ static char *gen_method(Emitter *e, Node *n) {
     sb_printf(&sig, "void @%s(ptr, %s)", push, sty);
     declare_rt(e, sb_str(&sig));
 
-    char *v = elem_to_slot(e, elem, gen_expr(e, n->args));
+    char *v = elem_to_slot(e, elem, maybe_retain(e, n->args, gen_expr(e, n->args)));
     sb_printf(&e->fn, "  call void @%s(ptr %s, %s %s)\n", push, obj, sty, v);
     return NULL;
 }
@@ -712,9 +846,35 @@ static char *gen_method(Emitter *e, Node *n) {
 //   バイト数への変換（パディング込み）は LLVM がやってくれます。
 
 // フィールドのアドレスを求める。読み出しにも代入にも使います。
+// rc[T] の参照を 1 つ増やす（第28章）。
+//
+// ★ 増やすのは「場所から読んだ参照を、別の場所に置く」ときだけです。
+//   rc(...) や関数の戻り値は**新しい参照**なので、そのまま置けます。
+// ⚠️ retain と release は対です。解放を挿さない（--drop 無し）ときは、
+//    どちらも出しません（数が合わなくなるより、何もしないほうが安全）。
+static char *maybe_retain(Emitter *e, Node *rhs, char *val) {
+    if (!e->drop || !rhs || !rhs->type || rhs->type->kind != TY_RC) return val;
+    if (rhs->kind != ND_VAR && rhs->kind != ND_FIELD && rhs->kind != ND_INDEX)
+        return val;
+    declare_rt(e, "ptr @pl_rc_retain(ptr)");
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call ptr @pl_rc_retain(ptr %s)\n", t, val);
+    return t;
+}
+
+// rc[T] なら中身を取り出す（第28章の自動デリファレンス）
+static char *deref_rc(Emitter *e, Type *t, char *v) {
+    if (!t || t->kind != TY_RC) return v;
+    declare_rt(e, "ptr @pl_rc_get(ptr)");
+    char *g = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call ptr @pl_rc_get(ptr %s)\n", g, v);
+    return g;
+}
+
 static char *gen_field_ptr(Emitter *e, Node *n) {
-    Class *c = n->lhs->type->cls;
-    char *obj = gen_expr(e, n->lhs);
+    Type *ot = n->lhs->type;
+    Class *c = ot->kind == TY_RC ? ot->elem->cls : ot->cls;
+    char *obj = deref_rc(e, ot, gen_expr(e, n->lhs));
 
     // ⚠️ クラス型のフィールドは NULL から始まります（12.6 節）。
     //    NULL 参照を segfault ではなく親切なメッセージに変えるため、
@@ -864,6 +1024,323 @@ static void declare_extern(Emitter *e, const char *ret, const char *ir_name,
     declare_rt(e, sb_str(&sig));
 }
 
+
+
+// ── エラー処理の生成（第27章）───────────────────────────────
+//
+// 設計は docs/design/error-handling.md。**アンワインドはしません。**
+// 失敗しうる関数は、末尾に「エラー出力ポインタ」を 1 本余分に取ります。
+//
+//   define ptr @read(ptr %path, ptr %err.out)
+//
+//   %pl.err = type { i64, ptr }     ; { タグ, エラーオブジェクト }
+//   タグ 0 は「エラー無し」に予約。
+
+// %pl.err の型定義を 1 回だけ出す
+static void ensure_err_type(Emitter *e) {
+    if (e->err_type_emitted) return;
+    e->err_type_emitted = true;
+    sb_printf(&e->header, "%%pl.err = type { i64, ptr }\n");
+}
+
+// この関数のエラースロット（呼び出しの結果を受け取る場所）を用意する
+static const char *err_slot(Emitter *e) {
+    ensure_err_type(e);
+    if (!e->err_slot) {
+        e->err_slot = true;
+        sb_printf(&e->allocas, "  %%err.slot = alloca %%pl.err\n");
+    }
+    return "%err.slot";
+}
+
+// 失敗して戻るときの ret（値は使われない。設計 §2 の表）
+static void emit_default_ret(Emitter *e) {
+    const char *dv = default_value(e->fn_ret);
+    if (!dv) sb_printf(&e->fn, "  ret void\n");
+    else sb_printf(&e->fn, "  ret %s %s\n", llvm_type(e->fn_ret), dv);
+    e->terminated = true;
+}
+
+// 型ごとの「使われない戻り値」（設計 §2 の表）
+static const char *default_value(Type *t) {
+    switch (t->kind) {
+        case TY_NONE: return NULL;  // void（値を返さない）
+        case TY_INT: return "0";
+        case TY_BOOL: return "false";
+        default: return "null";  // str / list / class / T | None
+    }
+}
+
+// 失敗したときの飛び先（内側の try があればその振り分け、無ければ伝播）。
+//
+// ⚠️ どちらでもない場合（この関数は raises を宣言していない）は **到達しません**。
+//    sema が「捕まえるか宣言するか」を強制しているからです（E-RAISE-1）。
+//    その場合は NULL を返し、呼ぶ側が unreachable を出します。
+static const char *fail_label(Emitter *e) {
+    if (e->try_ctx) return e->try_ctx->dispatch;
+    if (!e->fn_raises) return NULL;
+    e->prop_used = true;
+    return e->prop_label;
+}
+
+// 失敗の経路へ飛ぶ（飛び先が無ければ unreachable）
+static void emit_fail_br(Emitter *e) {
+    const char *l = fail_label(e);
+    if (l) {
+        emit_br(e, l);
+    } else {
+        sb_printf(&e->fn, "  unreachable\n");
+        e->terminated = true;
+    }
+}
+
+// エラー（タグと値）をスロットへ書く
+static void store_err(Emitter *e, const char *slot, int tag, const char *obj) {
+    ensure_err_type(e);
+    char *tp = new_tmp(e);
+    sb_printf(&e->fn, "  %s = getelementptr %%pl.err, ptr %s, i32 0, i32 0\n", tp, slot);
+    sb_printf(&e->fn, "  store i64 %d, ptr %s\n", tag, tp);
+    char *pp = new_tmp(e);
+    sb_printf(&e->fn, "  %s = getelementptr %%pl.err, ptr %s, i32 0, i32 1\n", pp, slot);
+    sb_printf(&e->fn, "  store ptr %s, ptr %s\n", obj, pp);
+}
+
+// スロットからタグを読む
+static char *load_tag(Emitter *e, const char *slot) {
+    char *tp = new_tmp(e);
+    sb_printf(&e->fn, "  %s = getelementptr %%pl.err, ptr %s, i32 0, i32 0\n", tp, slot);
+    char *tv = new_tmp(e);
+    sb_printf(&e->fn, "  %s = load i64, ptr %s\n", tv, tp);
+    return tv;
+}
+
+// スロットからエラーオブジェクトを読む
+static char *load_payload(Emitter *e, const char *slot) {
+    char *pp = new_tmp(e);
+    sb_printf(&e->fn, "  %s = getelementptr %%pl.err, ptr %s, i32 0, i32 1\n", pp, slot);
+    char *pv = new_tmp(e);
+    sb_printf(&e->fn, "  %s = load ptr, ptr %s\n", pv, pp);
+    return pv;
+}
+
+// ── 解放（drop）の生成（第25章）─────────────────────────────
+//
+// 設計は docs/design/ownership.md §6。仕様は safety-spec.md §6。
+//
+// ★ この章のいちばん大きな判断：**drop フラグを持たない。**
+//
+//   設計 §6.3 は Rust に倣って「MaybeMoved の場所は alloca i1 のフラグを持つ」
+//   としていました。しかし Polonium の所有型（str / list / class）は
+//   **すべてポインタ**なので、**移動したときにスロットへ null を書けば**
+//   同じことができます。解放関数はどれも null を受け取れるので、
+//   フラグの alloca も分岐も要りません（決定 D17）。
+//
+//     xs: list[int] = [1, 2]      %xs = alloca ptr        …… 所有している
+//     ys: list[int] = xs          store ptr null, ptr %xs …… 移動した印
+//     （スコープ終端）              %v = load ptr, ptr %xs
+//                                 call void @drop.list.0(ptr %v)  …… null なら何もしない
+
+static const char *drop_fn_for(Emitter *e, Type *t);
+static const char *gen_rc_drop(Emitter *e, Type *t);
+
+// 生成済みの @drop.* を覚えておく（型名を鍵にする）
+static const char *drop_fn_cached(Emitter *e, const char *key) {
+    for (StrLit *d = e->dropfns; d; d = d->next)
+        if (strcmp(d->bytes, key) == 0) return d->label;
+    return NULL;
+}
+
+static void drop_fn_remember(Emitter *e, const char *key, const char *name) {
+    StrLit *d = xmalloc(sizeof(StrLit));
+    d->bytes = (char *)key;
+    d->label = (char *)name;
+    d->next = e->dropfns;
+    e->dropfns = d;
+}
+
+// クラス C を解放する関数 @drop.<C> を生成する。
+//
+//   ① drop メソッドがあれば先に呼ぶ（デストラクタ。仕様 §6.2）
+//   ② 所有型のフィールドを宣言順に解放する
+//   ③ インスタンス自身を解放する
+//
+// ⚠️ 自分自身を含むクラス（連結リストなど）では再帰します。
+//    長いリストではスタックを使い切る可能性があります（第28章で見直します）。
+static const char *gen_class_drop(Emitter *e, Class *c) {
+    StrBuf key;
+    sb_init(&key);
+    sb_printf(&key, "class:%s", c->ir_name);
+    const char *hit = drop_fn_cached(e, sb_str(&key));
+    if (hit) return hit;
+
+    StrBuf name;
+    sb_init(&name);
+    sb_printf(&name, "@drop.%s", c->ir_name);
+    // ★ 先に登録します。フィールドが自分自身の型でも無限再帰しないため。
+    drop_fn_remember(e, sb_str(&key), sb_str(&name));
+
+    // ユーザー定義の drop メソッド（デストラクタ）を探す
+    Node *dtor = NULL;
+    if (c->node)
+        for (Node *m = c->node->body; m; m = m->next)
+            if (m->kind == ND_FUNC && strcmp(m->name, "drop") == 0) dtor = m;
+
+    // ★ フィールドの解放関数を先に作ります（本体を書き始める前に）。
+    //   drop_fn_for が e->dropdefs に書き足すので、書きかけの本体と混ざらないように。
+    const char *ftype = class_type(e, c);
+    const char **fdrops = xmalloc(sizeof(char *) * (size_t)(c->nfields + 1));
+    int nf = 0;
+    for (Field *f = c->fields; f; f = f->next) fdrops[nf++] = drop_fn_for(e, f->type);
+
+    StrBuf b;
+    sb_init(&b);
+    sb_printf(&b, "\ndefine internal void %s(ptr %%p) {\nentry:\n", sb_str(&name));
+    sb_printf(&b, "  %%isnull = icmp eq ptr %%p, null\n");
+    sb_printf(&b, "  br i1 %%isnull, label %%done, label %%body\nbody:\n");
+
+    if (dtor) {
+        // ⚠️ 別モジュールのクラスなら declare が要ります。自分のモジュールで
+        //    定義しているクラスに declare を出すと「再定義」で落ちます。
+        bool local = false;
+        for (Node *d = e->ast->body; d; d = d->next)
+            if (d->kind == ND_CLASS && d->cls == c) local = true;
+        if (!local) declare_extern(e, "void", dtor->ir_name, "ptr");
+        sb_printf(&b, "  call void @%s(ptr %%p)\n", dtor->ir_name);
+    }
+
+    int i = 0;
+    for (Field *f = c->fields; f; f = f->next, i++) {
+        if (!fdrops[i]) continue;  // コピー型のフィールドは何もしない
+        sb_printf(&b, "  %%f%d = getelementptr %%%s.type, ptr %%p, i32 0, i32 %d\n", i,
+                  ftype, f->index);
+        sb_printf(&b, "  %%v%d = load ptr, ptr %%f%d\n", i, i);
+        sb_printf(&b, "  call void %s(ptr %%v%d)\n", fdrops[i], i);
+    }
+
+    declare_rt(e, "void @pl_drop_obj(ptr)");
+    sb_printf(&b, "  call void @pl_drop_obj(ptr %%p)\n");
+    sb_printf(&b, "  br label %%done\ndone:\n  ret void\n}\n");
+    sb_printf(&e->dropdefs, "%s", sb_str(&b));
+
+    return sb_str(&name);
+}
+
+// list[T] を解放する関数を生成する。
+//
+// ★ pl_drop_list は「要素を解放する関数」を受け取ります（要素がコピー型なら null）。
+//   引数が 2 つあるので、そのままでは「ptr を 1 つ取る解放関数」の形に合いません。
+//   包む関数を 1 つ作れば、あとはどの型でも同じ形で扱えます。
+static const char *gen_list_drop(Emitter *e, Type *t) {
+    StrBuf key;
+    sb_init(&key);
+    sb_printf(&key, "list:%s", type_name(t));
+    const char *hit = drop_fn_cached(e, sb_str(&key));
+    if (hit) return hit;
+
+    StrBuf name;
+    sb_init(&name);
+    sb_printf(&name, "@drop.list.%d", e->drop_counter++);
+    drop_fn_remember(e, sb_str(&key), sb_str(&name));
+
+    const char *elem = drop_fn_for(e, t->elem);
+
+    declare_rt(e, "void @pl_drop_list(ptr, ptr)");
+    sb_printf(&e->dropdefs,
+              "\ndefine internal void %s(ptr %%l) {\nentry:\n"
+              "  call void @pl_drop_list(ptr %%l, ptr %s)\n"
+              "  ret void\n}\n",
+              sb_str(&name), elem ? elem : "null");
+    return sb_str(&name);
+}
+
+// rc[T] を手放す関数を生成する（カウントを 1 減らす。第28章）
+static const char *gen_rc_drop(Emitter *e, Type *t) {
+    StrBuf key;
+    sb_init(&key);
+    sb_printf(&key, "rc:%s", type_name(t));
+    const char *hit = drop_fn_cached(e, sb_str(&key));
+    if (hit) return hit;
+
+    StrBuf name;
+    sb_init(&name);
+    sb_printf(&name, "@drop.rc.%d", e->drop_counter++);
+    drop_fn_remember(e, sb_str(&key), sb_str(&name));
+
+    const char *inner = drop_fn_for(e, t->elem);
+    declare_rt(e, "void @pl_rc_release(ptr, ptr)");
+    sb_printf(&e->dropdefs,
+              "\ndefine internal void %s(ptr %%p) {\nentry:\n"
+              "  call void @pl_rc_release(ptr %%p, ptr %s)\n"
+              "  ret void\n}\n",
+              sb_str(&name), inner ? inner : "null");
+    return sb_str(&name);
+}
+
+// 型 t の値 1 つを解放する関数の名前。コピー型なら NULL。
+static const char *drop_fn_for(Emitter *e, Type *t) {
+    if (!t) return NULL;
+    switch (t->kind) {
+        case TY_STR:
+            declare_rt(e, "void @pl_drop_str(ptr)");
+            return "@pl_drop_str";
+        case TY_LIST: return gen_list_drop(e, t);
+        case TY_RC: return gen_rc_drop(e, t);
+        case TY_CLASS: return gen_class_drop(e, t->cls);
+        // T | None は中身と同じ扱い（解放関数はどれも null を受け取れる）
+        case TY_OPT: return drop_fn_for(e, t->elem);
+        default: return NULL;  // int / bool / None
+    }
+}
+
+// 変数 1 つを解放する（スロットを読んで、解放関数に渡すだけ）
+static void emit_drop_slot(Emitter *e, Node *decl) {
+    const char *fn = drop_fn_for(e, decl->type);
+    if (!fn) return;
+    char *v = new_tmp(e);
+    sb_printf(&e->fn, "  %s = load ptr, ptr %s\n", v, decl->ir_name);
+    sb_printf(&e->fn, "  call void %s(ptr %s)\n", fn, v);
+}
+
+// 一時的な値を解放する（式文の結果など）
+static void emit_drop_value(Emitter *e, Type *t, const char *val) {
+    const char *fn = drop_fn_for(e, t);
+    if (!fn) return;
+    sb_printf(&e->fn, "  call void %s(ptr %s)\n", fn, val);
+}
+
+// この変数はスコープ終端で解放する対象か。
+//
+// ⚠️ 借りものを束縛している変数（`t = xs[i]` や for のループ変数）は
+//    **所有していない**ので解放しません。ownck が印を付けています（第23章）。
+static bool is_droppable(Node *decl) {
+    return decl->type && !decl->is_global && !decl->binds_borrow &&
+           (decl->type->kind == TY_STR || decl->type->kind == TY_LIST ||
+            decl->type->kind == TY_CLASS || decl->type->kind == TY_OPT ||
+            decl->type->kind == TY_RC);  // 第28章：rc[T] はカウントを減らす
+}
+
+static void scope_add(Emitter *e, Node *decl) {
+    if (!e->drop || !e->scope || !is_droppable(decl)) return;
+    DropEnt *d = xmalloc(sizeof(DropEnt));
+    d->decl = decl;
+    d->next = e->scope->ents;  // 先頭に足す＝たどると宣言の逆順
+    e->scope->ents = d;
+}
+
+// スコープ 1 つぶんの解放を出す（宣言と逆順。設計 §6.1）
+static void emit_scope_drops(Emitter *e, ScopeCtx *sc) {
+    for (DropEnt *d = sc->ents; d; d = d->next) emit_drop_slot(e, d->decl);
+}
+
+// 今のスコープから stop（含まない）まで、抜けるスコープすべてを解放する。
+//   return  … stop = NULL（関数の外まで抜ける）
+//   break   … stop = ループの外側のスコープ
+static void emit_drops_until(Emitter *e, struct ScopeCtx *stop) {
+    if (!e->drop) return;
+    for (ScopeCtx *sc = e->scope; sc && sc != stop; sc = sc->outer)
+        emit_scope_drops(e, sc);
+}
+
 // ── 制御構文の生成（規約 6.3 / 6.4 / 6.5）──────────────────
 
 static char *gen_stmt(Emitter *e, Node *n);
@@ -924,7 +1401,10 @@ static void gen_while(Emitter *e, Node *n) {
     }
 
     // break / continue の飛び先を積む
-    LoopCtx ctx = {.outer = e->loop, .break_label = end_l, .continue_label = cont_l};
+    LoopCtx ctx = {.outer = e->loop,
+                   .break_label = end_l,
+                   .continue_label = cont_l,
+                   .scope = e->scope};
     e->loop = &ctx;
 
     emit_label(e, body_l);
@@ -993,6 +1473,15 @@ static char *gen_call(Emitter *e, Node *n) {
     if (n->builtin) return gen_builtin_call(e, n);
     if (n->cls) return gen_new(e, n);  // ★ 第12章：インスタンス生成
 
+    // ★ 第28章：rc(x) — 数え札を付けてくるむ（sema が ir_name を付けない目印）
+    if (!n->ir_name && strcmp(n->name, "rc") == 0) {
+        char *v = gen_expr(e, n->args);
+        declare_rt(e, "ptr @pl_rc_new(ptr)");
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call ptr @pl_rc_new(ptr %s)\n", t, v);
+        return t;
+    }
+
     // 引数を左から順に評価する（言語仕様 4.5）
     StrBuf args, types;
     sb_init(&args);
@@ -1000,8 +1489,11 @@ static char *gen_call(Emitter *e, Node *n) {
     gen_args(e, n->args, &args, &types, true);
 
     // ★ 第13章：呼ぶ名前は sema が修飾済み（n->ir_name = "lexer.make"）
-    if (n->is_extern)
+    if (n->is_extern) {
+        // ★ 第27章：失敗しうる関数は、エラー出力の ptr が 1 本増えています
+        if (n->can_fail) sb_printf(&types, "%sptr", sb_str(&types)[0] ? ", " : "");
         declare_extern(e, llvm_type(n->type), n->ir_name, sb_str(&types));
+    }
     return emit_call(e, n, sb_str(&args));
 }
 
@@ -1016,21 +1508,114 @@ static char *gen_stmt(Emitter *e, Node *n) {
 
     switch (n->kind) {
         case ND_BLOCK: {
+            // ★ 第25章：ブロック＝スコープ。抜けるときに宣言の逆順で解放します。
+            ScopeCtx sc = {e->scope, NULL};
+            e->scope = &sc;
+
             char *last = NULL;
             for (Node *st = n->body; st; st = st->next) {
                 char *v = gen_stmt(e, st);
                 if (v) last = v;
             }
+            // 終端済み（return / break で抜けた）なら、そちらで解放済み
+            if (e->drop && !e->terminated) emit_scope_drops(e, &sc);
+
+            e->scope = sc.outer;
             return last;
         }
 
         case ND_IF: gen_if(e, n); return NULL;
         case ND_WHILE: gen_while(e, n); return NULL;
+
+        // ── 第27章：try / except ──
+        //
+        //   try の本体で失敗したら「振り分け」へ飛び、タグを見て except を選びます。
+        //   どの except にも当たらなければ、外側の飛び先（外の try か伝播）へ。
+        case ND_TRY: {
+            int id = e->label_counter++;
+            char disp_l[32], end_l[32];
+            snprintf(disp_l, sizeof(disp_l), "try.dispatch.%d", id);
+            snprintf(end_l, sizeof(end_l), "try.end.%d", id);
+
+            TryCtxG ctx = {e->try_ctx, n, NULL, e->scope};
+            ctx.dispatch = xstrndup(disp_l, strlen(disp_l));
+            e->try_ctx = &ctx;
+            gen_stmt(e, n->body);
+            e->try_ctx = ctx.outer;
+            if (!e->terminated) emit_br(e, end_l);
+
+            // ── 振り分け ──
+            emit_label(e, disp_l);
+            const char *slot = err_slot(e);
+            char *tag = load_tag(e, slot);
+
+            int k = 0;
+            for (Node *ex = n->els; ex; ex = ex->next, k++) {
+                char hit_l[40], next_l[40];
+                snprintf(hit_l, sizeof(hit_l), "except.%d.%d", id, k);
+                snprintf(next_l, sizeof(next_l), "try.next.%d.%d", id, k);
+                char *c = new_tmp(e);
+                sb_printf(&e->fn, "  %s = icmp eq i64 %s, %d\n", c, tag, ex->err_tag);
+                emit_cond_br(e, c, hit_l, next_l);
+                emit_label(e, next_l);
+            }
+            // どの except にも当たらなかった → 外側へ渡す（無ければ到達しない）
+            emit_fail_br(e);
+
+            // ── 各 except の本体 ──
+            k = 0;
+            for (Node *ex = n->els; ex; ex = ex->next, k++) {
+                char hit_l[40];
+                snprintf(hit_l, sizeof(hit_l), "except.%d.%d", id, k);
+                emit_label(e, hit_l);
+                if (ex->ir_name) {
+                    // as e : エラーオブジェクトを局所変数に入れる
+                    char *pv = load_payload(e, slot);
+                    sb_printf(&e->fn, "  store ptr %s, ptr %s\n", pv, ex->ir_name);
+                }
+                gen_stmt(e, ex->body);
+                if (!e->terminated) emit_br(e, end_l);
+            }
+
+            emit_label(e, end_l);
+            return NULL;
+        }
+
+        // ── 第27章：raise ──
+        case ND_RAISE: {
+            char *obj = gen_expr(e, n->lhs);
+
+            // ★ 同じ関数の中の try が捕まえるなら、そこへ飛びます（Python と同じ）。
+            //   捕まえる try が無ければ、呼び出し元へ伝播します。
+            TryCtxG *catcher = NULL;
+            for (TryCtxG *t = e->try_ctx; t && !catcher; t = t->outer)
+                for (Node *ex = t->node->els; ex; ex = ex->next)
+                    if (ex->err_tag == n->err_tag) {
+                        catcher = t;
+                        break;
+                    }
+
+            if (catcher) {
+                store_err(e, err_slot(e), n->err_tag, obj);
+                if (e->drop) emit_drops_until(e, catcher->scope);
+                emit_br(e, catcher->dispatch);
+            } else {
+                store_err(e, "%err.out", n->err_tag, obj);
+                if (e->drop) emit_drops_until(e, NULL);
+                emit_default_ret(e);
+            }
+            return NULL;
+        }
         case ND_RETURN: {
             if (!n->lhs) {
+                emit_drops_until(e, NULL);  // 第25章：抜けるスコープを全部解放
                 sb_printf(&e->fn, "  ret void\n");  // 規約 R9
             } else {
-                char *v = gen_expr(e, n->lhs);
+                // ★ 戻り値を先に評価します。移動した変数はスロットが null に
+                //   なっているので、この後の解放は何もしません（設計 §6.1）。
+                //   ⚠️ rc[T] を返すときは参照を 1 つ増やします（呼び出し側のぶん）。
+                char *v = maybe_retain(e, n->lhs, gen_expr(e, n->lhs));
+                emit_drops_until(e, NULL);
                 sb_printf(&e->fn, "  ret %s %s\n", llvm_type(n->lhs->type), v);
             }
             e->terminated = true;
@@ -1039,18 +1624,44 @@ static char *gen_stmt(Emitter *e, Node *n) {
         case ND_PASS: return NULL;  // 本当に何も出さない
 
         // 飛び先は sema が保証している（ループの外なら検査で弾かれる）
-        case ND_BREAK: emit_br(e, e->loop->break_label); return NULL;
-        case ND_CONTINUE: emit_br(e, e->loop->continue_label); return NULL;
+        // ★ 第25章：ループから抜ける経路でも、抜けるスコープぶんだけ解放します。
+        case ND_BREAK:
+            emit_drops_until(e, e->loop->scope);
+            emit_br(e, e->loop->break_label);
+            return NULL;
+        case ND_CONTINUE:
+            emit_drops_until(e, e->loop->scope);
+            emit_br(e, e->loop->continue_label);
+            return NULL;
 
         case ND_VARDECL: {
             // alloca は entry ブロックに出済み（規約 R1）。ここでは store だけ。
-            char *val = gen_expr(e, n->rhs);
+            char *val = maybe_retain(e, n->rhs, gen_expr(e, n->rhs));
             gen_store(e, n->type, val, n->ir_name);
+            scope_add(e, n);  // 第25章：このスコープの解放対象に加える
             return NULL;
         }
 
         case ND_ASSIGN: {
-            char *val = gen_expr(e, n->rhs);
+            char *val = maybe_retain(e, n->rhs, gen_expr(e, n->rhs));
+
+            // ★ 第25章：入れ替える前に、古い値を解放します。
+            //   `s = s + "!"` のように、上書きは v1 では黙って捨てていました。
+            //   ⚠️ 借りものを束縛している変数（ownck が印を付けた）は所有者では
+            //      ないので触りません。
+            if (e->drop && !n->binds_borrow) {
+                // ⚠️ グローバル（@g.x）は「プログラムが終わるまで生きる場所」
+                //    なので、ここでは触りません（解放するのは所有者だけ）。
+                if (n->lhs->kind == ND_VAR && n->lhs->ir_name[0] == '%')
+                    emit_drop_value(e, n->type, gen_load(e, n->type, n->lhs->ir_name));
+                // ⚠️ 対象を 2 回評価しないこと。古い値を読むために
+                //    gen_field_ptr をもう一度通すので、対象が単純な変数の
+                //    ときだけに限ります（xs[f()].g = v で f が 2 回走るのを防ぐ）。
+                else if (n->lhs->kind == ND_FIELD && !n->lhs->mod_name &&
+                         n->lhs->lhs->kind == ND_VAR)
+                    emit_drop_value(e, n->type,
+                                    gen_load(e, n->type, gen_field_ptr(e, n->lhs)));
+            }
             // 添字への代入 xs[i] = v（第10章）
             if (n->lhs->kind == ND_INDEX) {
                 gen_index_store(e, n->lhs, val);
@@ -1071,8 +1682,13 @@ static char *gen_stmt(Emitter *e, Node *n) {
             return NULL;
         }
 
-        default:
-            return gen_expr(e, n);  // 式文
+        default: {
+            char *v = gen_expr(e, n);  // 式文
+            // ★ 第25章：捨てられる一時値（呼び出しの戻り値）を解放します。
+            //   ⚠️ 借用を返す関数（仕様 §4.5）の戻り値は所有していません。
+            if (e->drop && !n->binds_borrow && n->type) emit_drop_value(e, n->type, v);
+            return v;
+        }
     }
 }
 
@@ -1092,7 +1708,17 @@ static void collect_allocas(Emitter *e, Node *n) {
     // ⚠️ グローバル変数は alloca しない（@g.x をそのまま読み書きする）
     if (n->kind == ND_VARDECL && !n->is_global)
         sb_printf(&e->allocas, "  %s = alloca %s\n", n->ir_name,
-                  llvm_mem_type(n->type));  // ★ bool は i8（規約 R5）
+                  llvm_mem_type(n->type));
+
+    // ★ 第27章：except ... as e で束縛する変数も、ふつうの局所変数と同じ箱が要ります。
+    if (n->kind == ND_EXCEPT && n->ir_name)
+        sb_printf(&e->allocas, "  %s = alloca %s\n", n->ir_name,
+                  llvm_mem_type(n->type));
+
+    // ⚠️ except の並びは next で繋がっています（if の else と違って複数あります）。
+    //    2 番目以降はここでたどります（先頭は下の collect_allocas(n->els) が拾う）。
+    if (n->kind == ND_TRY && n->els)
+        for (Node *ex = n->els->next; ex; ex = ex->next) collect_allocas(e, ex);  // ★ bool は i8（規約 R5）
 
     // 子と兄弟をたどる。
     // ★ 第5章で「再帰なので第7章でブロックが入っても勝手に見つかる」と
@@ -1114,6 +1740,15 @@ static void gen_func(Emitter *e, Node *n) {
     e->label_counter = 0;
     e->terminated = false;
     e->loop = NULL;
+
+    // ── 第27章：エラー処理の状態 ──
+    e->fn_raises = n->raises != NULL;
+    e->fn_ret = n->type;
+    e->err_slot = false;
+    e->try_ctx = NULL;
+    e->prop_used = false;
+    snprintf(e->prop_label, sizeof(e->prop_label), "err.propagate");
+    if (e->fn_raises) ensure_err_type(e);
     sb_init(&e->allocas);
     sb_init(&e->fn);
 
@@ -1141,11 +1776,31 @@ static void gen_func(Emitter *e, Node *n) {
     // ② ローカル変数の alloca（第5章のまま）
     collect_allocas(e, n->body);
 
+    // ★ 第25章：引数のスコープ。own で受け取った引数は、この関数が所有者なので
+    //   出口で解放します（借用の引数には ownck が「借りもの」の印を付けています）。
+    ScopeCtx params = {NULL, NULL};
+    e->scope = &params;
+    for (Node *pm = n->params; pm; pm = pm->next) scope_add(e, pm);
+
     // ③ 本体
     gen_stmt(e, n->body);
 
+    // ── 第27章：伝播ブロック（呼び出し元へエラーをそのまま返す）──
+    //
+    // ★ 使われたときだけ出します（使わないブロックがあると LLVM が警告します）。
+    if (e->prop_used) {
+        emit_label(e, e->prop_label);
+        if (e->drop) emit_drops_until(e, NULL);
+        ensure_err_type(e);
+        char *ev = new_tmp(e);
+        sb_printf(&e->fn, "  %s = load %%pl.err, ptr %%err.slot\n", ev);
+        sb_printf(&e->fn, "  store %%pl.err %s, ptr %%err.out\n", ev);
+        emit_default_ret(e);
+    }
+
     // ④ 終端されていなければ終端する（規約 R6）
     if (!e->terminated) {
+        if (e->drop) emit_scope_drops(e, &params);
         if (n->type->kind == TY_NONE) {
             sb_printf(&e->fn, "  ret void\n");  // 規約 R9
         } else {
@@ -1154,6 +1809,7 @@ static void gen_func(Emitter *e, Node *n) {
             sb_printf(&e->fn, "  unreachable\n");
         }
     }
+    e->scope = NULL;
 
     // ⑤ 組み立て
     sb_printf(&e->body, "\ndefine %s @%s(", llvm_type(n->type), ir_name);
@@ -1163,6 +1819,8 @@ static void gen_func(Emitter *e, Node *n) {
                   llvm_type(pm->type), pm->name);
         first = false;
     }
+    // ★ 第27章：失敗しうる関数は、エラー出力ポインタを 1 本余分に取ります
+    if (e->fn_raises) sb_printf(&e->body, "%sptr %%err.out", first ? "" : ", ");
     sb_printf(&e->body, ") {\nentry:\n");
     sb_printf(&e->body, "%s", sb_str(&e->allocas));
     sb_printf(&e->body, "%s", sb_str(&e->fn));
@@ -1226,15 +1884,17 @@ static void gen_c_main(Emitter *e, const char *main_ir_name) {
 // ★ 第13章：「1 ファイル = 1 モジュール = 1 つの .ll」（13.2 節）。
 //   import したモジュールのものは、使ったぶんだけ declare / 型定義の複製が
 //   自動で付いてきます（class_type / declare_extern が「出済みか」を見るため）。
-char *codegen(Module *mod, const char *main_ir_name) {
+char *codegen(Module *mod, const char *main_ir_name, bool drop) {
     Node *ast = mod->ast;
 
     Emitter e = {0};
     e.ast = ast;
+    e.drop = drop;  // 第25章：解放を挿入するか
     sb_init(&e.header);
     sb_init(&e.globals);
     sb_init(&e.decls);
     sb_init(&e.body);
+    sb_init(&e.dropdefs);
 
     // ① ヘッダ
     sb_printf(&e.header, "; Generated by " PLC_LANG_CC "\n");
@@ -1278,12 +1938,15 @@ char *codegen(Module *mod, const char *main_ir_name) {
     // ⚠️ C の main を出すのは入口モジュールだけ（重複定義になるため）
     if (main_ir_name) gen_c_main(&e, main_ir_name);
 
-    // 4 つのバッファを規定の順に連結する
+    // バッファを規定の順に連結する
+    //
+    // ★ 第25章：生成した @drop.* は最後に置きます（関数定義と同じ扱い）。
     StrBuf out;
     sb_init(&out);
     sb_printf(&out, "%s", sb_str(&e.header));
     sb_printf(&out, "%s", sb_str(&e.globals));
     sb_printf(&out, "%s", sb_str(&e.decls));
     sb_printf(&out, "%s", sb_str(&e.body));
+    sb_printf(&out, "%s", sb_str(&e.dropdefs));
     return sb_str(&out);
 }

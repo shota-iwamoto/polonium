@@ -21,7 +21,8 @@ def main() -> int:
     for line in strings.split(text, "\n"):
         for word in strings.split(strings.strip(line), " "):
             if len(word) > 0:
-                counts.set(word, counts.get_or(word, 0) + 1)
+                # ★ 第26章：dict は鍵を所有するので、借りている word を複製して渡す
+                counts.set(copy(word), counts.get_or(word, 0) + 1)
 
     for k in counts.keys():
         print(k + ": " + str(counts.get(k)))

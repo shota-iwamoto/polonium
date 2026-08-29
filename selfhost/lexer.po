@@ -186,7 +186,7 @@ class Lexer:
     # ── トークンの追加 ──────────────────────────────────────
     #
     # 位置情報はここで一括して埋めるので、呼び出し側は kind と値だけを見る。
-    def push(self, kind: int, at: int, raw: str) -> token.Token:
+    def push(mut self, kind: int, at: int, raw: str) -> token.Token:
         t: token.Token = token.Token(kind, self.file, self.line, self.col_of(at),
                                      self.src, self.line_start, len(raw))
         t.raw = raw
@@ -216,7 +216,7 @@ class Lexer:
                        "Polonium ではタブを禁止しています（半角スペース 4 個を推奨）")
 
     # '\n' を 1 つ読み進め、行番号と行頭を更新する
-    def advance_newline(self) -> None:
+    def advance_newline(mut self) -> None:
         self.prev_line_start = self.line_start
         self.prev_line = self.line
         self.has_prev_line = True
@@ -227,7 +227,7 @@ class Lexer:
 
     # ── 数値リテラル ────────────────────────────────────────
 
-    def read_int(self) -> None:
+    def read_int(mut self) -> None:
         start: int = self.pos
 
         # 基数の接頭辞（言語仕様 2.7）
@@ -287,7 +287,7 @@ class Lexer:
 
     # 空行・コメント行を読み飛ばし、内容のある行のインデント幅を返す。
     # 入力が終わったら -1
-    def scan_indent(self) -> int:
+    def scan_indent(mut self) -> int:
         while True:
             width: int = 0
             while self.at() == B_SPACE:
@@ -320,14 +320,14 @@ class Lexer:
     def indent_top(self) -> int:
         return self.indent_stack[self.indent_len - 1]
 
-    def indent_push(self, width: int) -> None:
+    def indent_push(mut self, width: int) -> None:
         if self.indent_len < len(self.indent_stack):
             self.indent_stack[self.indent_len] = width
         else:
             self.indent_stack.append(width)
         self.indent_len = self.indent_len + 1
 
-    def emit_indent_tokens(self, width: int) -> None:
+    def emit_indent_tokens(mut self, width: int) -> None:
         top: int = self.indent_top()
 
         if width > top:
@@ -354,7 +354,7 @@ class Lexer:
 
     # ── 識別子・キーワード ──────────────────────────────────
 
-    def read_ident(self) -> None:
+    def read_ident(mut self) -> None:
         start: int = self.pos
         while is_ident_cont(self.at()):
             self.pos = self.pos + 1
@@ -370,7 +370,7 @@ class Lexer:
 
     # ── 文字列リテラル ──────────────────────────────────────
 
-    def read_string(self) -> None:
+    def read_string(mut self) -> None:
         start: int = self.pos
         quote: int = self.at()
         self.pos = self.pos + 1
@@ -414,7 +414,7 @@ class Lexer:
 
     # ── 記号 ────────────────────────────────────────────────
 
-    def read_punct(self) -> bool:
+    def read_punct(mut self) -> bool:
         i: int = 0
         while i < len(self.puncts):
             op: str = self.puncts[i]
@@ -437,7 +437,7 @@ class Lexer:
 
     # ── 本体 ────────────────────────────────────────────────
 
-    def run(self) -> list[token.Token]:
+    def run(mut self) -> list[token.Token]:
         at_line_start: bool = True
 
         while self.at() != B_NUL:

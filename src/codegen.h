@@ -15,6 +15,11 @@
 // モジュール 1 つぶんの LLVM IR テキストを生成して返す（第13章）。
 //   main_ir_name : 入口モジュールなら「Polonium の main の IR 名」。
 //                  他のモジュールでは NULL（C の main を出すのは入口だけ）。
-char *codegen(Module *mod, const char *main_ir_name);
+//   drop         : 解放（drop）を挿入するか（--drop。第25章）。
+//
+// ⚠️ drop = false のときの出力は v1 と 1 バイトも変わりません。
+//    既存コード（selfhost/ / lib/）はまだ v1 の参照セマンティクス前提なので、
+//    第26章で移行を終えるまで、解放は **opt-in** にしてあります（決定 D16）。
+char *codegen(Module *mod, const char *main_ir_name, bool drop);
 
 #endif  // PLC_CODEGEN_H

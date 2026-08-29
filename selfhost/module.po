@@ -166,7 +166,7 @@ def cycle_path(ld: Loader, name: str) -> str:
 
 
 # ★ 再帰から戻るときに order へ積むと、それだけでトポロジカル順になる
-def load(ld: Loader, name: str, path: str, from_: token.Token | None) -> Module:
+def load(ld: mut Loader, name: str, path: str, from_: token.Token | None) -> Module:
     found: Module | None = find_module(ld, name)
     if found is not None:
         if found.state == 1:   # 訪問中に再訪 → 循環

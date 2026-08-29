@@ -60,6 +60,12 @@ struct FuncSig {
     char *name;      // 表を引く鍵（"add" / "Token.show"。★ モジュール内で一意）
     char *ir_name;   // IR 上の名前（第13章。"lexer.add" / "lexer.Token.show"）
     Type *ret;
+
+    // ── 第27章：raises 節 ──
+    // ★ 失敗しうる関数は、IR 上でエラー出力用の引数を 1 本余分に取ります
+    //   （docs/design/error-handling.md §2）。
+    Class **raises;  // 宣言されたエラー型（クラス）
+    int nraises;
     Type **params;  // 引数の型
     char **pnames;  // 引数名（エラーメッセージ用）
     int nparams;
@@ -79,6 +85,19 @@ struct ModuleSyms {
     Class *classes;
     Scope *globals;    // グローバル変数のスコープ
     ModuleSyms *next;
+};
+
+// エラー型の ID（第27章）。
+//
+// ★ 0 は「エラー無し」に予約し、1 から連番を振ります。
+//   ⚠️ 割り当て規則は仕様として固定してあります（error-handling.md §4）：
+//     「モジュールを依存順に、モジュール内は出現順に」。
+//     stage0 と stage1 で番号が食い違うと IR が一致しなくなるためです。
+typedef struct ErrTag ErrTag;
+struct ErrTag {
+    Class *cls;
+    int tag;
+    ErrTag *next;
 };
 
 typedef struct {
@@ -101,7 +120,57 @@ typedef struct {
     //   v1 で期待型を必要とする式は [] だけなので、状態を 1 つ持たせて済ませます。
     // ⚠️ 期待型が要る式が増えたら、この手は破綻します。そのときは引数で渡す形に直します。
     Type *expected;
+
+    // ── 第27章：エラー処理 ──
+    ErrTag *err_tags;   // エラー型 → ID
+    int next_err_tag;   // 次に振る番号（1 から）
+    struct TryCtx *cur_try;  // 今いる try 文（入れ子になるのでスタック）
 } Sema;
+
+// 入れ子の try（内側で捕まらなければ外側が受け止める）
+typedef struct TryCtx TryCtx;
+struct TryCtx {
+    Node *node;
+    TryCtx *outer;
+};
+
+// エラー型の ID を引く（無ければ割り当てる）
+static int err_tag_of(Sema *s, Class *c) {
+    for (ErrTag *e = s->err_tags; e; e = e->next)
+        if (e->cls == c) return e->tag;
+    ErrTag *e = xmalloc(sizeof(ErrTag));
+    e->cls = c;
+    e->tag = ++s->next_err_tag;
+    // ★ 末尾に足す（登録順＝出現順を保つため）
+    if (!s->err_tags) {
+        s->err_tags = e;
+    } else {
+        ErrTag *t = s->err_tags;
+        while (t->next) t = t->next;
+        t->next = e;
+    }
+    return e->tag;
+}
+
+// いま入っている try のどれかが c を捕まえるか（第27章）。
+// ★ 捕まえた try には印を付けます（「意味のない try」の警告に使う）。
+static bool try_catches(Sema *s, Class *c) {
+    for (TryCtx *t = s->cur_try; t; t = t->outer)
+        for (Node *ex = t->node->els; ex; ex = ex->next)
+            if (ex->type && ex->type->cls == c) {
+                t->node->can_fail = true;
+                return true;
+            }
+    return false;
+}
+
+// 今検査中の関数が c を raises に宣言しているか
+static bool func_declares(FuncSig *f, Class *c) {
+    if (!f) return false;
+    for (int i = 0; i < f->nraises; i++)
+        if (f->raises[i] == c) return true;
+    return false;
+}
 
 // ── モジュールの出入り（第13章）────────────────────────────
 //
@@ -383,7 +452,7 @@ static Type *resolve_base_type(Sema *s, Node *tr) {
             diag_fail(&d);
         }
         if (tr->lhs)
-            error_at_hint(tr->tok, "要素型を取るのは list だけです",
+            error_at_hint(tr->tok, "要素型を取るのは list と rc だけです",
                           "型 '%s.%s' は要素型を取りません", tr->mod_name, tr->name);
         return c->type;
     }
@@ -399,8 +468,25 @@ static Type *resolve_base_type(Sema *s, Node *tr) {
         return type_list(elem);
     }
 
+    // ── 第28章：rc[T]（共有所有）──
+    //
+    // ★ 中身に取れるのはクラスだけにしてあります。
+    //   「所有者を 1 つに決められない」のは木やグラフの節点で、
+    //   それはクラスとして書かれるからです（仕様 §7.1）。
+    if (strcmp(tr->name, "rc") == 0) {
+        if (!tr->lhs)
+            error_at_hint(tr->tok, "中身の型を書いてください（例: rc[Node]）",
+                          "rc には中身の型が必要です");
+        Type *elem = resolve_type(s, tr->lhs);
+        if (elem->kind != TY_CLASS)
+            error_at_hint(tr->tok,
+                          "rc に入れられるのはクラスだけです（例: rc[Node]）",
+                          "'%s' は rc に入れられません", type_name(elem));
+        return type_rc(elem);
+    }
+
     if (tr->lhs)
-        error_at_hint(tr->tok, "要素型を取るのは list だけです",
+        error_at_hint(tr->tok, "要素型を取るのは list と rc だけです",
                       "型 '%s' は要素型を取りません", tr->name);
 
     Type *t = type_from_name(tr->name);
@@ -1007,6 +1093,10 @@ const Builtin BUILTINS[] = {
     {"chr", TY_INT, TY_STR, "pl_chr"},
     {"exit", TY_INT, TY_NONE, "pl_exit"},
     {"panic", TY_STR, TY_NONE, "pl_panic"},
+    // ★ 第26章：借りたものを保存したいときの逃げ道（決定 D8）。
+    //   ⚠️ いまは str だけです。list[T] の複製は要素の所有まで考える必要が
+    //      あるので、`rc[T]`（第28章）と一緒に見直します。
+    {"copy", TY_STR, TY_STR, "pl_str_copy"},
     {NULL, 0, 0, NULL},
 };
 
@@ -1204,11 +1294,19 @@ static _Noreturn void reject_opt_access(Node *obj, Node *at, const char *what,
     diag_fail(&d);
 }
 
+// rc[T] は「中身のように」使える（第28章）。
+//
+// ★ Rust の Deref と同じ考えです。`with ... borrow()` を毎回書かせると、
+//   木やグラフを扱うコードが読めなくなります（仕様 §7 の目的が達成できません）。
+static Type *auto_deref(Type *t) {
+    return t && t->kind == TY_RC ? t->elem : t;
+}
+
 static Type *check_field(Sema *s, Node *n) {
     ModuleSyms *ms = dot_module(s, n);
     if (ms) return check_module_global(s, n, ms);
 
-    Type *ot = check_expr(s, n->lhs);
+    Type *ot = auto_deref(check_expr(s, n->lhs));  // 第28章：rc[T] は中身のように使える
 
     if (ot->kind == TY_OPT) reject_opt_access(n->lhs, n, "フィールド", ot);
 
@@ -1242,6 +1340,8 @@ static Type *check_field(Sema *s, Node *n) {
 //
 // ★ 「関数呼び出しの検査に self を 1 個足すだけ」です。
 //   名前を修飾して関数表に載せておいたので、引ける表は第8章のまま。
+static void check_can_fail(Sema *s, Node *n, FuncSig *f, const char *shown);
+
 static Type *check_class_method(Sema *s, Node *n, Class *c) {
     // ★ 第13章：メソッドは「クラスが定義されたモジュール」の表にいます。
     //   自分のモジュールの表を引くと、import したクラスのメソッドが見つかりません。
@@ -1300,6 +1400,7 @@ static Type *check_class_method(Sema *s, Node *n, Class *c) {
     //   import したクラスのメソッドなら declare も要る（第13章）。
     n->ir_name = f->ir_name;
     n->is_extern = f->owner != s->cur;
+    check_can_fail(s, n, f, mname);  // 第27章
     return f->ret;
 }
 
@@ -1341,7 +1442,7 @@ static Type *check_method(Sema *s, Node *n) {
     ModuleSyms *ms = dot_module(s, n);
     if (ms) return check_module_call(s, n, ms);
 
-    Type *ot = check_expr(s, n->lhs);
+    Type *ot = auto_deref(check_expr(s, n->lhs));  // 第28章
 
     if (ot->kind == TY_OPT) reject_opt_access(n->lhs, n, "メソッド", ot);
 
@@ -1454,6 +1555,26 @@ static Type *check_new(Sema *s, Node *n, Class *c) {
 
 // 関数呼び出しの検査（docs/spec/type-system.md 5.7 の順序に従う）
 static Type *check_call(Sema *s, Node *n) {
+    // ── 第28章：rc(x) — 共有所有にくるむ ──
+    //
+    // ★ 構文上はただの呼び出しですが、型が「引数の型から作られる」ので
+    //   組み込み関数の表（名前 → 固定の型）では表せません。ここで分岐します。
+    if (strcmp(n->name, "rc") == 0 && !lookup_func(s, "rc")) {
+        int nargs = 0;
+        for (Node *a = n->args; a; a = a->next) nargs++;
+        if (nargs != 1)
+            error_at_hint(n->tok, "rc(値) の形で使ってください",
+                          "rc は 1 個の引数を取ります");
+        Type *at = check_expr(s, n->args);
+        if (at->kind != TY_CLASS)
+            error_at_hint(n->args->tok,
+                          "rc に入れられるのはクラスのインスタンスだけです",
+                          "'%s' は rc に入れられません", type_name(at));
+        n->is_extern = false;
+        n->name = "rc";
+        return type_rc(at);
+    }
+
     if (is_builtin_name(n->name)) return check_builtin_call(s, n);
 
     // ★ 第12章：名前がクラスなら、これは呼び出しではなくインスタンス生成
@@ -1480,6 +1601,42 @@ static Type *check_call(Sema *s, Node *n) {
     return check_call_sig(s, n, f, "関数");
 }
 
+// 失敗しうる呼び出しを、誰が受け止めるかを決める（第27章。R1 / R2）。
+//
+// ★ 受け止め方は 2 つだけです。**try で捕まえる**か、**自分も raises を宣言する**か。
+//   どちらでもなければ、そこで握りつぶされてしまうのでエラーにします（仕様 §8.2）。
+static void check_can_fail(Sema *s, Node *n, FuncSig *f, const char *shown) {
+    if (f->nraises == 0) return;
+    n->can_fail = true;  // ★ codegen はこれを見て分岐を挿す
+
+    for (int i = 0; i < f->nraises; i++) {
+        Class *ec = f->raises[i];
+        if (try_catches(s, ec)) continue;
+        if (func_declares(s->cur_func, ec)) continue;
+
+        Diag d = {0};
+        d.primary.tok = n->tok;
+        d.related.tok = f->tok;
+        d.related.label = diag_fmt("'%s' はここで宣言されています", shown);
+        if (s->cur_func && s->cur_func->nraises == 0) {
+            d.code = "E-RAISE-1";
+            d.message = diag_fmt("失敗しうる呼び出し '%s' を処理していません", shown);
+            d.primary.label = diag_fmt("この呼び出しは '%s' を返すことがあります",
+                                       ec->name);
+            d.hint = diag_fmt("try で捕まえるか、この関数に 'raises %s' を足してください",
+                              ec->name);
+        } else {
+            d.code = "E-RAISE-2";
+            d.message = diag_fmt("エラー '%s' が宣言されていません", ec->name);
+            d.primary.label = diag_fmt("'%s' は '%s' を返すことがあります", shown,
+                                       ec->name);
+            d.hint = diag_fmt("この関数の raises に '%s' を足すか、try で捕まえてください",
+                              ec->name);
+        }
+        diag_fail(&d);
+    }
+}
+
 // 呼び出しの引数を FuncSig と突き合わせる（第8章の ③④）。
 //
 // ★ 第13章：モジュール修飾の呼び出し（lexer.make(1)）でも同じ検査が要るので、
@@ -1487,6 +1644,8 @@ static Type *check_call(Sema *s, Node *n) {
 static Type *check_call_sig(Sema *s, Node *n, FuncSig *f, const char *what) {
     const char *shown = n->mod_name ? diag_fmt("%s.%s", n->mod_name, n->name)
                                     : f->name;
+
+    check_can_fail(s, n, f, shown);  // 第27章
 
     int nargs = 0;
     for (Node *a = n->args; a; a = a->next) nargs++;
@@ -1611,6 +1770,92 @@ static void check_stmt(Sema *s, Node *n) {
             break;
         }
 
+        // ── 第27章：try / except ──
+        case ND_TRY: {
+            // ① except の型を先に解決する（本体を見るときに「捕まえられるか」が要る）
+            for (Node *ex = n->els; ex; ex = ex->next) {
+                Type *t = resolve_type(s, ex->type_ref);
+                if (t->kind != TY_CLASS) {
+                    Diag d = {0};
+                    d.message = diag_fmt("'%s' はエラー型として使えません", type_name(t));
+                    d.primary.tok = ex->tok;
+                    d.primary.label = "except に書けるのはクラスだけです";
+                    d.hint = "エラーはふつうのクラスとして定義してください";
+                    diag_fail(&d);
+                }
+                ex->type = t;
+                ex->err_tag = err_tag_of(s, t->cls);
+            }
+
+            // ② try の本体（この間に起きた失敗は、この try が受け止める）
+            TryCtx ctx = {n, s->cur_try};
+            s->cur_try = &ctx;
+            check_block(s, n->body);
+            s->cur_try = ctx.outer;
+
+            // ③ except の本体（as で束縛する変数は、その節の中だけ）
+            for (Node *ex = n->els; ex; ex = ex->next) {
+                scope_push(s);
+                if (ex->name) {
+                    VarEntry *v = declare(s, ex->name, ex->type, ex->tok);
+                    ex->ir_name = v->ir_name;
+                }
+                check_stmt_list(s, ex->body->body);
+                scope_pop(s);
+            }
+
+            // ④ 何も捕まえていない try は、書いた人の勘違い（仕様 §8 の R5）
+            if (!n->can_fail) {
+                Diag d = {0};
+                d.severity = "warning";
+                d.code = "E-RAISE-5";
+                d.message = "この try の中に、失敗しうる呼び出しがありません";
+                d.primary.tok = n->tok;
+                d.primary.label = "except は決して実行されません";
+                d.hint = "raises を宣言した関数を呼んでいるか確かめてください";
+                diag_emit(&d);
+            }
+            break;
+        }
+
+        case ND_RAISE: {
+            Type *t = check_expr(s, n->lhs);
+            if (t->kind != TY_CLASS) {
+                Diag d = {0};
+                d.message = diag_fmt("'%s' は raise できません", type_name(t));
+                d.primary.tok = n->lhs->tok;
+                d.primary.label = "raise にはエラーオブジェクトを渡します";
+                d.hint = "エラーはふつうのクラスです（例: raise IOError(\"見つかりません\")）";
+                diag_fail(&d);
+            }
+
+            // ★ 呼び出しと同じ判定：try で捕まえるか、自分の raises に書いてあるか
+            if (!try_catches(s, t->cls) && !func_declares(s->cur_func, t->cls)) {
+                Diag d = {0};
+                d.primary.tok = n->tok;
+                if (s->cur_func && s->cur_func->nraises == 0) {
+                    d.code = "E-RAISE-1";
+                    d.message = diag_fmt("'%s' を raise していますが、宣言がありません",
+                                         t->cls->name);
+                    d.primary.label = "この関数は失敗しないと宣言されています";
+                    d.hint = diag_fmt("関数の宣言に 'raises %s' を足してください",
+                                      t->cls->name);
+                } else {
+                    d.code = "E-RAISE-2";
+                    d.message = diag_fmt("エラー '%s' が宣言されていません", t->cls->name);
+                    d.primary.label = "raises に含まれていません";
+                    d.hint = diag_fmt("この関数の raises に '%s' を足してください",
+                                      t->cls->name);
+                }
+                d.related.tok = s->cur_func ? s->cur_func->tok : NULL;
+                d.related.label = "関数の宣言はここです";
+                diag_fail(&d);
+            }
+            n->err_tag = err_tag_of(s, t->cls);
+            n->type = t;
+            break;
+        }
+
         case ND_BREAK:
         case ND_CONTINUE: {
             // ★ ここで弾いておけば、codegen は「飛び先が必ずある」と仮定できます。
@@ -1678,6 +1923,8 @@ static bool never_returns_call(Node *n) {
 //    こちらは AST の上（構造を見る／ユーザーに教えるため）、
 //    あちらは命令列の上（出力を見る／正しい IR を出すため）。
 static bool always_returns(Node *n) {
+    // ★ 第27章：raise はその経路を終わらせます（呼び出し元へ戻る）。
+    if (n && n->kind == ND_RAISE) return true;
     if (!n) return false;
 
     switch (n->kind) {
@@ -1780,6 +2027,8 @@ static void layout_class(Class *c) {
 }
 
 // メソッドを FuncSig として登録する。名前は "Token.show"（名前修飾）。
+static void resolve_raises(Sema *s, Node *fn, FuncSig *f);
+
 static void declare_method(Sema *s, Class *c, Node *fn) {
     char *mname = mangle(c->name, fn->name);
 
@@ -1840,6 +2089,11 @@ static void declare_method(Sema *s, Class *c, Node *fn) {
                           "init の戻り型は None でなければなりません");
         c->has_init = true;
     }
+
+    resolve_raises(s, fn, f);  // 第27章
+    if (strcmp(fn->name, "init") == 0 && f->nraises)
+        error_at_hint(fn->tok, "init は失敗できません（生成に失敗した値は誰も受け取れません）",
+                      "init に raises は書けません");
 
     f->ir_name = mangle(c->ir_name, fn->name);  // "lexer.Token.show"（第13章）
     f->owner = s->cur;
@@ -1970,6 +2224,37 @@ static void check_extern_type(Type *t, Token *tok, const char *what) {
     diag_fail(&d);
 }
 
+
+// raises 節を解決する（第27章）。
+//
+// ★ エラー型は「ふつうのクラス」です（仕様 §8.3。継承はありません）。
+//   ここで ID も割り当てます。割り当て順は「モジュールの依存順 → 出現順」で、
+//   これは declare のパスを回る順序そのものです。
+static void resolve_raises(Sema *s, Node *fn, FuncSig *f) {
+    int n = 0;
+    for (Node *r = fn->raises; r; r = r->next) n++;
+    f->nraises = n;
+    if (n == 0) return;
+
+    f->raises = xmalloc(sizeof(Class *) * (size_t)n);
+    int i = 0;
+    for (Node *r = fn->raises; r; r = r->next, i++) {
+        Type *t = resolve_type(s, r);
+        if (t->kind != TY_CLASS) {
+            Diag d = {0};
+            d.message = diag_fmt("'%s' はエラー型として使えません", type_name(t));
+            d.primary.tok = r->tok;
+            d.primary.label = "raises に書けるのはクラスだけです";
+            d.hint = "エラーはふつうのクラスとして定義してください"
+                     "（例: class IOError:\n                 message: str）";
+            diag_fail(&d);
+        }
+        f->raises[i] = t->cls;
+        err_tag_of(s, t->cls);  // ★ ここで ID を確定させる
+        r->type = t;
+    }
+}
+
 static void declare_func(Sema *s, Node *n) {
     reject_module_name(s, n->name, n->tok, "関数");
     if (lookup_class(s, n->name)) {
@@ -2032,6 +2317,11 @@ static void declare_func(Sema *s, Node *n) {
         for (Node *pm = n->params; pm; pm = pm->next)
             check_extern_type(pm->type, pm->tok, "引数");
     }
+
+    resolve_raises(s, n, f);  // 第27章
+    if (is_extern_decl && f->nraises)
+        error_at_hint(n->tok, "extern の関数は C 側の約束に従うので raises は書けません",
+                      "extern に raises は書けません");
 
     f->ir_name = is_extern_decl ? n->name : mod_mangle(s, n->name);
     f->owner = s->cur;
@@ -2157,6 +2447,16 @@ static void check_main(Sema *s, Node *ast) {
     if (m->ret->kind != TY_INT)
         error_at_hint(m->tok, "main の戻り値がプロセスの終了コードになります",
                       "main の戻り型は int でなければなりません");
+    // ★ 第27章（R4）：main の失敗を受け取る相手はいません。
+    if (m->nraises) {
+        Diag d = {0};
+        d.code = "E-RAISE-4";
+        d.message = "main は raises を宣言できません";
+        d.primary.tok = m->tok;
+        d.primary.label = "この失敗を受け取る相手がいません";
+        d.hint = "main の中で try で捕まえるか、panic で終わらせてください";
+        diag_fail(&d);
+    }
 }
 
 // モジュール 1 つぶんの宣言を登録する（パス 1a / 1b / 1c）

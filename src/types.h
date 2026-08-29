@@ -27,6 +27,12 @@ typedef enum {
     TY_OPT,   // T | None → ptr（elem が中身の型）
     TY_NULL,  // None リテラルの型。変数の型にはならない（代入互換だけで使う）
 
+    // ── 第28章：共有所有 ──
+    //
+    // ★ rc[T] は「所有者を 1 つに決められない」データのための逃げ道です
+    //   （仕様 v2 §7）。代入は**移動ではなく共有**（カウント +1）になります。
+    TY_RC,    // rc[T] → ptr（ヒープに { strong, borrow, 中身へのポインタ }）
+
     // ── 以降の章で追加していく ──
     // TY_FLOAT,  // float
 } TypeKind;
@@ -87,6 +93,9 @@ Type *type_from_kind(int kind);
 // ⚠️ シングルトンではありません。書かれた場所ごとに新しく作られるので、
 //    型の比較は必ず type_equal() を通すこと。
 Type *type_list(Type *elem);
+
+// rc[T] を作る（第28章）。list[T] と同じく、書かれた場所ごとに作ります。
+Type *type_rc(Type *elem);
 
 // T | None を作る（第15章）。
 // ★ 同じ T に対しては 1 個だけ作ります（elem 側にキャッシュする）。

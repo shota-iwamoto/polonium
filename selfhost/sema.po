@@ -42,11 +42,19 @@ class Sema:
     expected: ast.Type | None         # 今この式に期待されている型（第10章）
     builtins: list[Builtin]
 
+    # ── 第27章：エラー処理 ──
+    # ★ 0 は「エラー無し」に予約し、1 から連番。割り当て順は
+    #   「モジュールの依存順 → 出現順」（error-handling.md §4）。
+    err_classes: list[ast.Class]
+    try_stack: list[ast.Node]
+
     def init(self) -> None:
         self.prims = ast.Prims()
         self.loop_depth = 0
         self.used = []
         self.mods = []
+        self.err_classes = []
+        self.try_stack = []
         self.builtins = [
             Builtin("print", ast.TY_INT, ast.TY_NONE, "pl_print_int"),
             Builtin("print", ast.TY_STR, ast.TY_NONE, "pl_print_str"),
@@ -59,7 +67,9 @@ class Sema:
             Builtin("ord", ast.TY_STR, ast.TY_INT, "pl_ord"),
             Builtin("chr", ast.TY_INT, ast.TY_STR, "pl_chr"),
             Builtin("exit", ast.TY_INT, ast.TY_NONE, "pl_exit"),
-            Builtin("panic", ast.TY_STR, ast.TY_NONE, "pl_panic")]
+            Builtin("panic", ast.TY_STR, ast.TY_NONE, "pl_panic"),
+            # ★ 第26章：借りたものを保存したいときの逃げ道（決定 D8）
+            Builtin("copy", ast.TY_STR, ast.TY_STR, "pl_str_copy")]
 
     # ── プリミティブ型のシングルトン ────────────────────────
 
@@ -109,7 +119,7 @@ class Sema:
 
     # ── モジュールの出入り（第13章）──────────────────────
 
-    def enter_module(self, ms: types.ModuleSyms) -> None:
+    def enter_module(mut self, ms: types.ModuleSyms) -> None:
         cur: types.ModuleSyms | None = self.cur
         if cur is not None:
             cur.globals = self.scope
@@ -214,10 +224,10 @@ class Sema:
 
     # ── スコープ ────────────────────────────────────────────
 
-    def scope_push(self) -> None:
+    def scope_push(mut self) -> None:
         self.scope = types.Scope(self.scope)
 
-    def scope_pop(self) -> None:
+    def scope_pop(mut self) -> None:
         sc: types.Scope | None = self.scope
         if sc is not None:
             self.scope = sc.parent
@@ -259,7 +269,7 @@ class Sema:
             i = i + 1
         return False
 
-    def unique_ir_name(self, name: str) -> str:
+    def unique_ir_name(mut self, name: str) -> str:
         if not self.name_used(name):
             self.used.append(name)
             return name
@@ -284,7 +294,7 @@ class Sema:
                         ".x' が曖昧になります")
 
     # ローカル変数として登録する（IR 名は %x 形式）
-    def declare(self, name: str, t: ast.Type,
+    def declare(mut self, name: str, t: ast.Type,
                 tok: token.Token | None) -> types.VarEntry:
         self.reject_module_name(name, tok, "変数")
 
@@ -340,7 +350,8 @@ class Sema:
                                 "（int や list はモジュール修飾なしで書きます）")
                 return self.ty_int()
             if tr.lhs is not None:
-                diag.error_at_hint(unwrap_tok(tr.tok), "要素型を取るのは list だけです",
+                diag.error_at_hint(unwrap_tok(tr.tok),
+                                   "要素型を取るのは list と rc だけです",
                                    "型 '" + tr.mod_name + "." + tr.name +
                                    "' は要素型を取りません")
             return unwrap_type(c.type)
@@ -358,8 +369,25 @@ class Sema:
                                    "list の要素型に None は使えません")
             return ast.type_list(elem)
 
+        # ── 第28章：rc[T]（共有所有）──
+        #
+        # ★ 中身に取れるのはクラスだけ（共有したくなるのは木やグラフの節点）
+        if tr.name == "rc":
+            if tr.lhs is None:
+                diag.error_at_hint(unwrap_tok(tr.tok),
+                                   "中身の型を書いてください（例: rc[Node]）",
+                                   "rc には中身の型が必要です")
+                return self.ty_int()
+            rel: ast.Type = self.resolve_type(unwrap_node(tr.lhs))
+            if rel.kind != ast.TY_CLASS:
+                diag.error_at_hint(unwrap_tok(tr.tok),
+                                   "rc に入れられるのはクラスだけです（例: rc[Node]）",
+                                   "'" + ast.type_name(rel) + "' は rc に入れられません")
+            return ast.type_rc(rel)
+
         if tr.lhs is not None:
-            diag.error_at_hint(unwrap_tok(tr.tok), "要素型を取るのは list だけです",
+            diag.error_at_hint(unwrap_tok(tr.tok),
+                               "要素型を取るのは list と rc だけです",
                                "型 '" + tr.name + "' は要素型を取りません")
 
         t: ast.Type | None = self.type_from_name(tr.name)
@@ -395,7 +423,7 @@ class Sema:
     # ── 式の検査 ────────────────────────────────────────────
 
     # x is None / x is not None の検査（第15章）
-    def check_is(self, n: ast.Node) -> ast.Type:
+    def check_is(mut self, n: ast.Node) -> ast.Type:
         lhs: ast.Node = unwrap_node(n.lhs)
         rhs: ast.Node = unwrap_node(n.rhs)
         l: ast.Type = self.check_expr(lhs)
@@ -445,7 +473,7 @@ class Sema:
                         "比較を書いてください（例: x != 0）")
         return self.ty_bool()
 
-    def check_binop(self, n: ast.Node) -> ast.Type:
+    def check_binop(mut self, n: ast.Node) -> ast.Type:
         # ★ 第15章：is / is not は型の合わせ方が違うので先に分岐
         if n.op == ast.OP_IS or n.op == ast.OP_ISNOT:
             return self.check_is(n)
@@ -488,7 +516,7 @@ class Sema:
             return self.ty_bool()
         return l
 
-    def check_logical(self, n: ast.Node) -> ast.Type:
+    def check_logical(mut self, n: ast.Node) -> ast.Type:
         lhs: ast.Node = unwrap_node(n.lhs)
         rhs: ast.Node = unwrap_node(n.rhs)
         l: ast.Type = self.check_expr(lhs)
@@ -514,7 +542,7 @@ class Sema:
             return self.bool_required(msg, lbl, n.tok, rhs, r)
         return self.ty_bool()
 
-    def check_unary(self, n: ast.Node) -> ast.Type:
+    def check_unary(mut self, n: ast.Node) -> ast.Type:
         operand: ast.Node = unwrap_node(n.lhs)
         t: ast.Type = self.check_expr(operand)
 
@@ -534,7 +562,7 @@ class Sema:
                           ast.op_symbol(n.op) + "' は適用できません")
         return t
 
-    def check_var(self, n: ast.Node) -> ast.Type:
+    def check_var(self, n: mut ast.Node) -> ast.Type:
         v: types.VarEntry | None = self.lookup(n.name)
         if v is None:
             # ★ 第13章：モジュール名そのものは値ではない
@@ -563,7 +591,7 @@ class Sema:
         n.ir_name = v.ir_name
         return unwrap_type(v.type)
 
-    def check_expr(self, n: ast.Node) -> ast.Type:
+    def check_expr(mut self, n: mut ast.Node) -> ast.Type:
         t: ast.Type = self.ty_int()
         if n.kind == ast.ND_INT:
             t = self.ty_int()
@@ -598,7 +626,7 @@ class Sema:
 
     # ── 文の検査 ────────────────────────────────────────────
 
-    def check_vardecl(self, n: ast.Node) -> None:
+    def check_vardecl(mut self, n: mut ast.Node) -> None:
         # ① 型注釈を解決する（型注釈が無いのは for の脱糖。第11章）
         declared: ast.Type | None = None
         if n.type_ref is not None:
@@ -658,7 +686,7 @@ class Sema:
         n.ir_name = v.ir_name
         n.type = want
 
-    def check_assign(self, n: ast.Node) -> None:
+    def check_assign(mut self, n: mut ast.Node) -> None:
         target: ast.Node = unwrap_node(n.lhs)
 
         # 添字への代入 xs[i] = v（第10章）
@@ -745,7 +773,7 @@ class Sema:
         n.type = declared2
 
     # 条件式は bool でなければならない
-    def check_cond(self, where: str, stmt_node: ast.Node, cond: ast.Node) -> None:
+    def check_cond(mut self, where: str, stmt_node: ast.Node, cond: mut ast.Node) -> None:
         t: ast.Type = self.check_expr(cond)
         if t.kind != ast.TY_BOOL:
             self.bool_required(where + "には bool が必要です", where + "はここです",
@@ -753,8 +781,8 @@ class Sema:
 
     # ── 絞り込み（narrowing。第15章）────────────────────────
 
-    def narrow_one(self, var_node: ast.Node, saved: list[types.VarEntry],
-                   saved_types: list[ast.Type]) -> None:
+    def narrow_one(self, var_node: ast.Node, saved: mut list[types.VarEntry],
+                   saved_types: mut list[ast.Type]) -> None:
         if var_node.kind != ast.ND_VAR:
             return
         v: types.VarEntry | None = self.lookup(var_node.name)
@@ -770,8 +798,8 @@ class Sema:
         v.type = ast.elem_of(vt)         # ★ ここだけ Token になる
 
     def narrow_apply(self, cond: ast.Node | None, positive: bool,
-                     saved: list[types.VarEntry],
-                     saved_types: list[ast.Type]) -> None:
+                     saved: mut list[types.VarEntry],
+                     saved_types: mut list[ast.Type]) -> None:
         if cond is None:
             return
         c: ast.Node = cond
@@ -794,7 +822,7 @@ class Sema:
             self.narrow_apply(c.lhs, False, saved, saved_types)
             self.narrow_apply(c.rhs, False, saved, saved_types)
 
-    def narrow_restore(self, saved: list[types.VarEntry],
+    def narrow_restore(self, saved: mut list[types.VarEntry],
                        saved_types: list[ast.Type]) -> None:
         i: int = 0
         while i < len(saved):
@@ -802,7 +830,7 @@ class Sema:
             i = i + 1
 
     # 文の並びを順に検査する（ガード節の絞り込みを含む。第15章）
-    def check_stmt_list(self, first: ast.Node | None) -> None:
+    def check_stmt_list(mut self, first: mut ast.Node | None) -> None:
         gvars: list[types.VarEntry] = []
         gtypes: list[ast.Type] = []
 
@@ -816,12 +844,12 @@ class Sema:
 
         self.narrow_restore(gvars, gtypes)
 
-    def check_block(self, n: ast.Node) -> None:
+    def check_block(mut self, n: mut ast.Node) -> None:
         self.scope_push()
         self.check_stmt_list(n.body)
         self.scope_pop()
 
-    def check_stmt(self, n: ast.Node) -> None:
+    def check_stmt(mut self, n: mut ast.Node) -> None:
         if n.kind == ast.ND_VARDECL:
             self.check_vardecl(n)
         elif n.kind == ast.ND_ASSIGN:
@@ -861,6 +889,79 @@ class Sema:
             self.narrow_restore(wvars, wtypes)
 
             self.loop_depth = self.loop_depth - 1
+        elif n.kind == ast.ND_TRY:
+            # ① except の型を先に解決する（本体を見るときに「捕まえられるか」が要る）
+            ex: ast.Node | None = n.els
+            while ex is not None:
+                et: ast.Type = self.resolve_type(unwrap_node(ex.type_ref))
+                if et.kind != ast.TY_CLASS:
+                    diag.error_full(unwrap_tok(ex.tok),
+                                    "'" + ast.type_name(et) +
+                                    "' はエラー型として使えません",
+                                    "except に書けるのはクラスだけです", None, "",
+                                    "エラーはふつうのクラスとして定義してください")
+                else:
+                    ex.err_tag = self.err_tag_of(unwrap_class(et.cls))
+                ex.type = et
+                ex = ex.next
+
+            # ② try の本体（この間に起きた失敗は、この try が受け止める）
+            self.try_stack.append(n)
+            self.check_block(unwrap_node(n.body))
+            self.try_stack = try_pop(self.try_stack)
+
+            # ③ except の本体（as で束縛する変数はその節の中だけ）
+            ex2: ast.Node | None = n.els
+            while ex2 is not None:
+                self.scope_push()
+                if len(ex2.name) > 0:
+                    v: types.VarEntry = self.declare(ex2.name,
+                                                     unwrap_type(ex2.type), ex2.tok)
+                    ex2.ir_name = v.ir_name
+                self.check_stmt_list(unwrap_node(ex2.body).body)
+                self.scope_pop()
+                ex2 = ex2.next
+
+            # ④ 何も捕まえていない try は、書いた人の勘違い（R5。警告）
+            if not n.can_fail:
+                diag.warn_full(unwrap_tok(n.tok), "E-RAISE-5",
+                               "この try の中に、失敗しうる呼び出しがありません",
+                               "except は決して実行されません",
+                               "raises を宣言した関数を呼んでいるか確かめてください")
+        elif n.kind == ast.ND_RAISE:
+            rt: ast.Type = self.check_expr(unwrap_node(n.lhs))
+            if rt.kind != ast.TY_CLASS:
+                diag.error_full(unwrap_tok(unwrap_node(n.lhs).tok),
+                                "'" + ast.type_name(rt) + "' は raise できません",
+                                "raise にはエラーオブジェクトを渡します", None, "",
+                                "エラーはふつうのクラスです" +
+                                "（例: raise IOError(\"見つかりません\")）")
+            else:
+                rc: ast.Class = unwrap_class(rt.cls)
+                if not self.try_catches(rc) and not self.func_declares(rc):
+                    cf2: types.FuncSig | None = self.cur_func
+                    ndecl: int = 0
+                    ftok: token.Token | None = None
+                    if cf2 is not None:
+                        ndecl = len(cf2.raises_cls)
+                        ftok = cf2.tok
+                    if ndecl == 0:
+                        diag.error_code_full(unwrap_tok(n.tok), "E-RAISE-1",
+                                        "'" + rc.name +
+                                        "' を raise していますが、宣言がありません",
+                                        "この関数は失敗しないと宣言されています",
+                                        ftok, "関数の宣言はここです",
+                                        "関数の宣言に 'raises " + rc.name +
+                                        "' を足してください")
+                    else:
+                        diag.error_code_full(unwrap_tok(n.tok), "E-RAISE-2",
+                                        "エラー '" + rc.name + "' が宣言されていません",
+                                        "raises に含まれていません",
+                                        ftok, "関数の宣言はここです",
+                                        "この関数の raises に '" + rc.name +
+                                        "' を足してください")
+                n.err_tag = self.err_tag_of(rc)
+                n.type = rt
         elif n.kind == ast.ND_BREAK or n.kind == ast.ND_CONTINUE:
             if self.loop_depth > 0:
                 return
@@ -875,6 +976,95 @@ class Sema:
             self.check_expr(n)   # 式文
 
     # ── 組み込み関数（第9章）────────────────────────────────
+
+    # エラー型の ID を引く（無ければ割り当てる。第27章）
+    def err_tag_of(mut self, c: ast.Class) -> int:
+        i: int = 0
+        while i < len(self.err_classes):
+            if self.err_classes[i] == c:
+                return i + 1
+            i = i + 1
+        self.err_classes.append(c)
+        return len(self.err_classes)
+
+    # いま入っている try のどれかが c を捕まえるか（捕まえた try に印を付ける）
+    def try_catches(mut self, c: ast.Class) -> bool:
+        i: int = len(self.try_stack) - 1
+        while i >= 0:
+            t: ast.Node = self.try_stack[i]
+            ex: ast.Node | None = t.els
+            while ex is not None:
+                et: ast.Type | None = ex.type
+                if et is not None:
+                    ec: ast.Class | None = et.cls
+                    # ⚠️ 'and' では絞り込みが効かないので、ガードを分けます（15.5 節）
+                    if ec is not None and ec == c:
+                        t.can_fail = True
+                        return True
+                ex = ex.next
+            i = i - 1
+        return False
+
+    # 今検査中の関数が c を raises に宣言しているか
+    def func_declares(self, c: ast.Class) -> bool:
+        f: types.FuncSig | None = self.cur_func
+        if f is None:
+            return False
+        i: int = 0
+        while i < len(f.raises_cls):
+            if f.raises_cls[i] == c:
+                return True
+            i = i + 1
+        return False
+
+    # raises 節を解決する（第27章）
+    def resolve_raises(mut self, fn: mut ast.Node, f: mut types.FuncSig) -> None:
+        r: ast.Node | None = fn.err_types
+        while r is not None:
+            t: ast.Type = self.resolve_type(r)
+            if t.kind != ast.TY_CLASS:
+                diag.error_full(unwrap_tok(r.tok),
+                                "'" + ast.type_name(t) + "' はエラー型として使えません",
+                                "raises に書けるのはクラスだけです", None, "",
+                                "エラーはふつうのクラスとして定義してください")
+            else:
+                f.raises_cls.append(unwrap_class(t.cls))
+                self.err_tag_of(unwrap_class(t.cls))
+            r.type = t
+            r = r.next
+
+    # 失敗しうる呼び出しを、誰が受け止めるかを決める（第27章。R1 / R2）
+    def check_can_fail(mut self, n: mut ast.Node, f: types.FuncSig,
+                       shown: str) -> None:
+        if len(f.raises_cls) == 0:
+            return
+        n.can_fail = True
+
+        i: int = 0
+        while i < len(f.raises_cls):
+            ec: ast.Class = f.raises_cls[i]
+            if not self.try_catches(ec) and not self.func_declares(ec):
+                cf: types.FuncSig | None = self.cur_func
+                declared: int = 0
+                if cf is not None:
+                    declared = len(cf.raises_cls)
+                if declared == 0:
+                    diag.error_code_full(unwrap_tok(n.tok), "E-RAISE-1",
+                                    "失敗しうる呼び出し '" + shown + "' を処理していません",
+                                    "この呼び出しは '" + ec.name +
+                                    "' を返すことがあります",
+                                    f.tok, "'" + shown + "' はここで宣言されています",
+                                    "try で捕まえるか、この関数に 'raises " +
+                                    ec.name + "' を足してください")
+                else:
+                    diag.error_code_full(unwrap_tok(n.tok), "E-RAISE-2",
+                                    "エラー '" + ec.name + "' が宣言されていません",
+                                    "'" + shown + "' は '" + ec.name +
+                                    "' を返すことがあります",
+                                    f.tok, "'" + shown + "' はここで宣言されています",
+                                    "この関数の raises に '" + ec.name +
+                                    "' を足すか、try で捕まえてください")
+            i = i + 1
 
     def is_builtin_name(self, name: str) -> bool:
         i: int = 0
@@ -898,7 +1088,7 @@ class Sema:
             i = i + 1
         return strings.join(parts, ", ")
 
-    def check_builtin_call(self, n: ast.Node) -> ast.Type:
+    def check_builtin_call(mut self, n: mut ast.Node) -> ast.Type:
         nargs: int = count_siblings(n.args)
         if nargs != 1:
             diag.error_full(unwrap_tok(n.tok),
@@ -926,7 +1116,7 @@ class Sema:
 
     # ── リテラル・添字 ──────────────────────────────────────
 
-    def check_list_lit(self, n: ast.Node) -> ast.Type:
+    def check_list_lit(mut self, n: ast.Node) -> ast.Type:
         want: ast.Type | None = self.expected   # ★ 使う前に控える
 
         if n.body is None:
@@ -978,7 +1168,7 @@ class Sema:
         self.expected = None
         return ast.type_list(et)
 
-    def check_index_expr(self, n: ast.Node) -> ast.Type:
+    def check_index_expr(mut self, n: ast.Node) -> ast.Type:
         obj: ast.Node = unwrap_node(n.lhs)
         idx: ast.Node = unwrap_node(n.rhs)
         ot: ast.Type = self.check_expr(obj)
@@ -1012,7 +1202,7 @@ class Sema:
         return self.lookup_import(lhs.name)
 
     # lexer.MAX_KIND — 他のモジュールのグローバル変数
-    def check_module_global(self, n: ast.Node,
+    def check_module_global(self, n: mut ast.Node,
                             ms: types.ModuleSyms) -> ast.Type:
         mod_name: str = mod_name_of(ms)
         v: types.VarEntry | None = self.lookup_global_in(ms, n.name)
@@ -1056,13 +1246,13 @@ class Sema:
                         obj.tok, "この式は '" + ast.type_name(ot) + "' 型です",
                         hint)
 
-    def check_field(self, n: ast.Node) -> ast.Type:
+    def check_field(mut self, n: mut ast.Node) -> ast.Type:
         ms: types.ModuleSyms | None = self.dot_module(n)
         if ms is not None:
             return self.check_module_global(n, ms)
 
         obj: ast.Node = unwrap_node(n.lhs)
-        ot: ast.Type = self.check_expr(obj)
+        ot: ast.Type = auto_deref(self.check_expr(obj))   # 第28章：rc[T] は中身のように使える
 
         if ot.kind == ast.TY_OPT:
             self.reject_opt_access(obj, n, "フィールド", ot)
@@ -1090,7 +1280,7 @@ class Sema:
         return unwrap_type(f.type)
 
     # クラスのメソッド呼び出しの検査（第12章）
-    def check_class_method(self, n: ast.Node, c: ast.Class) -> ast.Type:
+    def check_class_method(mut self, n: mut ast.Node, c: ast.Class) -> ast.Type:
         # ★ 第13章：メソッドは「クラスが定義されたモジュール」の表にいる
         mname: str = self.mangle(c.name, n.name)
         owner: types.ModuleSyms = self.syms_by_name(c.owner_name)
@@ -1141,15 +1331,16 @@ class Sema:
 
         n.ir_name = f.ir_name
         n.is_extern = self.is_extern_owner(f.owner)
+        self.check_can_fail(n, f, mname)   # 第27章
         return unwrap_type(f.ret)
 
-    def check_method(self, n: ast.Node) -> ast.Type:
+    def check_method(mut self, n: mut ast.Node) -> ast.Type:
         ms: types.ModuleSyms | None = self.dot_module(n)
         if ms is not None:
             return self.check_module_call(n, ms)
 
         obj: ast.Node = unwrap_node(n.lhs)
-        ot: ast.Type = self.check_expr(obj)
+        ot: ast.Type = auto_deref(self.check_expr(obj))   # 第28章
 
         if ot.kind == ast.TY_OPT:
             self.reject_opt_access(obj, n, "メソッド", ot)
@@ -1189,7 +1380,7 @@ class Sema:
         return self.ty_int()
 
     # lexer.make(1, "x") / lexer.Token(1, "x") — 他のモジュールの関数・クラス
-    def check_module_call(self, n: ast.Node, ms: types.ModuleSyms) -> ast.Type:
+    def check_module_call(mut self, n: mut ast.Node, ms: types.ModuleSyms) -> ast.Type:
         mod_name: str = mod_name_of(ms)
         n.mod_name = mod_name
 
@@ -1216,7 +1407,7 @@ class Sema:
         return self.check_call_sig(n, f, "関数")
 
     # インスタンス生成 Token(1, "x") の検査（第12章）
-    def check_new(self, n: ast.Node, c: ast.Class) -> ast.Type:
+    def check_new(mut self, n: mut ast.Node, c: ast.Class) -> ast.Type:
         n.cls = c    # ★ codegen はこれを見て「生成」だと分かる
 
         nargs: int = count_siblings(n.args)
@@ -1270,7 +1461,24 @@ class Sema:
         return unwrap_type(c.type)
 
     # 関数呼び出しの検査（型システム 5.7 の順序）
-    def check_call(self, n: ast.Node) -> ast.Type:
+    def check_call(mut self, n: mut ast.Node) -> ast.Type:
+        # ── 第28章：rc(x) — 共有所有にくるむ ──
+        #
+        # ★ 型が「引数の型から作られる」ので、組み込み関数の表では表せません
+        if n.name == "rc" and self.lookup_func("rc") is None:
+            nargs0: int = count_siblings(n.args)
+            if nargs0 != 1:
+                diag.error_at_hint(unwrap_tok(n.tok), "rc(値) の形で使ってください",
+                                   "rc は 1 個の引数を取ります")
+                return self.ty_int()
+            at0: ast.Type = self.check_expr(unwrap_node(n.args))
+            if at0.kind != ast.TY_CLASS:
+                diag.error_at_hint(unwrap_tok(unwrap_node(n.args).tok),
+                                   "rc に入れられるのはクラスのインスタンスだけです",
+                                   "'" + ast.type_name(at0) + "' は rc に入れられません")
+            n.is_extern = False
+            return ast.type_rc(at0)
+
         if self.is_builtin_name(n.name):
             return self.check_builtin_call(n)
 
@@ -1298,11 +1506,13 @@ class Sema:
         return self.check_call_sig(n, f, "関数")
 
     # 呼び出しの引数を FuncSig と突き合わせる（第8章の ③④）
-    def check_call_sig(self, n: ast.Node, f: types.FuncSig,
+    def check_call_sig(mut self, n: mut ast.Node, f: types.FuncSig,
                        what: str) -> ast.Type:
         shown: str = f.name
         if len(n.mod_name) > 0:
             shown = n.mod_name + "." + n.name
+
+        self.check_can_fail(n, f, shown)   # 第27章
 
         nargs: int = count_siblings(n.args)
         if nargs != f.nparams:
@@ -1335,7 +1545,7 @@ class Sema:
         return unwrap_type(f.ret)
 
     # return の検査
-    def check_return(self, n: ast.Node) -> None:
+    def check_return(mut self, n: ast.Node) -> None:
         fn: types.FuncSig = unwrap_sig(self.cur_func)
         want: ast.Type = unwrap_type(fn.ret)
 
@@ -1414,6 +1624,10 @@ class Sema:
         if node.kind == ast.ND_RETURN:
             return True
 
+        # ★ 第27章：raise もその経路を終わらせます（呼び出し元へ戻る）
+        if node.kind == ast.ND_RAISE:
+            return True
+
         if node.kind == ast.ND_IF:
             # else が無ければ、条件が偽のときに素通りする
             if node.els is None:
@@ -1448,7 +1662,7 @@ class Sema:
     # ── パス 1：宣言の登録 ──────────────────────────────────
 
     # 1a：クラス名と Type を作る。中身はまだ見ない
-    def declare_class(self, n: ast.Node) -> None:
+    def declare_class(self, n: mut ast.Node) -> None:
         self.reject_module_name(n.name, n.tok, "クラス")
         if self.type_from_name(n.name) is not None:
             diag.error_at_hint(unwrap_tok(n.tok),
@@ -1480,7 +1694,7 @@ class Sema:
         n.type = c.type
 
     # フィールドを並べて、オフセットとサイズを決める
-    def layout_class(self, c: ast.Class) -> None:
+    def layout_class(self, c: mut ast.Class) -> None:
         offset: int = 0
         max_align: int = 1
         index: int = 0
@@ -1501,7 +1715,7 @@ class Sema:
         c.size = align_up(offset, max_align)
 
     # メソッドを FuncSig として登録する（名前は "Token.show"）
-    def declare_method(self, c: ast.Class, fn: ast.Node) -> None:
+    def declare_method(self, c: mut ast.Class, fn: mut ast.Node) -> None:
         mname: str = self.mangle(c.name, fn.name)
 
         prev: types.FuncSig | None = self.lookup_func(mname)
@@ -1550,6 +1764,13 @@ class Sema:
                                    "（-> None と書いてください）",
                                    "init の戻り型は None でなければなりません")
             c.has_init = True
+
+        self.resolve_raises(fn, f)   # 第27章
+        if fn.name == "init" and len(f.raises_cls) > 0:
+            diag.error_at_hint(unwrap_tok(fn.tok),
+                               "init は失敗できません" +
+                               "（生成に失敗した値は誰も受け取れません）",
+                               "init に raises は書けません")
 
         f.ir_name = self.mangle(c.ir_name, fn.name)   # "lexer.Token.show"
         f.owner = self.cur_syms()
@@ -1633,7 +1854,7 @@ class Sema:
             f = fld.next
 
     # 1b：フィールドとメソッドを解決する
-    def declare_class_members(self, n: ast.Node) -> None:
+    def declare_class_members(self, n: mut ast.Node) -> None:
         c: ast.Class = unwrap_class(n.cls)
 
         # ① フィールド（宣言順に末尾へ足す。並び順がレイアウトになる）
@@ -1689,7 +1910,7 @@ class Sema:
                         "この型は C との境界を越えられません", None, "",
                         "int で受け取り、Polonium 側で 'n == 1' と書いてください")
 
-    def declare_func(self, n: ast.Node) -> None:
+    def declare_func(self, n: mut ast.Node) -> None:
         self.reject_module_name(n.name, n.tok, "関数")
         clash: ast.Class | None = self.lookup_class(n.name)
         if clash is not None:
@@ -1741,6 +1962,12 @@ class Sema:
                 self.check_extern_type(unwrap_type(p2.type), p2.tok, "引数")
                 pm2 = p2.next
 
+        self.resolve_raises(n, f)   # 第27章
+        if is_extern_decl and len(f.raises_cls) > 0:
+            diag.error_at_hint(unwrap_tok(n.tok),
+                               "extern の関数は C 側の約束に従うので raises は書けません",
+                               "extern に raises は書けません")
+
         if is_extern_decl:
             f.ir_name = n.name
         else:
@@ -1753,7 +1980,7 @@ class Sema:
         n.type = ret
 
     # グローバル変数の登録（言語仕様 6.2）
-    def declare_global(self, n: ast.Node) -> None:
+    def declare_global(mut self, n: mut ast.Node) -> None:
         self.reject_module_name(n.name, n.tok, "グローバル変数")
         declared: ast.Type = self.resolve_type(unwrap_node(n.type_ref))
         if declared.kind == ast.TY_NONE:
@@ -1804,7 +2031,7 @@ class Sema:
 
     # ── パス 2：本体の検査 ──────────────────────────────────
 
-    def check_func(self, n: ast.Node) -> None:
+    def check_func(mut self, n: mut ast.Node) -> None:
         self.cur_func = self.lookup_func_by_ir(n.ir_name)
         self.used = []     # IR 名は関数ごとに振り直す
 
@@ -1851,9 +2078,15 @@ class Sema:
             diag.error_at_hint(unwrap_tok(m.tok),
                                "main の戻り値がプロセスの終了コードになります",
                                "main の戻り型は int でなければなりません")
+        # ★ 第27章（R4）：main の失敗を受け取る相手はいません
+        if len(m.raises_cls) > 0:
+            diag.error_code_full(unwrap_tok(m.tok), "E-RAISE-4",
+                                 "main は raises を宣言できません",
+                                 "この失敗を受け取る相手がいません", None, "",
+                                 "main の中で try で捕まえるか、panic で終わらせてください")
 
     # モジュール 1 つぶんの宣言を登録する（パス 1a / 1b / 1c）
-    def declare_module(self, root: ast.Node) -> None:
+    def declare_module(mut self, root: mut ast.Node) -> None:
         d: ast.Node | None = root.body
         while d is not None:
             n: ast.Node = d
@@ -1878,7 +2111,7 @@ class Sema:
             d3 = n3.next
 
     # モジュール 1 つぶんの本体を検査する（パス 2）
-    def check_module(self, root: ast.Node) -> None:
+    def check_module(mut self, root: mut ast.Node) -> None:
         d: ast.Node | None = root.body
         while d is not None:
             n: ast.Node = d
@@ -1979,6 +2212,23 @@ def mod_ast(ms: types.ModuleSyms) -> ast.Node | None:
         return None
     else:
         return m.ast
+
+# try のスタックから最後の 1 つを外す（第27章）。
+#
+# ⚠️ list には pop がまだ無いので、module.po と同じ手（作り直す）を使います。
+def try_pop(xs: list[ast.Node]) -> list[ast.Node]:
+    out: list[ast.Node] = []
+    i: int = 0
+    while i < len(xs) - 1:
+        out.append(xs[i])
+        i = i + 1
+    return out
+
+# rc[T] は「中身のように」使える（第28章。Rust の Deref と同じ考え）
+def auto_deref(t: ast.Type) -> ast.Type:
+    if t.kind == ast.TY_RC:
+        return ast.elem_of(t)
+    return t
 
 def unwrap_node(n: ast.Node | None) -> ast.Node:
     if n is None:

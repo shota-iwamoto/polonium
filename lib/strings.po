@@ -145,7 +145,7 @@ def repeat(s: str, times: int) -> str:
     return out
 
 # old をすべて new に置き換える
-def replace(s: str, old: str, new: str) -> str:
+def replace(s: own str, old: str, new: str) -> str:
     if len(old) == 0:
         return s
     return join(split(s, old), new)

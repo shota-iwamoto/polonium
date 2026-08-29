@@ -10,6 +10,17 @@
 #   # TOKENS: INT PUNCT INT NEWLINE EOF
 #                     → --dump-tokens のトークン種別の並びが一致すること
 #                       （複数行書くと空白で連結して比較する）
+#   # WARN: メッセージ → コンパイルは成功し、stderr にその文字列を含むこと
+#                       （第22章。既定が警告である検査を確かめるため）
+#   # FLAGS: --deny-move
+#                     → コンパイラに渡す追加のオプション
+#   # EXPLAIN-MUT: 12:5: 'c' が変更されます
+#                     → --explain-mut の出力にその文字列を含むこと（第24章）
+#   # STAGE0-ONLY: 理由
+#                     → C 版（build/poloniumc）でだけ実行する。
+#                       ★ 第22章：所有権検査は C 版にしかありません。
+#                         Polonium 版へ移植する第29章までは、
+#                         make bootstrap-test でこのケースを飛ばします。
 #
 # 複数ファイル（import）のテストは 1 ケース 1 ディレクトリです（第13章）:
 #
@@ -58,6 +69,7 @@ fi
 
 pass=0
 fail=0
+skip=0
 failed_names=()
 
 # 色（端末でないときは付けない）
@@ -96,11 +108,24 @@ for case_file in "${CASES[@]}"; do
     # TOKENS は複数行書けるので、空白 1 個で連結して 1 行にする
     want_tokens="$(sed -n 's/^# *TOKENS: *//p' "$case_file" \
                    | tr '\n' ' ' | tr -s ' ' | sed 's/ *$//')"
+    # 第22章：警告の検証（コンパイルは成功する）と、追加のオプション
+    want_warn="$(sed -n 's/^# *WARN: *//p' "$case_file")"
+    want_explain="$(sed -n 's/^# *EXPLAIN-MUT: *//p' "$case_file")"
+    extra_flags="$(sed -n 's/^# *FLAGS: *//p' "$case_file" | tr '\n' ' ')"
+    stage0_only="$(sed -n 's/^# *STAGE0-ONLY: *//p' "$case_file" | head -1)"
+
+    # ★ C 版でしか動かないケースは、Polonium 版で回すときに飛ばす（第22章）
+    if [ -n "$stage0_only" ] && [ "$PLC_CC" != "$ROOT/build/poloniumc" ]; then
+        printf "  %sskip%s  %s %s(%s)%s\n" "$C_DIM" "$C_END" "$name" \
+               "$C_DIM" "$stage0_only" "$C_END"
+        skip=$((skip + 1))
+        continue
+    fi
 
     if [ -z "$want_exit" ] && [ -z "$want_error" ] && [ -z "$want_output" ] \
-       && [ -z "$want_tokens" ]; then
+       && [ -z "$want_tokens" ] && [ -z "$want_warn" ] && [ -z "$want_explain" ]; then
         report_fail "$name" \
-            "期待値のコメント（# EXIT: / # OUTPUT: / # ERROR: / # TOKENS:）がありません"
+            "期待値のコメント（# EXIT: / # OUTPUT: / # ERROR: / # TOKENS: / # WARN: / # EXPLAIN-MUT:）がありません"
         continue
     fi
 
@@ -120,7 +145,8 @@ for case_file in "${CASES[@]}"; do
             continue
         fi
         # TOKENS だけのケースはここで合格
-        if [ -z "$want_exit" ] && [ -z "$want_error" ] && [ -z "$want_output" ]; then
+        if [ -z "$want_exit" ] && [ -z "$want_error" ] && [ -z "$want_output" ] \
+           && [ -z "$want_warn" ]; then
             printf "  %sok%s    %s %s(tokens)%s\n" "$C_OK" "$C_END" "$name" \
                    "$C_DIM" "$C_END"
             pass=$((pass + 1))
@@ -128,8 +154,38 @@ for case_file in "${CASES[@]}"; do
         fi
     fi
 
+    # ── EXPLAIN-MUT: 変更される実引数の一覧を検証する（第24章）──
+    #
+    # ★ --dump-tokens を TOKENS: で検証するのと同じ形です。
+    #   「表示するだけ」の option は、その表示そのものをテストします。
+    if [ -n "$want_explain" ]; then
+        actual_explain="$("$PLC_CC" --explain-mut "$case_file" 2>/dev/null)"
+        missing=""
+        while IFS= read -r want; do
+            [ -z "$want" ] && continue
+            printf '%s' "$actual_explain" | grep -qF -- "$want" || missing="$missing
+  - $want"
+        done <<EOF_EXPLAIN
+$want_explain
+EOF_EXPLAIN
+        if [ -n "$missing" ]; then
+            report_fail "$name" "--explain-mut の出力に含まれていない期待文字列があります:$missing
+実際の出力:
+$actual_explain"
+            continue
+        fi
+        if [ -z "$want_exit" ] && [ -z "$want_error" ] && [ -z "$want_output" ] \
+           && [ -z "$want_warn" ]; then
+            printf "  %sok%s    %s %s(explain-mut)%s\n" "$C_OK" "$C_END" "$name" \
+                   "$C_DIM" "$C_END"
+            pass=$((pass + 1))
+            continue
+        fi
+    fi
+
     # ── コンパイル ──
-    compile_err="$("$PLC_CC" "$case_file" -o "$exe" 2>&1 >/dev/null)"
+    # shellcheck disable=SC2086  # extra_flags は複数のオプションに分かれてほしい
+    compile_err="$("$PLC_CC" $extra_flags "$case_file" -o "$exe" 2>&1 >/dev/null)"
     compile_rc=$?
 
     # ── ERROR: コンパイルが失敗し、指定文字列を含むことを期待 ──
@@ -171,6 +227,24 @@ $compile_err"
         continue
     fi
 
+    # ── WARN: 成功したうえで、警告が出ていることを期待（第22章）──
+    if [ -n "$want_warn" ]; then
+        missing=""
+        while IFS= read -r want; do
+            [ -z "$want" ] && continue
+            printf '%s' "$compile_err" | grep -qF -- "$want" || missing="$missing
+  - $want"
+        done <<EOF_WARN
+$want_warn
+EOF_WARN
+        if [ -n "$missing" ]; then
+            report_fail "$name" "警告に含まれていない期待文字列があります:$missing
+実際の出力:
+$compile_err"
+            continue
+        fi
+    fi
+
     # ── 実行 ──
     actual_output="$("$exe" 2>/dev/null)"
     actual_exit=$?
@@ -206,9 +280,11 @@ echo
 echo "────────────────────────────────"
 if [ "$fail" -eq 0 ]; then
     printf "%s全 %d 件パス%s\n" "$C_OK" "$pass" "$C_END"
+    [ "$skip" -gt 0 ] && printf "%s（%d 件スキップ）%s\n" "$C_DIM" "$skip" "$C_END"
     exit 0
 else
-    printf "%s%d 件パス / %d 件失敗%s\n" "$C_NG" "$pass" "$fail" "$C_END"
+    printf "%s%d 件パス / %d 件失敗 / %d 件スキップ%s\n" \
+           "$C_NG" "$pass" "$fail" "$skip" "$C_END"
     for n in "${failed_names[@]}"; do echo "  - $n"; done
     exit 1
 fi

@@ -85,9 +85,14 @@
 | フェーズ | 章 | 内容 |
 |---|---|---|
 | A 安全性 | [第21章](chapters/ch21-v2-foundation.md) ✅ | v2 の土台（キーワードと `own` / `mut` の構文） |
-| A 安全性 | 第22〜26章 | ムーブ検査・借用・可変性・解放（drop）・既存コードの移行 |
-| B エラー処理 | 第27〜28章 | `raises` / `try` / `except`、`rc[T]` |
-| C セルフホスト v2 | 第29章 | Polonium 版コンパイラを v2 仕様へ。不動点の再確立 |
+| A 安全性 | [第22章](chapters/ch22-move-check.md) ✅ | ムーブ検査（use-after-move）。新パス `ownck` |
+| A 安全性 | [第23章](chapters/ch23-borrow.md) ✅ | 借用（保存・返却の禁止）。ライフタイム注釈なしの S2 |
+| A 安全性 | [第24章](chapters/ch24-mutability.md) ✅ | 可変性 `mut` と借用の衝突。`--explain-mut` |
+| A 安全性 | [第25章](chapters/ch25-drop.md) ✅ | 解放（drop 挿入）。**初めて free する** |
+| A 安全性 | [第26章](chapters/ch26-migration.md) ✅ | 既存コードの v2 移行。**仕様が壊れて直した話** |
+| B エラー処理 | [第27章](chapters/ch27-raises.md) ✅ | `raises` / `try` / `except`（アンワインドしない） |
+| B エラー処理 | [第28章](chapters/ch28-rc.md) ✅ | `rc[T]`（共有所有）。自動デリファレンス |
+| C セルフホスト v2 | [第29章](chapters/ch29-selfhost-v2.md) 🔨 | v2 の構文と意味づけを移植（第一段） |
 | D OS へ | 第30〜33章 | `unsafe` / `ptr[T]`、freestanding、ベアメタル起動、最小カーネル |
 
 → 各章の目的と完了条件は [roadmap-v2.md](roadmap-v2.md)。

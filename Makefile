@@ -2,7 +2,8 @@
 #
 # 使い方:
 #   make            コンパイラをビルド
-#   make test       テストを全部実行（C 版のテスト + セルフホストの検証）
+#   make test       テストを全部実行（C 版のテスト + 解放の検査 + セルフホストの検証）
+#   make drop-asan  --drop で生成したプログラムを AddressSanitizer で検査（第25章）
 #   make selfhost-test  Polonium 版と C 版の出力を比較（5 本）
 #   make bootstrap      3 段ビルドと不動点の検証（第20章）
 #   make bootstrap-test Polonium 製コンパイラでテストを全部通す
@@ -69,7 +70,7 @@ OBJS    := $(SRCS:src/%.c=build/%.o)
 DEPS    := $(OBJS:.o=.d)
 TARGET  := build/$(LANG_CC)
 
-.PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan info
+.PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan drop-asan info
 
 all: $(TARGET) $(RUNTIME_OBJ)
 
@@ -91,6 +92,7 @@ build/%.o: src/%.c
 # ── テスト ──────────────────────────────────────────────────
 test: $(TARGET) $(RUNTIME_OBJ)
 	@tests/run_tests.sh
+	@tests/drop_asan.sh
 	@tests/selfhost.sh
 
 # 1 ケースだけ実行: make test-one CASE=tests/cases/int_42.po
@@ -118,6 +120,12 @@ bootstrap-test: bootstrap
 	 PLC_RUNTIME_O=$(abspath $(RUNTIME_OBJ)) \
 	 PLC_TARGET_TRIPLE=$(HOST_TRIPLE) \
 	 tests/run_tests.sh
+
+# ── 解放（drop）の検査（第25章）─────────────────────────────
+# tests/cases/drop_*.po を --drop 付きで生成し、AddressSanitizer 付きで
+# リンクして走らせます。**二重解放と解放後の使用**を実行時に捕まえる網です。
+drop-asan: $(TARGET)
+	@tests/drop_asan.sh
 
 # ── AddressSanitizer ビルド ─────────────────────────────────
 # セグフォの原因が分からないときに使います。

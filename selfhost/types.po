@@ -29,6 +29,9 @@ class FuncSig:
     owner: ModuleSyms | None
     next: FuncSig | None
 
+    # ── 第27章：raises 節（宣言されたエラーのクラス）──
+    raises_cls: list[ast.Class]
+
     def init(self, name: str, tok: token.Token | None) -> None:
         self.name = name
         self.ir_name = ""
@@ -36,6 +39,7 @@ class FuncSig:
         self.params = []
         self.pnames = []
         self.tok = tok
+        self.raises_cls = []
 
 
 class VarEntry:

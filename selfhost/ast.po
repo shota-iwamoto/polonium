@@ -18,6 +18,7 @@ TY_LIST: int = 4
 TY_CLASS: int = 5
 TY_OPT: int = 6      # T | None（第15章）
 TY_NULL: int = 7     # None リテラルの型（変数の型にはならない）
+TY_RC: int = 8       # rc[T]（共有所有。第28章）
 
 
 class Type:
@@ -97,6 +98,12 @@ def type_list(elem: Type | None) -> Type:
     t.elem = elem
     return t
 
+# rc[T]（第28章）。★ list[T] と同じ作り
+def type_rc(elem: Type | None) -> Type:
+    t: Type = Type(TY_RC)
+    t.elem = elem
+    return t
+
 def type_class(name: str, c: Class | None) -> Type:
     t: Type = Type(TY_CLASS)
     t.name = name
@@ -105,9 +112,9 @@ def type_class(name: str, c: Class | None) -> Type:
 
 # nullable にできる型か（参照型だけ）
 def type_can_be_opt(t: Type) -> bool:
-    return t.kind == TY_STR or t.kind == TY_LIST or t.kind == TY_CLASS
+    return t.kind == TY_STR or t.kind == TY_LIST or t.kind == TY_CLASS or t.kind == TY_RC
 
-def type_opt(elem: Type) -> Type:
+def type_opt(elem: mut Type) -> Type:
     if elem.kind == TY_OPT:
         return elem
     cached: Type | None = elem.opt
@@ -136,6 +143,8 @@ def type_equal(a: Type, b: Type) -> bool:
     if a.kind != b.kind:
         return False
     if a.kind == TY_LIST:
+        return type_equal(elem_of(a), elem_of(b))
+    if a.kind == TY_RC:
         return type_equal(elem_of(a), elem_of(b))
     if a.kind == TY_CLASS:
         return same_class(a, b)
@@ -177,6 +186,8 @@ def type_name(t: Type) -> str:
         return "list[" + type_name(elem_of(t)) + "]"
     if t.kind == TY_CLASS:
         return t.name
+    if t.kind == TY_RC:
+        return "rc[" + type_name(elem_of(t)) + "]"
     if t.kind == TY_OPT:
         return type_name(elem_of(t)) + " | None"
     if t.kind == TY_NULL:
@@ -226,6 +237,11 @@ ND_FIELDDECL: int = 25
 ND_FIELD: int = 26
 ND_IMPORT: int = 27
 ND_NONE: int = 28
+
+# ── 第27章：エラー処理 ──
+ND_TRY: int = 29     # try 文    → body, els（except の並び）
+ND_EXCEPT: int = 30  # except 節 → type_ref, name（as の名前）, body
+ND_RAISE: int = 31   # raise 文  → lhs
 
 # ── 仮引数の受け取り方（C 版 ParamMode と同じ順序・同じ値。第21章）──
 PM_BORROW: int = 0   # 既定。読むだけ借りる
@@ -386,6 +402,12 @@ class Node:
     args: Node | None       # ND_CALL / ND_METHOD の実引数
     type_ref: Node | None   # 型注釈の木
 
+    # ── 第27章：エラー処理 ──
+    # ⚠️ 'raises' はキーワードなのでフィールド名に使えません（C 版は raises）。
+    err_types: Node | None  # ND_FUNC : raises 節の型注釈の並び
+    can_fail: bool       # ND_CALL / ND_METHOD : 呼び出し先が raises 関数か
+    err_tag: int         # ND_EXCEPT / ND_RAISE : エラー型の ID
+
     # 兄弟（文のリスト・引数リストは next で繋ぐ）
     next: Node | None
 
@@ -404,6 +426,9 @@ class Node:
         self.is_extern = False
         self.is_global = False
         self.mode = PM_BORROW
+        # ── 第27章 ──
+        self.can_fail = False
+        self.err_tag = 0
 
 
 # ── コンストラクタ（C 版の new_*_node と同じ形）──────────────
@@ -564,9 +589,33 @@ def dump(n: Node | None, depth: int) -> None:
         print(pad + "(print")
         dump(n.lhs, depth + 1)
         print(pad + ")")
+    elif n.kind == ND_TRY:
+        print(pad + "(try")
+        dump(n.body, depth + 1)
+        dump_siblings(n.els, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_EXCEPT:
+        if len(n.name) > 0:
+            print(pad + "(except " + n.name)
+        else:
+            print(pad + "(except -")
+        dump(n.type_ref, depth + 1)
+        dump(n.body, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_RAISE:
+        print(pad + "(raise")
+        dump(n.lhs, depth + 1)
+        print(pad + ")")
     elif n.kind == ND_FUNC:
         print(pad + "(func " + n.name)
         dump(n.type_ref, depth + 1)
+        # ★ 第27章：raises 節（無ければ何も出さない）
+        r: Node | None = n.err_types
+        while r is not None:
+            print(pad + "  (raises")
+            dump(r, depth + 2)
+            print(pad + "  )")
+            r = r.next
         dump_siblings(n.params, depth + 1)
         dump(n.body, depth + 1)
         print(pad + ")")

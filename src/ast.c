@@ -236,9 +236,38 @@ static void dump(Node *n, int depth) {
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
+        // ── 第27章：エラー処理 ──
+        case ND_TRY:
+            printf("(try\n");
+            dump(n->body, depth + 1);
+            for (Node *ex = n->els; ex; ex = ex->next) dump(ex, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_RAISE:
+            printf("(raise\n");
+            dump(n->lhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_EXCEPT:
+            printf("(except %s\n", n->name ? n->name : "-");
+            dump(n->type_ref, depth + 1);
+            dump(n->body, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
         case ND_FUNC:
             printf("(func %s\n", n->name);
             dump(n->type_ref, depth + 1);
+            // ★ 第27章：raises 節（無ければ何も出さない。既存の AST 比較を壊さないため）
+            for (Node *r = n->raises; r; r = r->next) {
+                for (int i = 0; i < depth + 1; i++) printf("  ");
+                printf("(raises\n");
+                dump(r, depth + 2);
+                for (int i = 0; i < depth + 1; i++) printf("  ");
+                printf(")\n");
+            }
             for (Node *pm = n->params; pm; pm = pm->next) dump(pm, depth + 1);
             dump(n->body, depth + 1);
             for (int i = 0; i < depth; i++) printf("  ");

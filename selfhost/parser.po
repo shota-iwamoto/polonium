@@ -34,19 +34,19 @@ class Parser:
             i = len(self.toks) - 1
         return self.toks[i]
 
-    def advance(self) -> token.Token:
+    def advance(mut self) -> token.Token:
         t: token.Token = self.peek()
         if t.kind != token.TK_EOF:
             self.pos = self.pos + 1
         return t
 
     # 現在のトークンが指定した記号なら消費して返す。違えば None
-    def consume(self, op: str) -> token.Token | None:
+    def consume(mut self, op: str) -> token.Token | None:
         if self.peek().is_punct(op):
             return self.advance()
         return None
 
-    def consume_kw(self, kw: str) -> token.Token | None:
+    def consume_kw(mut self, kw: str) -> token.Token | None:
         if self.peek().is_kw(kw):
             return self.advance()
         return None
@@ -74,7 +74,7 @@ class Parser:
     def fail_full(self, t: token.Token, msg: str, label: str, hint: str) -> None:
         diag.error_full(t, msg, label, None, "", hint)
 
-    def expect_close(self, close: str, open_tok: token.Token) -> token.Token:
+    def expect_close(mut self, close: str, open_tok: token.Token) -> token.Token:
         t: token.Token = self.peek()
         if t.is_punct(close):
             return self.advance()
@@ -107,7 +107,7 @@ class Parser:
         panic("parser: unknown token kind")
         return ""
 
-    def expect(self, kind: int, what: str, hint: str) -> token.Token:
+    def expect(mut self, kind: int, what: str, hint: str) -> token.Token:
         t: token.Token = self.peek()
         if t.kind == kind:
             return self.advance()
@@ -115,7 +115,7 @@ class Parser:
                         None, "", hint)
         return t
 
-    def expect_newline(self) -> None:
+    def expect_newline(mut self) -> None:
         t: token.Token = self.peek()
         if t.kind != token.TK_NEWLINE:
             diag.error_full(t, "文の後に余分なトークンがあります",
@@ -123,7 +123,7 @@ class Parser:
                             "1 行に書けるのは 1 つの文です（改行で区切ってください）")
         self.advance()
 
-    def expect_colon(self, what: str) -> None:
+    def expect_colon(mut self, what: str) -> None:
         if self.consume(":") is not None:
             return
         diag.error_full(self.peek(), what + "の後に ':' が必要です",
@@ -133,7 +133,7 @@ class Parser:
     # ── 式（優先順位の階層。C 版と同じ順序で並べる）────────
 
     # primary ::= INT | STR | IDENT | None | True | False | "(" expr ")" | list
-    def primary(self) -> ast.Node:
+    def primary(mut self) -> ast.Node:
         open_tok: token.Token | None = self.consume("(")
         if open_tok is not None:
             n: ast.Node = self.expr()
@@ -199,7 +199,7 @@ class Parser:
         return ast.new_node(ast.ND_PASS, t)
 
     # postfix ::= primary { "[" expr "]" | "." IDENT [ "(" args ")" ] | "(" args ")" }
-    def postfix(self) -> ast.Node:
+    def postfix(mut self) -> ast.Node:
         n: ast.Node = self.primary()
 
         while True:
@@ -257,7 +257,7 @@ class Parser:
 
     # 引数リストを読む（閉じ括弧まで）。C 版は各所に展開されているが、
     # Polonium 版はダミー先頭の扱いが冗長になるので 1 か所にまとめる。
-    def arg_list(self, open_tok: token.Token) -> ast.Node | None:
+    def arg_list(mut self, open_tok: token.Token) -> ast.Node | None:
         head: ast.Node = ast.new_node(ast.ND_BLOCK, open_tok)
         cur: ast.Node = head
         if not self.peek().is_punct(")"):
@@ -274,7 +274,7 @@ class Parser:
         return head.next
 
     # power ::= postfix [ "**" unary ]（右結合）
-    def power(self) -> ast.Node:
+    def power(mut self) -> ast.Node:
         base: ast.Node = self.postfix()
         t: token.Token = self.peek()
         if self.consume("**") is not None:
@@ -282,7 +282,7 @@ class Parser:
         return base
 
     # unary ::= ("-" | "+" | "~") unary | power（右結合）
-    def unary(self) -> ast.Node:
+    def unary(mut self) -> ast.Node:
         t: token.Token = self.peek()
         if self.consume("-") is not None:
             return ast.new_unary_node(t, ast.OP_NEG, self.unary())
@@ -293,7 +293,7 @@ class Parser:
         return self.power()
 
     # mul_expr ::= unary { ("*" | "/" | "//" | "%") unary }（左結合）
-    def mul_expr(self) -> ast.Node:
+    def mul_expr(mut self) -> ast.Node:
         lhs: ast.Node = self.unary()
         while True:
             t: token.Token = self.peek()
@@ -310,7 +310,7 @@ class Parser:
                 return lhs
         return lhs
 
-    def add_expr(self) -> ast.Node:
+    def add_expr(mut self) -> ast.Node:
         lhs: ast.Node = self.mul_expr()
         while True:
             t: token.Token = self.peek()
@@ -322,7 +322,7 @@ class Parser:
                 return lhs
         return lhs
 
-    def shift_expr(self) -> ast.Node:
+    def shift_expr(mut self) -> ast.Node:
         lhs: ast.Node = self.add_expr()
         while True:
             t: token.Token = self.peek()
@@ -334,7 +334,7 @@ class Parser:
                 return lhs
         return lhs
 
-    def bitand_expr(self) -> ast.Node:
+    def bitand_expr(mut self) -> ast.Node:
         lhs: ast.Node = self.shift_expr()
         while True:
             t: token.Token = self.peek()
@@ -344,7 +344,7 @@ class Parser:
                 return lhs
         return lhs
 
-    def bitxor_expr(self) -> ast.Node:
+    def bitxor_expr(mut self) -> ast.Node:
         lhs: ast.Node = self.bitand_expr()
         while True:
             t: token.Token = self.peek()
@@ -354,7 +354,7 @@ class Parser:
                 return lhs
         return lhs
 
-    def bitor_expr(self) -> ast.Node:
+    def bitor_expr(mut self) -> ast.Node:
         lhs: ast.Node = self.bitxor_expr()
         while True:
             t: token.Token = self.peek()
@@ -382,7 +382,7 @@ class Parser:
 
     # comparison ::= bitor_expr [ compop bitor_expr ]
     # ⚠️ 連鎖しません（while ではなく if）
-    def comparison(self) -> ast.Node:
+    def comparison(mut self) -> ast.Node:
         lhs: ast.Node = self.bitor_expr()
 
         # ★ 第15章：is / is not。右辺は None だけを許す（sema が検査）
@@ -413,14 +413,14 @@ class Parser:
         return ast.new_binop_node(t, cop, lhs, rhs)
 
     # not_expr ::= "not" not_expr | comparison（右結合）
-    def not_expr(self) -> ast.Node:
+    def not_expr(mut self) -> ast.Node:
         t: token.Token = self.peek()
         if self.consume_kw("not") is not None:
             return ast.new_unary_node(t, ast.OP_NOT, self.not_expr())
         return self.comparison()
 
     # and_expr ::= not_expr { "and" not_expr }
-    def and_expr(self) -> ast.Node:
+    def and_expr(mut self) -> ast.Node:
         lhs: ast.Node = self.not_expr()
         while True:
             t: token.Token = self.peek()
@@ -431,7 +431,7 @@ class Parser:
         return lhs
 
     # or_expr ::= and_expr { "or" and_expr }
-    def or_expr(self) -> ast.Node:
+    def or_expr(mut self) -> ast.Node:
         lhs: ast.Node = self.and_expr()
         while True:
             t: token.Token = self.peek()
@@ -441,13 +441,13 @@ class Parser:
                 return lhs
         return lhs
 
-    def expr(self) -> ast.Node:
+    def expr(mut self) -> ast.Node:
         return self.or_expr()
 
     # ── 文 ──────────────────────────────────────────────────
 
     # var_decl ::= IDENT ":" type "=" expr
-    def var_decl(self) -> ast.Node:
+    def var_decl(mut self) -> ast.Node:
         name_tok: token.Token = self.advance()   # IDENT（呼び出し元が確認済み）
         self.advance()                           # ":"
 
@@ -481,7 +481,7 @@ class Parser:
 
     # 脱糖で作る隠し変数の名前。
     # ⚠️ 連番の振り方まで C 版と揃えること（S 式に名前が出るため）
-    def hidden_name(self, tag: str) -> str:
+    def hidden_name(mut self, tag: str) -> str:
         name: str = tag + "." + str(self.hidden)
         self.hidden = self.hidden + 1
         return name
@@ -505,7 +505,7 @@ class Parser:
         return n
 
     # 複合代入の脱糖（言語仕様 5.2）
-    def aug_assign(self, t: token.Token, op: int, target: ast.Node,
+    def aug_assign(mut self, t: token.Token, op: int, target: ast.Node,
                    rhs: ast.Node) -> ast.Node:
         # 変数はそのまま（2 回評価しても副作用がない）
         if target.kind == ast.ND_VAR:
@@ -543,7 +543,7 @@ class Parser:
         return blk
 
     # simple_stmt ::= var_decl | assign_stmt | expr_stmt
-    def simple_stmt(self) -> ast.Node:
+    def simple_stmt(mut self) -> ast.Node:
         t0: token.Token = self.peek()
 
         if t0.is_kw("break"):
@@ -555,6 +555,13 @@ class Parser:
         if t0.is_kw("pass"):
             self.advance()
             return ast.new_node(ast.ND_PASS, t0)
+
+        # raise_stmt ::= "raise" expr（第27章）
+        if t0.is_kw("raise"):
+            self.advance()
+            rz: ast.Node = ast.new_node(ast.ND_RAISE, t0)
+            rz.lhs = self.expr()
+            return rz
 
         # return_stmt ::= "return" [ expr ]
         if t0.is_kw("return"):
@@ -601,7 +608,7 @@ class Parser:
         return n2
 
     # block ::= NEWLINE INDENT stmt { stmt } DEDENT
-    def block(self) -> ast.Node:
+    def block(mut self) -> ast.Node:
         head_tok: token.Token = self.peek()
 
         self.expect(token.TK_NEWLINE, "改行",
@@ -626,7 +633,7 @@ class Parser:
     # if_stmt ::= "if" expr ":" block { "elif" ... } [ "else" ":" block ]
     #
     # ★ elif は「else の中に if が 1 個ある」形に脱糖する（再帰 1 行）
-    def if_stmt(self) -> ast.Node:
+    def if_stmt(mut self) -> ast.Node:
         t: token.Token = self.advance()   # "if" または "elif"
 
         n: ast.Node = ast.new_node(ast.ND_IF, t)
@@ -644,7 +651,7 @@ class Parser:
     # for_stmt ::= "for" IDENT "in" expr ":" block
     #
     # ★ for は while への脱糖（第11章）。隠し変数の連番まで C 版に揃える。
-    def for_stmt(self) -> ast.Node:
+    def for_stmt(mut self) -> ast.Node:
         t: token.Token = self.advance()   # "for"
 
         var_tok: token.Token = self.peek()
@@ -787,7 +794,7 @@ class Parser:
         return blk
 
     # while_stmt ::= "while" expr ":" block
-    def while_stmt(self) -> ast.Node:
+    def while_stmt(mut self) -> ast.Node:
         t: token.Token = self.advance()   # "while"
 
         n: ast.Node = ast.new_node(ast.ND_WHILE, t)
@@ -797,7 +804,7 @@ class Parser:
         return n
 
     # stmt ::= simple_stmt NEWLINE | if_stmt | while_stmt | for_stmt
-    def stmt(self) -> ast.Node:
+    def stmt(mut self) -> ast.Node:
         t: token.Token = self.peek()
 
         if t.is_kw("if"):
@@ -806,6 +813,8 @@ class Parser:
             return self.while_stmt()
         if t.is_kw("for"):
             return self.for_stmt()
+        if t.is_kw("try"):
+            return self.try_stmt()
 
         # 対応する if が無い elif / else
         if t.is_kw("elif") or t.is_kw("else"):
@@ -819,7 +828,7 @@ class Parser:
 
     # ── 型注釈 ──────────────────────────────────────────────
 
-    def type_name_token(self, what: str) -> token.Token:
+    def type_name_token(mut self, what: str) -> token.Token:
         t: token.Token = self.peek()
         if t.kind == token.TK_IDENT or t.is_kw("None"):
             self.advance()
@@ -828,7 +837,7 @@ class Parser:
         return t
 
     # type_ref ::= [ IDENT "." ] IDENT [ "[" type_ref "]" ] [ "|" None ]
-    def type_ref(self, what: str) -> ast.Node:
+    def type_ref(mut self, what: str) -> ast.Node:
         t: token.Token = self.type_name_token(what)
 
         n: ast.Node = ast.new_node(ast.ND_TYPEREF, t)
@@ -872,7 +881,7 @@ class Parser:
     # ★ 第21章：受け取り方（own / mut）を読む。**意味づけはまだしない。**
     #   own / mut は「型の前」に置く（言語仕様 v2 §11）。self だけ型注釈が
     #   無いので `mut self` と書く。
-    def param(self, allow_self: bool) -> ast.Node:
+    def param(mut self, allow_self: bool) -> ast.Node:
         # 名前の前に書けるのは 'mut self' の mut だけ
         lead: token.Token | None = None
         if self.peek().is_kw("mut") or self.peek().is_kw("own"):
@@ -922,7 +931,7 @@ class Parser:
         return n
 
     # 引数リスト（仮引数）を読む
-    def param_list(self, open_tok: token.Token, in_class: bool) -> ast.Node | None:
+    def param_list(mut self, open_tok: token.Token, in_class: bool) -> ast.Node | None:
         head: ast.Node = ast.new_node(ast.ND_BLOCK, open_tok)
         cur: ast.Node = head
         first: bool = True
@@ -939,7 +948,7 @@ class Parser:
         return head.next
 
     # func_def ::= "def" IDENT "(" [ params ] ")" "->" type ":" block
-    def func_def(self, in_class: bool) -> ast.Node:
+    def func_def(mut self, in_class: bool) -> ast.Node:
         kw: token.Token = self.advance()   # "def"
 
         name_tok: token.Token = self.peek()
@@ -982,12 +991,84 @@ class Parser:
 
         n.type_ref = self.type_ref("戻り型には型名を書きます（例: -> int / -> None）")
 
+        # ── 第27章：raises 節（戻り型の後ろ）──
+        if self.peek().is_kw("raises"):
+            self.advance()
+            rhead: ast.Node = ast.new_node(ast.ND_BLOCK, n.tok)   # 番兵
+            rcur: ast.Node = rhead
+            while True:
+                rcur.next = self.raises_type()
+                rnx: ast.Node | None = rcur.next
+                if rnx is None:
+                    panic("parser: unreachable")
+                else:
+                    rcur = rnx
+                if self.consume("|") is None:
+                    break
+            n.err_types = rhead.next
+
         self.expect_colon("def の宣言")
         n.body = self.block()
         return n
 
+    # raises に書けるのは「エラー型の名前」だけ（第27章）。
+    #
+    # ⚠️ type_ref は使えません。`raises A | B` の '|' を
+    #    「T | None」の '|' と読んでしまうからです。
+    def raises_type(mut self) -> ast.Node:
+        t: token.Token = self.type_name_token(
+            "raises にはエラーの型名を書きます（例: raises IOError）")
+        n: ast.Node = ast.new_node(ast.ND_TYPEREF, t)
+        n.name = t.text
+        if self.peek().is_punct("."):
+            self.advance()
+            m: token.Token = self.type_name_token("モジュール修飾の後には型名を書きます")
+            n.mod_name = n.name
+            n.name = m.text
+            n.tok = m
+        return n
+
+    # try_stmt ::= "try" ":" block { except_clause }
+    # except_clause ::= "except" type [ "as" IDENT ] ":" block
+    #
+    # ★ 第27章：見た目は例外だが、実体は戻り値の検査（アンワインドしない）
+    def try_stmt(mut self) -> ast.Node:
+        kw: token.Token = self.advance()   # "try"
+        self.expect_colon("try")
+
+        n: ast.Node = ast.new_node(ast.ND_TRY, kw)
+        n.body = self.block()
+
+        head: ast.Node = ast.new_node(ast.ND_BLOCK, kw)   # 番兵
+        cur: ast.Node = head
+        while self.peek().is_kw("except"):
+            ek: token.Token = self.advance()
+            ex: ast.Node = ast.new_node(ast.ND_EXCEPT, ek)
+            ex.type_ref = self.type_ref(
+                "except には捕まえるエラーの型名を書きます（例: except IOError:）")
+            if self.peek().is_kw("as"):
+                self.advance()
+                nm: token.Token = self.peek()
+                if nm.kind != token.TK_IDENT:
+                    self.fail_hint(nm,
+                                   "as の後には変数名を書きます（例: except IOError as e:）",
+                                   "変数名が必要です")
+                self.advance()
+                ex.name = nm.text
+            self.expect_colon("except")
+            ex.body = self.block()
+            cur.next = ex
+            cur = ex
+
+        if head.next is None:
+            self.fail_hint(self.peek(),
+                           "try には except を 1 つ以上書きます（例: except IOError as e:）",
+                           "この try には except がありません")
+        n.els = head.next
+        return n
+
     # field_decl ::= IDENT ":" type NEWLINE（初期化式は取らない）
-    def field_decl(self) -> ast.Node:
+    def field_decl(mut self) -> ast.Node:
         name_tok: token.Token = self.advance()   # IDENT
         self.advance()                           # ":"
 
@@ -1004,7 +1085,7 @@ class Parser:
         return n
 
     # class_def ::= "class" IDENT ":" NEWLINE INDENT { field } { method } DEDENT
-    def class_def(self) -> ast.Node:
+    def class_def(mut self) -> ast.Node:
         kw: token.Token = self.advance()   # "class"
 
         name_tok: token.Token = self.peek()
@@ -1069,7 +1150,7 @@ class Parser:
     # extern_def ::= "extern" "def" IDENT "(" [ params ] ")" "->" type NEWLINE
     #
     # ★ 新しいノード種別は作らない。body が None——「宣言はあるが定義がない」
-    def extern_def(self) -> ast.Node:
+    def extern_def(mut self) -> ast.Node:
         self.advance()   # "extern"
 
         if not self.peek().is_kw("def"):
@@ -1111,7 +1192,7 @@ class Parser:
         return n   # body は None のまま（★ extern の印）
 
     # import_stmt ::= "import" IDENT NEWLINE
-    def import_stmt(self) -> ast.Node:
+    def import_stmt(mut self) -> ast.Node:
         kw: token.Token = self.advance()   # "import"
 
         name_tok: token.Token = self.peek()
@@ -1133,7 +1214,7 @@ class Parser:
         return n
 
     # program ::= { class_def | func_def | extern_def | import | global_var } EOF
-    def program(self) -> ast.Node:
+    def program(mut self) -> ast.Node:
         head: ast.Node = ast.new_node(ast.ND_BLOCK, self.peek())
         cur: ast.Node = head
         first: token.Token = self.peek()
