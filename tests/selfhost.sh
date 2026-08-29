@@ -227,6 +227,27 @@ for f in "${FILES[@]}"; do
     runpass=$((runpass + 1))
 done
 
+# ── 版番号が 2 つの実装で揃っているか ──────────────────────
+#
+# ★ C 版と Polonium 版は同じ仕様を**別々に書いた 2 つの実装**なので、
+#   片方だけ直すと静かにずれます（Windows CI で clang の引用符が
+#   C 版だけ直っていた件がまさにそれでした）。版番号は「どちらを
+#   使っているか」を人に伝える値なので、ずれたら気づけるようにします。
+STAGE1_MAIN="$ROOT/build/stage1-main"
+if "$PLC_CC" "$ROOT/selfhost/main.po" -o "$STAGE1_MAIN" > "$TMP/stage1-build.log" 2>&1; then
+    v0="$("$PLC_CC" --version | head -1 | awk '{print $2}')"
+    v1="$("$STAGE1_MAIN" --version | head -1 | awk '{print $2}')"
+    if [ "$v0" = "$v1" ]; then
+        printf "  %sok%s    --version が一致 %s(%s)%s\n" \
+               "$C_OK" "$C_END" "$C_DIM" "$v0" "$C_END"
+    else
+        printf "  %sFAIL%s  --version がずれています（C 版 %s / Polonium 版 %s）\n" \
+               "$C_NG" "$C_END" "$v0" "$v1"
+        fail=$((fail + 1))
+        failed_names+=("--version")
+    fi
+fi
+
 echo
 echo "────────────────────────────────"
 if [ "$fail" -eq 0 ]; then

@@ -43,6 +43,18 @@ static const char *clang_cmd(void) {
     return PLC_CLANG;
 }
 
+// ★ --version が出す内容。
+//
+//   版番号だけでなく **stage と target triple** も出します。この処理系は
+//   C 製（stage0）と Polonium 製（stage1 以降）の 2 つがあり、
+//   triple はビルド時に埋め込まれるので、「どれを使っているのか」が
+//   不具合の報告で最初に要る情報になります。
+//   対になる定義: selfhost/main.po の print_version
+static void print_version(void) {
+    printf("%s %s (stage0)\n", PLC_LANG_CC, PLC_LANG_VERSION);
+    printf("target: %s\n", PLC_TARGET_TRIPLE);
+}
+
 static void usage(int status) {
     FILE *out = status == 0 ? stdout : stderr;
     fprintf(out,
@@ -66,7 +78,8 @@ static void usage(int status) {
             "  --target=<t>    生成する IR の target triple を指定する\n"
             "                  （例: --target=riscv64-unknown-elf）\n"
             "  -O0|-O1|-O2|-O3 clang に渡す最適化レベル（既定: -O0）\n"
-            "  -h, --help      この使い方を表示\n");
+            "  -h, --help      この使い方を表示\n"
+            "  --version       版番号と target triple を表示\n");
     exit(status);
 }
 
@@ -104,6 +117,11 @@ static Options parse_args(int argc, char **argv) {
         char *a = argv[i];
 
         if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) usage(0);
+
+        if (strcmp(a, "--version") == 0) {
+            print_version();
+            exit(0);
+        }
 
         if (strcmp(a, "-o") == 0) {
             if (i + 1 >= argc) error("-o の後に出力ファイル名が必要です");

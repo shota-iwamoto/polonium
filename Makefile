@@ -51,9 +51,13 @@ RUNTIME_CFLAGS := -std=c11 -O2 -Wall -Wextra
 LANG_NAME := Polonium
 LANG_EXT  := .po
 LANG_CC   := poloniumc
+# ★ 版番号（--version が出す値）。3 か所を揃えること:
+#   ここ / src/langinfo.h の PLC_LANG_VERSION / selfhost/langinfo.po の VERSION
+LANG_VERSION := 0.1.0
 CFLAGS  += -DPLC_LANG_NAME='"$(LANG_NAME)"' \
            -DPLC_LANG_EXT='"$(LANG_EXT)"' \
-           -DPLC_LANG_CC='"$(LANG_CC)"'
+           -DPLC_LANG_CC='"$(LANG_CC)"' \
+           -DPLC_LANG_VERSION='"$(LANG_VERSION)"'
 
 # ── ターゲット triple の自動取得 ──────────────────────────────
 # 生成する LLVM IR に書き込む triple。
@@ -311,6 +315,7 @@ info:
 	@echo "LANG_NAME    = $(LANG_NAME)"
 	@echo "LANG_EXT     = $(LANG_EXT)"
 	@echo "LANG_CC      = $(LANG_CC)"
+	@echo "LANG_VERSION = $(LANG_VERSION)"
 	@echo "UNAME_S      = $(UNAME_S)"
 	@echo "CLANG        = $(CLANG)"
 	@echo "RUNTIME      = $(RUNTIME_OBJ)"

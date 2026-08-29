@@ -23,7 +23,33 @@
 #define PLC_LANG_CC "poloniumc"       // コンパイラのコマンド名
 #endif
 
+#ifndef PLC_LANG_VERSION
+#define PLC_LANG_VERSION "0.1.0"      // 版番号（--version で出す）
+#endif
+
 // 拡張子の長さ（"." を含む）。sizeof は終端の '\0' を数えるので 1 引く。
 #define PLC_LANG_EXT_LEN (sizeof(PLC_LANG_EXT) - 1)
+
+// ── 生成する IR に書く target triple ────────────────────────
+// ビルド時に Makefile が -DPLC_TARGET_TRIPLE=... で渡してきます。
+// 万一渡されなかった場合でも動くようにフォールバックを置いておく。
+#ifndef PLC_TARGET_TRIPLE
+#define PLC_TARGET_TRIPLE ""
+#endif
+
+// ★ macOS のユニバーサルバイナリ（make UNIVERSAL=1）のための選び分け。
+//
+//   1 つの実行ファイルに x86_64 と arm64 の 2 つが入っているとき、
+//   **書くべき triple は「いま動いている側」**です。ビルド時に 1 つだけ
+//   埋め込むと、片方の機械で動かない実行ファイルを吐いてしまいます。
+//   __x86_64__ / __aarch64__ は**各スライスをコンパイルするときに**
+//   それぞれ定義されるので、これで正しい方が選ばれます。
+#if defined(PLC_TARGET_TRIPLE_X86_64) && defined(__x86_64__)
+#  undef  PLC_TARGET_TRIPLE
+#  define PLC_TARGET_TRIPLE PLC_TARGET_TRIPLE_X86_64
+#elif defined(PLC_TARGET_TRIPLE_ARM64) && defined(__aarch64__)
+#  undef  PLC_TARGET_TRIPLE
+#  define PLC_TARGET_TRIPLE PLC_TARGET_TRIPLE_ARM64
+#endif
 
 #endif  // PLC_LANGINFO_H

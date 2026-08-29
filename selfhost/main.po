@@ -44,6 +44,16 @@ class Options:
         self.keep_ll = False
 
 
+# ★ --version が出す内容。対になる定義: src/main.c の print_version
+#
+#   版番号だけでなく **stage と target triple** も出します。この処理系は
+#   C 製（stage0）と Polonium 製（stage1 以降）の 2 つがあり、
+#   「どれを使っているのか」が不具合の報告で最初に要る情報だからです。
+def print_version() -> None:
+    print(langinfo.cc() + " " + langinfo.version() + " (stage1)")
+    print("target: " + target_triple())
+
+
 def usage(status: int) -> None:
     print(langinfo.name() + " コンパイラ (stage1)")
     print("")
@@ -58,6 +68,7 @@ def usage(status: int) -> None:
     print("  --check         型検査までで止める（エラーが無ければ何も出さない）")
     print("  -O0|-O1|-O2|-O3 clang に渡す最適化レベル（既定: -O0）")
     print("  -h, --help      この使い方を表示")
+    print("  --version       版番号と target triple を表示")
     exit(status)
 
 
@@ -70,6 +81,10 @@ def parse_args(args: list[str]) -> Options:
 
         if a == "-h" or a == "--help":
             usage(0)
+
+        if a == "--version":
+            print_version()
+            exit(0)
 
         if a == "-o":
             if i + 1 >= len(args):
