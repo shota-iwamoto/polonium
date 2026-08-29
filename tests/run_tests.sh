@@ -254,8 +254,12 @@ $compile_err"
     # ── 実行 ──
     # ★ Windows（MSYS2）では実行ファイルに .exe が付きます
     [ -x "$exe" ] || [ ! -x "$exe.exe" ] || exe="$exe.exe"
-    actual_output="$("$exe" 2>/dev/null | strip_cr)"
+    # ⚠️ パイプで受けると $? が最後のコマンド（tr）のものになります。
+    #    終了コードは**プログラム自身**のものを見なければ意味がないので、
+    #    先に受け取ってから \r を落とします。
+    actual_output="$("$exe" 2>/dev/null)"
     actual_exit=$?
+    actual_output="$(printf '%s' "$actual_output" | strip_cr)"
 
     ok=1
     reason=""
