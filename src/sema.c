@@ -635,7 +635,13 @@ static Type *bool_required(const char *message, const char *where_label,
     diag_fail(&d);
 }
 
+static Type *check_slice(Sema *s, Node *n);     // 第37章：スライス
+static Type *check_in(Sema *s, Node *n);        // 第37章：in / not in
+
 static Type *check_binop(Sema *s, Node *n) {
+    // ★ 第37章：in / not in は「両辺が同じ型」ではないので先に分岐します
+    if (n->op == OP_IN || n->op == OP_NOTIN) return check_in(s, n);
+
     // ★ 第15章：is / is not は型の合わせ方がまったく違うので、先に分岐します
     if (n->op == OP_IS || n->op == OP_ISNOT) return check_is(s, n);
 
@@ -729,6 +735,103 @@ static Type *check_logical(Sema *s, Node *n) {
     return ty_bool;
 }
 
+// xs[a:b] / s[a:b]（第37章）
+//
+// ⚠️ **新しい値を作ります**（借用ではありません）。借用のスライスは
+//   「元より長生きしないこと」の検査が要るためで、仕様 §6 の方針に従い
+//   まず複製する形だけを入れました。
+static Type *check_slice(Sema *s, Node *n) {
+    Type *t = check_expr(s, n->lhs);
+    if (t->kind != TY_STR && t->kind != TY_LIST) {
+        Diag d = {0};
+        d.message = diag_fmt("'%s' 型はスライスできません", type_name(t));
+        d.primary.tok = n->lhs->tok;
+        d.primary.label = "ここには str か list[T] が必要です";
+        diag_fail(&d);
+    }
+    if (n->rhs) {
+        Type *a = check_expr(s, n->rhs);
+        if (a->kind != TY_INT)
+            error_at(n->rhs->tok, "スライスの開始は int です（'%s' 型でした）",
+                     type_name(a));
+    }
+    if (n->els) {
+        Type *b = check_expr(s, n->els);
+        if (b->kind != TY_INT)
+            error_at(n->els->tok, "スライスの終端は int です（'%s' 型でした）",
+                     type_name(b));
+    }
+    return t;
+}
+
+// x in xs / sub in s（第37章）
+//
+// ★ 右辺の型で意味が変わります。
+//     list[T] … 要素に等しいものがあるか（== と同じ比べ方）
+//     str     … 部分文字列として含まれるか
+//   ⚠️ dict には使えません（d.has(k) を使ってください）。鍵と値のどちらを
+//     見るのかが記号から読み取れないためです。
+static Type *check_in(Sema *s, Node *n) {
+    Type *l = check_expr(s, n->lhs);
+    Type *r = check_expr(s, n->rhs);
+
+    if (r->kind == TY_STR) {
+        if (l->kind != TY_STR)
+            error_at(n->tok,
+                     "str の 'in' には str が必要です（左辺は '%s' 型です）",
+                     type_name(l));
+        return ty_bool;
+    }
+    if (r->kind == TY_LIST) {
+        if (!type_assignable(l, r->elem)) {
+            Diag d = {0};
+            d.message = "'in' の左辺が要素の型と合いません";
+            d.primary.tok = n->lhs->tok;
+            d.primary.label = diag_fmt("これは '%s' 型です", type_name(l));
+            d.related.tok = n->rhs->tok;
+            d.related.label = diag_fmt("こちらの要素は '%s' 型です",
+                                       type_name(r->elem));
+            diag_fail(&d);
+        }
+        return ty_bool;
+    }
+
+    Diag d = {0};
+    d.message = diag_fmt("'%s' 型に 'in' は使えません", type_name(r));
+    d.primary.tok = n->rhs->tok;
+    d.primary.label = "ここには list[T] か str が必要です";
+    d.hint = "dict の鍵を調べるには d.has(k) を使ってください";
+    diag_fail(&d);
+    return ty_bool;
+}
+
+// 三項演算子 a if c else b（第37章）
+// ⚠️ 名前は check_ternary。check_cond は「文の条件式」用に既にあります。
+static Type *check_ternary(Sema *s, Node *n) {
+    Type *c = check_expr(s, n->lhs);
+    if (c->kind != TY_BOOL)
+        bool_required("三項演算子の条件には bool が必要です",
+                      "この 'if' の条件です", n->tok, n->lhs, c);
+
+    Type *a = check_expr(s, n->rhs);
+    Type *b = check_expr(s, n->els);
+
+    // ★ どちらかが None リテラルなら、もう一方に合わせます
+    //   （x if c else None が書けるように。第15章の代入互換と同じ扱い）
+    if (type_assignable(b, a)) return a;
+    if (type_assignable(a, b)) return b;
+
+    Diag d = {0};
+    d.message = "三項演算子の両側で型が違います";
+    d.primary.tok = n->els->tok;
+    d.primary.label = diag_fmt("こちらは '%s' 型です", type_name(b));
+    d.related.tok = n->rhs->tok;
+    d.related.label = diag_fmt("こちらは '%s' 型です", type_name(a));
+    d.hint = "式の型は 1 つに決まらなければなりません（どちらかを合わせてください）";
+    diag_fail(&d);
+    return a;
+}
+
 static Type *check_unary(Sema *s, Node *n) {
     Type *t = check_expr(s, n->lhs);
 
@@ -796,6 +899,12 @@ static Type *check_expr(Sema *s, Node *n) {
     Type *t;
     switch (n->kind) {
         case ND_INT: t = ty_int; break;
+        // ★ 第37章：三項演算子。**両側の型が一致していること**を要求します。
+        //   条件は bool。片方だけ絞り込む、といった細工はしません
+        //   （式の型が一意に決まる、という言語全体の方針を守ります）。
+        case ND_COND: t = check_ternary(s, n); break;
+        // ★ 第37章：スライス。**同じ型を返します**（str→str, list[T]→list[T]）
+        case ND_SLICE: t = check_slice(s, n); break;
         case ND_FLOAT: t = ty_float; break;
         case ND_BOOL: t = ty_bool; break;
         case ND_STR: t = ty_str; break;
@@ -1130,6 +1239,10 @@ const Builtin BUILTINS[] = {
     {"str", TY_INT, TY_STR, "pl_str_from_int"},
     {"str", TY_BOOL, TY_STR, "pl_str_from_bool"},
     {"str", TY_FLOAT, TY_STR, "pl_str_from_float"},
+    // ★ 第37章：str(str) は複製を返します。f-string が中身の型を
+    //   知らずに str(...) で包めるようにするためです。
+    //   ⚠️ 同じポインタを返すと、--drop のときに二重解放になります。
+    {"str", TY_STR, TY_STR, "pl_str_copy"},
     {"int", TY_STR, TY_INT, "pl_str_to_int"},
     // 第34章：int ↔ float。⚠️ 暗黙変換はしないので、必ずここを通します。
     {"int", TY_FLOAT, TY_INT, "pl_int_from_float"},
@@ -1493,6 +1606,80 @@ static Type *check_method(Sema *s, Node *n) {
 
     if (ot->kind == TY_CLASS) return check_class_method(s, n, ot->cls);
 
+    // ★ 第37章：list のメソッドを増やしました。
+    //   引数と戻り型は「表」で持ちます。1 つずつ if を書くと、増やすたびに
+    //   同じ形のコードが並ぶためです。
+    //     argk: 'e'=要素型 / 'i'=int / 'l'=同じ list / '-'=引数なし
+    //     retk: 'e'=要素型 / 'i'=int / 'n'=None / 'l'=同じ list
+    if (ot->kind == TY_LIST) {
+        static const struct { const char *name; char argk; char retk;
+                              const char *usage; } LM[] = {
+            {"pop",     '-', 'e', "xs.pop()"},
+            {"insert",  'i', 'n', "xs.insert(位置, 値)"},   // 引数 2 個（下で特別扱い）
+            {"remove",  'i', 'e', "xs.remove(位置)"},
+            {"index",   'e', 'i', "xs.index(値)"},
+            {"reverse", '-', 'n', "xs.reverse()"},
+            {"clear",   '-', 'n', "xs.clear()"},
+            {"copy",    '-', 'l', "xs.copy()"},
+            {"extend",  'l', 'n', "xs.extend(別のリスト)"},
+            {NULL, 0, 0, NULL},
+        };
+        for (int i = 0; LM[i].name; i++) {
+            if (strcmp(n->name, LM[i].name) != 0) continue;
+
+            int want = LM[i].argk == '-' ? 0 : 1;
+            if (strcmp(n->name, "insert") == 0) want = 2;
+            int nargs = 0;
+            for (Node *a = n->args; a; a = a->next) nargs++;
+            if (nargs != want) {
+                Diag d = {0};
+                d.message = diag_fmt("%s は %d 個の引数を取りますが、%d 個渡されました",
+                                     n->name, want, nargs);
+                d.primary.tok = n->tok;
+                d.primary.label = "引数の個数が違います";
+                d.hint = diag_fmt("%s の形で使ってください", LM[i].usage);
+                diag_fail(&d);
+            }
+
+            // 引数の型検査
+            if (strcmp(n->name, "insert") == 0) {
+                Type *a0 = check_expr(s, n->args);
+                if (a0->kind != TY_INT)
+                    error_at(n->args->tok, "insert の位置は int です（'%s' 型でした）",
+                             type_name(a0));
+                s->expected = ot->elem;
+                Type *a1 = check_expr(s, n->args->next);
+                s->expected = NULL;
+                if (!type_assignable(a1, ot->elem))
+                    error_at(n->args->next->tok,
+                             "'%s' のリストに '%s' は入れられません",
+                             type_name(ot->elem), type_name(a1));
+            } else if (LM[i].argk == 'i') {
+                Type *a0 = check_expr(s, n->args);
+                if (a0->kind != TY_INT)
+                    error_at(n->args->tok, "%s の引数は int です（'%s' 型でした）",
+                             n->name, type_name(a0));
+            } else if (LM[i].argk == 'e') {
+                s->expected = ot->elem;
+                Type *a0 = check_expr(s, n->args);
+                s->expected = NULL;
+                if (!type_assignable(a0, ot->elem))
+                    error_at(n->args->tok, "'%s' のリストから '%s' は探せません",
+                             type_name(ot->elem), type_name(a0));
+            } else if (LM[i].argk == 'l') {
+                Type *a0 = check_expr(s, n->args);
+                if (!type_assignable(a0, ot))
+                    error_at(n->args->tok, "extend には同じ型のリストが必要です"
+                             "（'%s' でした）", type_name(a0));
+            }
+
+            if (LM[i].retk == 'e') return ot->elem;
+            if (LM[i].retk == 'i') return ty_int;
+            if (LM[i].retk == 'l') return ot;
+            return ty_none;
+        }
+    }
+
     if (ot->kind == TY_LIST && strcmp(n->name, "append") == 0) {
         int nargs = 0;
         for (Node *a = n->args; a; a = a->next) nargs++;
@@ -1529,7 +1716,8 @@ static Type *check_method(Sema *s, Node *n) {
                          n->name);
     d.primary.tok = n->tok;
     d.primary.label = "このメソッドは存在しません";
-    d.hint = "組み込みの型で使えるのは list[T] の append だけです"
+    d.hint = "list[T] で使えるのは append / pop / insert / remove / index / "
+             "reverse / clear / copy / extend です"
              "（class のメソッドは自分で定義できます）";
     diag_fail(&d);
 }

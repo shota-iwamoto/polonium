@@ -31,6 +31,7 @@ B_DOT: int = 46
 B_PLUS: int = 43
 B_MINUS: int = 45
 B_LOWER_E: int = 101
+B_LOWER_F: int = 102
 B_UPPER_E: int = 69
 
 # エスケープのヒント（C 版とまったく同じ文字列）。
@@ -444,8 +445,12 @@ class Lexer:
 
     # ── 文字列リテラル ──────────────────────────────────────
 
-    def read_string(mut self) -> None:
+    # ★ 第37章：is_f が真なら f"..."。TK_FSTRING として出し、
+    #   **波括弧はそのまま残します**（中身の式はパーサが読みます）。
+    def read_string_kind(mut self, is_f: bool) -> None:
         start: int = self.pos
+        if is_f:
+            self.pos = self.pos + 1        # 'f' を読み飛ばす
         quote: int = self.at()
         self.pos = self.pos + 1
 
@@ -480,11 +485,17 @@ class Lexer:
             n = n + 1
             self.pos = self.pos + 1
 
-        t: token.Token = self.push(token.TK_STR, start,
+        kind: int = token.TK_STR
+        if is_f:
+            kind = token.TK_FSTRING
+        t: token.Token = self.push(kind, start,
                                    strings.substr(self.src, start,
                                                   self.pos - start))
         t.text = strings.join(parts, "")
         t.slen = n
+
+    def read_string(mut self) -> None:
+        self.read_string_kind(False)
 
     # ── 記号 ────────────────────────────────────────────────
 
@@ -548,6 +559,14 @@ class Lexer:
             if is_digit(self.at()):
                 self.read_int()
                 continue
+
+            # ★ 第37章：f"..." は識別子より **先に**判定する
+            #   （後にすると 'f' が識別子として読まれる）
+            if self.at() == B_LOWER_F:
+                q0: int = self.at_off(1)
+                if q0 == B_QUOTE or q0 == B_SQUOTE:
+                    self.read_string_kind(True)
+                    continue
 
             # ⚠️ 数値より後に判定する（順序を C 版と揃える）
             if is_ident_start(self.at()):

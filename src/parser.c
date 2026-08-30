@@ -147,6 +147,109 @@ static Token *type_name_token(Parser *p, const char *what);
 static Node *type_ref(Parser *p, const char *what);
 
 // primary ::= INT | "(" expr ")"
+// f"..." を連結式に脱糖する（第37章）
+//
+//   f"a{x}b"  →  "a" + str(x) + "b"
+//
+// ★ **パーサだけで完結します。** 新しいノードも、意味解析の規則も、
+//   コード生成の分岐も要りません（elif や複合代入と同じ「脱糖」の手）。
+//
+// ★ 埋め込んだ式は **その場で字句解析し直して**構文解析します。
+//   こうすると f"{a + b * 2}" のような任意の式がそのまま書けます。
+//
+// ⚠️ 中身は必ず str(...) で包みます。パーサの時点では型が分からないためです
+//   （str には str→str の恒等もあるので、文字列を入れても通ります）。
+//
+// ⚠️ 波括弧そのものを書きたいときは {{ }} と重ねます（Python と同じ）。
+static Node *fstring(Parser *p, Token *t) {
+    const char *src = t->text;
+    Node *result = NULL;
+
+    StrBuf lit;
+    sb_init(&lit);
+    int litlen = 0;
+
+    // ここまでの文字列部分を 1 つの項として足す
+    #define FLUSH_LIT()                                                        \
+        do {                                                                   \
+            if (litlen > 0) {                                                  \
+                Node *sn = new_str_node(t, sb_str(&lit), litlen);              \
+                result = result ? new_binop_node(t, OP_ADD, result, sn) : sn;  \
+                sb_init(&lit);                                                 \
+                litlen = 0;                                                    \
+            }                                                                  \
+        } while (0)
+
+    for (const char *q = src; *q;) {
+        if (q[0] == '{' && q[1] == '{') { sb_printf(&lit, "{"); litlen++; q += 2; continue; }
+        if (q[0] == '}' && q[1] == '}') { sb_printf(&lit, "}"); litlen++; q += 2; continue; }
+
+        if (*q == '}') {
+            Diag d = {0};
+            d.message = "f-string に対応しない '}' があります";
+            d.primary.tok = t;
+            d.primary.label = "ここです";
+            d.hint = "'}' そのものを書くには '}}' と重ねてください";
+            diag_fail(&d);
+        }
+
+        if (*q != '{') { sb_printf(&lit, "%c", *q); litlen++; q++; continue; }
+
+        // ── 埋め込み式 ──
+        FLUSH_LIT();
+        q++;                       // '{'
+        const char *ex = q;
+        int depth = 1;
+        while (*q && depth > 0) {
+            if (*q == '{') depth++;
+            else if (*q == '}') depth--;
+            if (depth > 0) q++;
+        }
+        if (depth != 0) {
+            Diag d = {0};
+            d.message = "f-string の '{' が閉じられていません";
+            d.primary.tok = t;
+            d.primary.label = "ここです";
+            diag_fail(&d);
+        }
+        int exlen = (int)(q - ex);
+        q++;                       // '}'
+
+        if (exlen == 0) {
+            Diag d = {0};
+            d.message = "f-string の '{}' が空です";
+            d.primary.tok = t;
+            d.primary.label = "ここに式が必要です";
+            diag_fail(&d);
+        }
+
+        // ⚠️ 部分文字列を字句解析するので、**改行を足して**論理行を閉じます
+        //   （tokenize は行の終わりに NEWLINE を要求します）。
+        StrBuf sub;
+        sb_init(&sub);
+        sb_printf(&sub, "%.*s\n", exlen, ex);
+
+        Parser sp = {0};
+        sp.toks = tokenize(t->file, sb_str(&sub));
+        sp.pos = 0;
+        Node *inner = expr(&sp);
+
+        // ★ 位置は f-string のトークンに揃えます。部分文字列の中の位置を
+        //   そのまま出すと、元のソースに無い行番号になってしまいます。
+        Node *call = new_node(ND_CALL, t);
+        call->name = "str";
+        call->args = inner;
+
+        result = result ? new_binop_node(t, OP_ADD, result, call) : call;
+    }
+    FLUSH_LIT();
+    #undef FLUSH_LIT
+
+    // 中身が空（f""）なら空文字列
+    if (!result) result = new_str_node(t, "", 0);
+    return result;
+}
+
 static Node *primary(Parser *p) {
     // 括弧：優先順位を無視して中身を先に計算させる。
     // 再帰的に expr() を呼び戻すのがポイント（階層の一番上に戻る）。
@@ -177,6 +280,10 @@ static Node *primary(Parser *p) {
     if (t->kind == TK_STR) {
         advance(p);
         return new_str_node(t, t->text, t->slen);
+    }
+    if (t->kind == TK_FSTRING) {
+        advance(p);
+        return fstring(p, t);
     }
 
     // None リテラル（第15章）。
@@ -249,11 +356,27 @@ static Node *postfix(Parser *p) {
     for (;;) {
         Token *open = peek(p);
 
-        // 添字 xs[i]（第10章）
+        // 添字 xs[i]（第10章）とスライス xs[a:b]（第37章）
+        //
+        // ★ どちらも '[' で始まるので、区切りの ':' が出るまでは同じ形です。
+        //   ⚠️ 開始・終端はどちらも省略できます（xs[:3] / xs[2:] / xs[:]）。
         if (consume(p, "[")) {
+            Node *lo = NULL;
+            if (!tok_is(peek(p), ":")) lo = expr(p);
+
+            if (consume(p, ":")) {
+                Node *sl = new_node(ND_SLICE, open);
+                sl->lhs = n;
+                sl->rhs = lo;
+                if (!tok_is(peek(p), "]")) sl->els = expr(p);
+                expect_close(p, "]", open);
+                n = sl;
+                continue;
+            }
+
             Node *idx = new_node(ND_INDEX, open);
             idx->lhs = n;
-            idx->rhs = expr(p);
+            idx->rhs = lo;
             expect_close(p, "]", open);
             n = idx;
             continue;
@@ -475,6 +598,18 @@ static Node *comparison(Parser *p) {
         return new_binop_node(is_tok, op, lhs, rhs);
     }
 
+    // ★ 第37章：in / not in。比較と同じ段に置きます（Python と同じ優先度）。
+    Token *in_tok = peek(p);
+    if (tok_is_kw(in_tok, "in")) {
+        advance(p);
+        return new_binop_node(in_tok, OP_IN, lhs, bitor_expr(p));
+    }
+    if (tok_is_kw(in_tok, "not") && tok_is_kw(peek_at(p, 1), "in")) {
+        advance(p);
+        advance(p);
+        return new_binop_node(in_tok, OP_NOTIN, lhs, bitor_expr(p));
+    }
+
     Token *t = peek(p);
     int op = compare_op(t);
     if (op < 0) return lhs;  // 比較演算子がない
@@ -537,11 +672,35 @@ static Node *or_expr(Parser *p) {
     }
 }
 
-// expr ::= or_expr
+// expr ::= or_expr [ "if" or_expr "else" expr ]
 //
-// ★ 第2章で作った bitor_expr 以下の階層は無変更です。
-//   この関数の 1 行を書き換えて、上に 4 段積んだだけ。
-static Node *expr(Parser *p) { return or_expr(p); }
+// ★ 第37章：三項演算子。**いちばん優先度が低い**ので、or_expr の外側に
+//   1 段だけ積みます。
+//
+// ⚠️ else 側は expr（自分自身）を呼ぶので **右結合**になります。
+//     a if p else b if q else c  →  a if p else (b if q else c)
+//   Python と同じ結合です。左結合にすると読めない式になります。
+static Node *expr(Parser *p) {
+    Node *lhs = or_expr(p);
+    Token *t = peek(p);
+    if (!tok_is_kw(t, "if")) return lhs;
+    advance(p);
+
+    Node *n = new_node(ND_COND, t);
+    n->rhs = lhs;              // 条件が真のときの値（前に書く）
+    n->lhs = or_expr(p);       // 条件
+    if (!consume_kw(p, "else")) {
+        Diag d = {0};
+        d.message = "三項演算子に 'else' がありません";
+        d.primary.tok = peek(p);
+        d.primary.label = "ここに 'else' が必要です";
+        d.hint = "書き方は 'a if 条件 else b' です（値を返す式なので、"
+                 "条件が偽のときの値も必ず要ります）";
+        diag_fail(&d);
+    }
+    n->els = expr(p);          // 偽のときの値
+    return n;
+}
 
 // 論理行の終わり（NEWLINE）を要求する
 static void expect_newline(Parser *p) {
@@ -677,6 +836,47 @@ static Node *simple_stmt(Parser *p) {
     if (tok_is_kw(t0, "break")) { advance(p); return new_node(ND_BREAK, t0); }
     if (tok_is_kw(t0, "continue")) { advance(p); return new_node(ND_CONTINUE, t0); }
     if (tok_is_kw(t0, "pass")) { advance(p); return new_node(ND_PASS, t0); }
+
+    // assert_stmt ::= "assert" expr [ "," expr ]（第37章）
+    //
+    // ★ **パーサで脱糖します。**
+    //     assert cond, msg   →   if not cond: panic(msg)
+    //   新しいノードも意味解析の規則も要りません。elif や複合代入と同じ手です。
+    //
+    // ⚠️ Python の -O のような「assert を消す」切り替えは**入れません**。
+    //   「本番では検査が消える」のは、事故のもとになるためです。
+    if (tok_is_kw(t0, "assert")) {
+        advance(p);
+        Node *cond = expr(p);
+
+        // メッセージ（省略時は位置を入れた既定の文言）
+        Node *msg = NULL;
+        if (tok_is(peek(p), ",")) {
+            advance(p);
+            msg = expr(p);
+        } else {
+            StrBuf sb;
+            sb_init(&sb);
+            sb_printf(&sb, "assertion failed: %s:%d", t0->file, t0->line);
+            msg = new_str_node(t0, sb_str(&sb), (int)strlen(sb_str(&sb)));
+        }
+
+        // panic(msg) を作る
+        Node *call = new_node(ND_CALL, t0);
+        call->name = "panic";
+        call->args = msg;
+
+        // ⚠️ if の本体は **ND_BLOCK** でなければなりません。ふつうに書いた
+        //    if は必ずブロックを持つので、後段（sema / codegen）はそれを
+        //    前提にしています。脱糖でも同じ形にします。
+        Node *body = new_node(ND_BLOCK, t0);
+        body->body = call;
+
+        Node *n = new_node(ND_IF, t0);
+        n->lhs = new_unary_node(t0, OP_NOT, cond);
+        n->body = body;
+        return n;
+    }
 
     // raise_stmt ::= "raise" expr（第27章）
     //

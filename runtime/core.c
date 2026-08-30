@@ -477,6 +477,153 @@ static void pl_list_check(PlList *l, long long i) {
     }
 }
 
+// 部分文字列の位置（第37章：'in' 演算子）。無ければ -1
+//
+// ⚠️ 素朴な走査（O(n·m)）です。KMP のような高速化はしていません。
+//   'in' の用途では入力が短いことがほとんどで、コードの短さを優先しました。
+// ★ 空文字列はどこにでも含まれるので 0 を返します（Python と同じ）。
+long long pl_str_find(const char *hay, const char *needle) {
+    long long n = pl_str_len(hay);
+    long long m = pl_str_len(needle);
+    if (m == 0) return 0;
+    if (m > n) return -1;
+    for (long long i = 0; i + m <= n; i++) {
+        long long k = 0;
+        while (k < m && hay[i + k] == needle[k]) k++;
+        if (k == m) return i;
+    }
+    return -1;
+}
+
+// 部分文字列（第37章）。**新しい文字列を作って返します**
+//
+// ⚠️ 範囲は Python と同じ規則で丸めます。**範囲外でも落ちません**
+//   （添字と違い、スライスは「はみ出したぶんは無い」と読むのが自然なため）。
+//     負の値 → 0、長さを超える → 長さ、開始 > 終端 → 空
+char *pl_str_slice(const char *s, long long lo, long long hi) {
+    long long n = pl_str_len(s);
+    if (lo < 0) lo = 0;
+    if (hi > n) hi = n;
+    if (lo > hi) lo = hi;
+    long long m = hi - lo;
+    char *out = pl_str_alloc(m);
+    pl_memcpy(out, s + lo, m);
+    out[m] = '\0';
+    return out;
+}
+
+// ── 探索（第37章：'in' 演算子と list のメソッド）─────────────
+//
+// ★ 見つかった位置を返し、無ければ -1。'in' はこの結果を >= 0 と比べます。
+//   ⚠️ 位置を返す形にしておくと index() にもそのまま使えます。
+
+long long pl_list_index_i64(PlList *l, long long v) {
+    for (long long i = 0; i < l->len; i++)
+        if (((long long *)l->data)[i] == v) return i;
+    return -1;
+}
+
+// ⚠️ float は **ビットではなく数値として**比べます。ビットで比べると
+//    0.0 と -0.0 が別物になり、NaN が自分自身と一致してしまいます。
+long long pl_list_index_f64(PlList *l, double v) {
+    for (long long i = 0; i < l->len; i++) {
+        double x;
+        long long bits = ((long long *)l->data)[i];
+        pl_memcpy(&x, &bits, 8);
+        if (x == v) return i;
+    }
+    return -1;
+}
+
+// ポインタの同一性で比べます（クラス・list の 'in' はこちら。== と同じ意味）
+long long pl_list_index_ptr(PlList *l, void *v) {
+    for (long long i = 0; i < l->len; i++)
+        if (((void **)l->data)[i] == v) return i;
+    return -1;
+}
+
+// str は **中身**で比べます（== と同じ）
+long long pl_list_index_str(PlList *l, const char *v) {
+    for (long long i = 0; i < l->len; i++) {
+        const char *x = ((const char **)l->data)[i];
+        if (x == v) return i;
+        if (x && v && pl_str_cmp(x, v) == 0) return i;
+    }
+    return -1;
+}
+
+void pl_list_push_i64(PlList *l, long long v);   // 下で定義
+
+// list のスライス（第37章）。**新しい list を作ります**（借用ではありません）
+//
+// ⚠️ 要素をそのまま写すので、参照型なら「同じものを指す 2 つのリスト」に
+//   なります。所有権の観点では借用と同じ扱いが要るため、複製した中身の
+//   解放は行いません（仕様 §6 の一時値と同じ扱い）。
+PlList *pl_list_slice(PlList *l, long long lo, long long hi) {
+    if (lo < 0) lo = 0;
+    if (hi > l->len) hi = l->len;
+    if (lo > hi) lo = hi;
+    PlList *out = pl_list_new();
+    for (long long i = lo; i < hi; i++)
+        pl_list_push_i64(out, ((long long *)l->data)[i]);
+    return out;
+}
+
+// ── list のメソッド（第37章）────────────────────────────────
+
+// 末尾を取り出す（空なら panic）
+long long pl_list_pop(PlList *l) {
+    if (l->len == 0) pl_panic("pop from empty list");
+    return ((long long *)l->data)[--l->len];
+}
+
+// i の位置に差し込む（後ろへずらす）。i == len なら末尾に足すのと同じ
+void pl_list_insert(PlList *l, long long i, long long v) {
+    if (i < 0 || i > l->len) {
+        char buf[80];
+        char *w = buf;
+        const char *m = "insert index out of range: ";
+        while (*m) *w++ = *m++;
+        w += pl_itoa(i, w);
+        *w = '\0';
+        pl_panic(buf);
+    }
+    pl_list_grow(l);
+    for (long long k = l->len; k > i; k--)
+        ((long long *)l->data)[k] = ((long long *)l->data)[k - 1];
+    ((long long *)l->data)[i] = v;
+    l->len++;
+}
+
+// i の位置を取り除いて、その値を返す
+long long pl_list_remove_at(PlList *l, long long i) {
+    pl_list_check(l, i);
+    long long v = ((long long *)l->data)[i];
+    for (long long k = i; k + 1 < l->len; k++)
+        ((long long *)l->data)[k] = ((long long *)l->data)[k + 1];
+    l->len--;
+    return v;
+}
+
+void pl_list_reverse(PlList *l) {
+    for (long long i = 0, j = l->len - 1; i < j; i++, j--) {
+        long long t = ((long long *)l->data)[i];
+        ((long long *)l->data)[i] = ((long long *)l->data)[j];
+        ((long long *)l->data)[j] = t;
+    }
+}
+
+void pl_list_clear(PlList *l) { l->len = 0; }
+
+// 中身を丸ごと写した新しい list
+PlList *pl_list_copy(PlList *l) { return pl_list_slice(l, 0, l->len); }
+
+// 別の list の中身を末尾に足す
+void pl_list_extend(PlList *l, PlList *o) {
+    for (long long i = 0; i < o->len; i++)
+        pl_list_push_i64(l, ((long long *)o->data)[i]);
+}
+
 void pl_list_push_i64(PlList *l, long long v) {
     pl_list_grow(l);
     ((long long *)l->data)[l->len++] = v;

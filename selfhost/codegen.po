@@ -361,6 +361,12 @@ class Emitter:
             #   double を経由しないので、C 版と 1 バイトもずれない。
             return n.sval
 
+        if n.kind == ast.ND_COND:
+            return self.gen_cond(n)
+
+        if n.kind == ast.ND_SLICE:
+            return self.gen_slice(n)
+
         if n.kind == ast.ND_BINOP:
             return self.gen_binop(n)
 
@@ -404,7 +410,136 @@ class Emitter:
         panic("codegen: 式ではないノードです")
         return ""
 
+    # 三項演算子 a if c else b（第37章）
+    #
+    # ★ 作りは and / or の短絡評価と同じ。箱を 1 つ用意して、
+    #   選ばれた側だけがそこに書く（規約 R3：phi を使わない）。
+    def gen_cond(mut self, n: ast.Node) -> str:
+        idn: int = self.label_counter
+        self.label_counter = self.label_counter + 1
+        sid: str = str(idn)
+        then_l: str = "cond.then." + sid
+        else_l: str = "cond.else." + sid
+        end_l: str = "cond.end." + sid
+        res: str = "%cond.result." + sid
+
+        nt: ast.Type = type_of(n)
+        self.allocas.append("  " + res + " = alloca " +
+                            self.llvm_mem_type(nt) + "\n")
+
+        c: str = self.gen_expr(node_of(n.lhs))
+        self.emit_cond_br(c, then_l, else_l)
+
+        self.emit_label(then_l)
+        self.gen_store(nt, self.gen_expr(node_of(n.rhs)), res)
+        self.emit_br(end_l)
+
+        self.emit_label(else_l)
+        self.gen_store(nt, self.gen_expr(node_of(n.els)), res)
+        self.emit_br(end_l)
+
+        self.emit_label(end_l)
+        return self.gen_load(nt, res)
+
+    # 探索関数に渡す形にする。⚠️ float は **double のまま**（数値として比べる）
+    def elem_to_slot_cmp(mut self, elem: ast.Type, v: str) -> str:
+        if elem.kind != ast.TY_BOOL:
+            return v
+        t: str = self.new_tmp()
+        self.emit("  " + t + " = zext i1 " + v + " to i64\n")
+        return t
+
+    # 探索に使うランタイム関数の名前と引数型（in と index で共用）
+    def index_fn(self, el: ast.Type) -> str:
+        if el.kind == ast.TY_FLOAT:
+            return "pl_list_index_f64"
+        if el.kind == ast.TY_STR:
+            return "pl_list_index_str"
+        if self.elem_is_ptr(el):
+            return "pl_list_index_ptr"
+        return "pl_list_index_i64"
+
+    def index_arg_ty(self, el: ast.Type) -> str:
+        if el.kind == ast.TY_FLOAT:
+            return "double"
+        if el.kind == ast.TY_STR:
+            return "ptr"
+        if self.elem_is_ptr(el):
+            return "ptr"
+        return "i64"
+
+    # x in xs / sub in s（第37章）
+    #
+    # ★ どちらも **位置を返すランタイム関数**（無ければ -1）に落として、
+    #   その結果を 0 と比べるだけ。IR に分岐が 1 つも出ない（規約 R10）。
+    def gen_in(mut self, n: ast.Node) -> str:
+        lhs: ast.Node = node_of(n.lhs)
+        rhs: ast.Node = node_of(n.rhs)
+        rt: ast.Type = type_of(rhs)
+        pos: str = self.new_tmp()
+
+        if rt.kind == ast.TY_STR:
+            self.declare_rt("i64 @pl_str_find(ptr, ptr)")
+            hay: str = self.gen_expr(rhs)
+            nee: str = self.gen_expr(lhs)
+            self.emit("  " + pos + " = call i64 @pl_str_find(ptr " + hay +
+                      ", ptr " + nee + ")\n")
+        else:
+            el: ast.Type = ast.elem_of(rt)
+            fname: str = self.index_fn(el)
+            aty: str = self.index_arg_ty(el)
+            self.declare_rt("i64 @" + fname + "(ptr, " + aty + ")")
+            lst: str = self.gen_expr(rhs)
+            v: str = self.elem_to_slot_cmp(el, self.gen_expr(lhs))
+            self.emit("  " + pos + " = call i64 @" + fname + "(ptr " + lst +
+                      ", " + aty + " " + v + ")\n")
+
+        pred: str = "slt"
+        if n.op == ast.OP_IN:
+            pred = "sge"
+        t: str = self.new_tmp()
+        self.emit("  " + t + " = icmp " + pred + " i64 " + pos + ", 0\n")
+        return t
+
+    # xs[a:b] / s[a:b]（第37章）
+    #
+    # ★ 省略された端は「先頭（0）」と「末尾（長さ）」に置き換えてから、
+    #   ランタイムの 1 つの関数に渡す。範囲の丸めもランタイム側の仕事。
+    def gen_slice(mut self, n: ast.Node) -> str:
+        lhs: ast.Node = node_of(n.lhs)
+        is_str: bool = type_of(lhs).kind == ast.TY_STR
+        obj: str = self.gen_expr(lhs)
+
+        lo: str = "0"
+        if n.rhs is not None:
+            lo = self.gen_expr(node_of(n.rhs))
+
+        hi: str = ""
+        if n.els is not None:
+            hi = self.gen_expr(node_of(n.els))
+        else:
+            lenfn: str = "pl_list_len"
+            if is_str:
+                lenfn = "pl_str_len"
+            self.declare_rt("i64 @" + lenfn + "(ptr)")
+            hi = self.new_tmp()
+            self.emit("  " + hi + " = call i64 @" + lenfn + "(ptr " + obj + ")\n")
+
+        slfn: str = "pl_list_slice"
+        if is_str:
+            slfn = "pl_str_slice"
+        self.declare_rt("ptr @" + slfn + "(ptr, i64, i64)")
+        t: str = self.new_tmp()
+        self.emit("  " + t + " = call ptr @" + slfn + "(ptr " + obj + ", i64 " +
+                  lo + ", i64 " + hi + ")\n")
+        return t
+
     def gen_binop(mut self, n: ast.Node) -> str:
+        # ★ 第37章：in / not in。⚠️ **左右をここで評価してはいけない**
+        #   （渡す形が要素の型で変わるので gen_in の中で作る）
+        if n.op == ast.OP_IN or n.op == ast.OP_NOTIN:
+            return self.gen_in(n)
+
         lhs: ast.Node = node_of(n.lhs)
         rhs: ast.Node = node_of(n.rhs)
 
@@ -742,9 +877,76 @@ class Emitter:
                 self.declare_extern(self.llvm_type(type_of(n)), n.ir_name, ats2)
             return self.emit_call(n, strings.join(vals2, ""))
 
-        # list.append（第10章。sema が保証している）
+        # ── list のメソッド（第10章 append／第37章でその他）──
+        #
+        # ★ ランタイム側は **すべて i64 のスロット**で扱う。list の中身が
+        #   「ポインタ 1 個か i64 1 個」という第10章の作りのままなので、
+        #   pop / insert / remove は 1 つの関数で全部の要素型に効く。
         elem: ast.Type = ast.elem_of(ot)
         obj2: str = self.gen_expr(obj_node)
+
+        if n.name == "pop" or n.name == "remove":
+            t1: str = self.new_tmp()
+            if n.name == "pop":
+                self.declare_rt("i64 @pl_list_pop(ptr)")
+                self.emit("  " + t1 + " = call i64 @pl_list_pop(ptr " + obj2 +
+                          ")\n")
+            else:
+                self.declare_rt("i64 @pl_list_remove_at(ptr, i64)")
+                iv0: str = self.gen_expr(node_of(n.args))
+                self.emit("  " + t1 +
+                          " = call i64 @pl_list_remove_at(ptr " + obj2 +
+                          ", i64 " + iv0 + ")\n")
+            if self.elem_is_ptr(elem):
+                pt: str = self.new_tmp()
+                self.emit("  " + pt + " = inttoptr i64 " + t1 + " to ptr\n")
+                return pt
+            return self.slot_to_elem(elem, t1)
+
+        if n.name == "insert":
+            self.declare_rt("void @pl_list_insert(ptr, i64, i64)")
+            ipos: str = self.gen_expr(node_of(n.args))
+            v2: str = self.elem_to_slot(elem,
+                                        self.gen_expr(node_of(
+                                            node_of(n.args).next)))
+            iv2: str = v2
+            if self.elem_is_ptr(elem):
+                iv2 = self.new_tmp()
+                self.emit("  " + iv2 + " = ptrtoint ptr " + v2 + " to i64\n")
+            self.emit("  call void @pl_list_insert(ptr " + obj2 + ", i64 " +
+                      ipos + ", i64 " + iv2 + ")\n")
+            return ""
+
+        if n.name == "index":
+            fname: str = self.index_fn(elem)
+            aty: str = self.index_arg_ty(elem)
+            self.declare_rt("i64 @" + fname + "(ptr, " + aty + ")")
+            v3: str = self.elem_to_slot_cmp(elem, self.gen_expr(node_of(n.args)))
+            t3: str = self.new_tmp()
+            self.emit("  " + t3 + " = call i64 @" + fname + "(ptr " + obj2 +
+                      ", " + aty + " " + v3 + ")\n")
+            return t3
+
+        if n.name == "reverse":
+            self.declare_rt("void @pl_list_reverse(ptr)")
+            self.emit("  call void @pl_list_reverse(ptr " + obj2 + ")\n")
+            return ""
+        if n.name == "clear":
+            self.declare_rt("void @pl_list_clear(ptr)")
+            self.emit("  call void @pl_list_clear(ptr " + obj2 + ")\n")
+            return ""
+        if n.name == "copy":
+            self.declare_rt("ptr @pl_list_copy(ptr)")
+            t4: str = self.new_tmp()
+            self.emit("  " + t4 + " = call ptr @pl_list_copy(ptr " + obj2 +
+                      ")\n")
+            return t4
+        if n.name == "extend":
+            self.declare_rt("void @pl_list_extend(ptr, ptr)")
+            o2: str = self.gen_expr(node_of(n.args))
+            self.emit("  call void @pl_list_extend(ptr " + obj2 + ", ptr " +
+                      o2 + ")\n")
+            return ""
 
         sty: str = self.slot_ty(elem)
         push: str = "pl_list_push_i64"

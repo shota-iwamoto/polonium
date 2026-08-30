@@ -434,6 +434,11 @@ static void declare_rt(Emitter *e, const char *sig) {
 // 即値（"42"）とレジスタ（"%t0"）を同じ char * で扱えるので、
 // 呼び出し側で場合分けが不要になります。
 static char *gen_logical(Emitter *e, Node *n);
+static char *gen_cond(Emitter *e, Node *n);      // 第37章：三項演算子
+static char *gen_in(Emitter *e, Node *n);        // 第37章：in / not in
+static char *gen_slice(Emitter *e, Node *n);     // 第37章：スライス
+static bool elem_is_ptr(Type *elem);
+static char *elem_to_slot_cmp(Emitter *e, Type *elem, char *v);
 static char *gen_call(Emitter *e, Node *n);
 static char *gen_list_lit(Emitter *e, Node *n);
 static char *gen_index(Emitter *e, Node *n);
@@ -458,6 +463,10 @@ static char *gen_expr(Emitter *e, Node *n) {
         }
 
         case ND_BINOP: {
+            // ★ 第37章：in / not in。⚠️ **左右をここで評価してはいけません。**
+            //   渡す形が要素の型で変わるので、gen_in の中で作ります。
+            if (n->op == OP_IN || n->op == OP_NOTIN) return gen_in(e, n);
+
             // ★ 第15章：is / is not は「null と比べる」だけ。1 命令で済みます。
             if (n->op == OP_IS || n->op == OP_ISNOT) {
                 char *v = gen_expr(e, n->lhs);
@@ -549,6 +558,9 @@ static char *gen_expr(Emitter *e, Node *n) {
         case ND_LOGICAL:
             return gen_logical(e, n);
 
+        case ND_COND:
+            return gen_cond(e, n);
+
         case ND_CALL:
             return gen_call(e, n);
 
@@ -557,6 +569,9 @@ static char *gen_expr(Emitter *e, Node *n) {
 
         case ND_INDEX:
             return gen_index(e, n);
+
+        case ND_SLICE:
+            return gen_slice(e, n);
 
         case ND_METHOD:
             return gen_method(e, n);
@@ -657,6 +672,116 @@ static char *gen_logical(Emitter *e, Node *n) {
     return gen_load(e, ty_bool, res);
 }
 
+// xs[a:b] / s[a:b]（第37章）
+//
+// ★ 省略された端は「先頭（0）」と「末尾（長さ）」に置き換えてから、
+//   ランタイムの 1 つの関数に渡します。範囲の丸めもランタイム側の仕事です
+//   （規約 R10：分岐を IR に出さない）。
+static char *gen_slice(Emitter *e, Node *n) {
+    bool is_str = n->lhs->type->kind == TY_STR;
+    char *obj = gen_expr(e, n->lhs);
+
+    char *lo = n->rhs ? gen_expr(e, n->rhs) : "0";
+
+    char *hi;
+    if (n->els) {
+        hi = gen_expr(e, n->els);
+    } else {
+        // 終端の省略は「長さ」
+        declare_rt(e, is_str ? "i64 @pl_str_len(ptr)" : "i64 @pl_list_len(ptr)");
+        hi = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call i64 @%s(ptr %s)\n", hi,
+                  is_str ? "pl_str_len" : "pl_list_len", obj);
+    }
+
+    declare_rt(e, is_str ? "ptr @pl_str_slice(ptr, i64, i64)"
+                         : "ptr @pl_list_slice(ptr, i64, i64)");
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call ptr @%s(ptr %s, i64 %s, i64 %s)\n", t,
+              is_str ? "pl_str_slice" : "pl_list_slice", obj, lo, hi);
+    return t;
+}
+
+// x in xs / sub in s（第37章）
+//
+// ★ どちらも **位置を返すランタイム関数**（見つからなければ -1）に落として、
+//   その結果を 0 と比べるだけにします。IR に分岐が 1 つも出ません（規約 R10）。
+static char *gen_in(Emitter *e, Node *n) {
+    Type *rt = n->rhs->type;
+    char *pos = new_tmp(e);
+
+    if (rt->kind == TY_STR) {
+        declare_rt(e, "i64 @pl_str_find(ptr, ptr)");
+        char *hay = gen_expr(e, n->rhs);
+        char *nee = gen_expr(e, n->lhs);
+        sb_printf(&e->fn, "  %s = call i64 @pl_str_find(ptr %s, ptr %s)\n",
+                  pos, hay, nee);
+    } else {
+        // list[T]。要素の型で呼び分けます
+        Type *el = rt->elem;
+        const char *fn_name;
+        const char *aty;
+        if (el->kind == TY_FLOAT) {
+            fn_name = "pl_list_index_f64";
+            aty = "double";
+        } else if (el->kind == TY_STR) {
+            fn_name = "pl_list_index_str";
+            aty = "ptr";
+        } else if (elem_is_ptr(el)) {
+            fn_name = "pl_list_index_ptr";
+            aty = "ptr";
+        } else {
+            fn_name = "pl_list_index_i64";
+            aty = "i64";
+        }
+        StrBuf sig;
+        sb_init(&sig);
+        sb_printf(&sig, "i64 @%s(ptr, %s)", fn_name, aty);
+        declare_rt(e, sb_str(&sig));
+
+        char *lst = gen_expr(e, n->rhs);
+        char *v = elem_to_slot_cmp(e, el, gen_expr(e, n->lhs));
+        sb_printf(&e->fn, "  %s = call i64 @%s(ptr %s, %s %s)\n", pos, fn_name,
+                  lst, aty, v);
+    }
+
+    // 見つかった（>= 0）か。not in なら逆にする
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = icmp %s i64 %s, 0\n", t,
+              n->op == OP_IN ? "sge" : "slt", pos);
+    return t;
+}
+
+// 三項演算子 a if c else b（第37章）
+//
+// ★ 作りは and / or の短絡評価とまったく同じです。**箱を 1 つ用意して、
+//   選ばれた側だけがそこに書く**（規約 R3：phi を使わない）。
+//   選ばれなかった側は **評価もされません**（Python と同じ）。
+static char *gen_cond(Emitter *e, Node *n) {
+    int id = e->label_counter++;
+    char then_l[32], else_l[32], end_l[32], res[40];
+    snprintf(then_l, sizeof(then_l), "cond.then.%d", id);
+    snprintf(else_l, sizeof(else_l), "cond.else.%d", id);
+    snprintf(end_l, sizeof(end_l), "cond.end.%d", id);
+    snprintf(res, sizeof(res), "%%cond.result.%d", id);
+
+    sb_printf(&e->allocas, "  %s = alloca %s\n", res, llvm_mem_type(n->type));
+
+    char *c = gen_expr(e, n->lhs);
+    emit_cond_br(e, c, then_l, else_l);
+
+    emit_label(e, then_l);
+    gen_store(e, n->type, gen_expr(e, n->rhs), res);
+    emit_br(e, end_l);
+
+    emit_label(e, else_l);
+    gen_store(e, n->type, gen_expr(e, n->els), res);
+    emit_br(e, end_l);
+
+    emit_label(e, end_l);
+    return gen_load(e, n->type, res);
+}
+
 // ── list[T] の生成（第10章）────────────────────────────────
 //
 // ★ 要素はすべて 8 バイト。i64 で持つか、ポインタで持つかの 2 通りだけです。
@@ -671,6 +796,16 @@ static bool elem_is_ptr(Type *elem) {
 }
 
 // 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる。規約 R5）
+// 探索関数に渡す形にする。
+// ⚠️ elem_to_slot と違い、**float は double のまま**渡します
+//   （数値として比べたいので、ビットに崩しません）。
+static char *elem_to_slot_cmp(Emitter *e, Type *elem, char *v) {
+    if (elem->kind != TY_BOOL) return v;
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = zext i1 %s to i64\n", t, v);
+    return t;
+}
+
 static char *elem_to_slot(Emitter *e, Type *elem, char *v) {
     // ★ float はビットパターンのまま i64 のスロットに入れます。
     //   list の中身は「ポインタ 1 個か i64 1 個」という第10章の作りを
@@ -886,9 +1021,95 @@ static char *gen_method(Emitter *e, Node *n) {
         return emit_call(e, n, sb_str(&args));
     }
 
-    // list.append（第10章。sema が保証している）
+    // ── list のメソッド（第10章 append／第37章でその他）──
+    //
+    // ★ ランタイム側は **すべて i64 のスロット**で扱います。list の中身が
+    //   「ポインタ 1 個か i64 1 個」という第10章の作りのままなので、
+    //   pop / insert / remove は 1 つの関数で全部の要素型に効きます。
+    //   要素の型を意識するのは、値を出し入れするときの変換だけです。
     Type *elem = n->lhs->type->elem;
     char *obj = gen_expr(e, n->lhs);
+
+    if (strcmp(n->name, "pop") == 0 || strcmp(n->name, "remove") == 0) {
+        const char *fn = strcmp(n->name, "pop") == 0 ? "pl_list_pop"
+                                                     : "pl_list_remove_at";
+        char *t = new_tmp(e);
+        if (strcmp(n->name, "pop") == 0) {
+            declare_rt(e, "i64 @pl_list_pop(ptr)");
+            sb_printf(&e->fn, "  %s = call i64 @%s(ptr %s)\n", t, fn, obj);
+        } else {
+            declare_rt(e, "i64 @pl_list_remove_at(ptr, i64)");
+            char *i = gen_expr(e, n->args);
+            sb_printf(&e->fn, "  %s = call i64 @%s(ptr %s, i64 %s)\n", t, fn,
+                      obj, i);
+        }
+        // i64 のスロットから要素の型へ戻す
+        if (elem_is_ptr(elem)) {
+            char *pt = new_tmp(e);
+            sb_printf(&e->fn, "  %s = inttoptr i64 %s to ptr\n", pt, t);
+            return pt;
+        }
+        return slot_to_elem(e, elem, t);
+    }
+
+    if (strcmp(n->name, "insert") == 0) {
+        declare_rt(e, "void @pl_list_insert(ptr, i64, i64)");
+        char *i = gen_expr(e, n->args);
+        char *v = elem_to_slot(e, elem,
+                               maybe_retain(e, n->args->next,
+                                            gen_expr(e, n->args->next)));
+        char *iv = v;
+        if (elem_is_ptr(elem)) {
+            iv = new_tmp(e);
+            sb_printf(&e->fn, "  %s = ptrtoint ptr %s to i64\n", iv, v);
+        }
+        sb_printf(&e->fn,
+                  "  call void @pl_list_insert(ptr %s, i64 %s, i64 %s)\n", obj,
+                  i, iv);
+        return NULL;
+    }
+
+    if (strcmp(n->name, "index") == 0) {
+        Type *el = elem;
+        const char *fn_name;
+        const char *aty;
+        if (el->kind == TY_FLOAT)      { fn_name = "pl_list_index_f64"; aty = "double"; }
+        else if (el->kind == TY_STR)   { fn_name = "pl_list_index_str"; aty = "ptr"; }
+        else if (elem_is_ptr(el))      { fn_name = "pl_list_index_ptr"; aty = "ptr"; }
+        else                           { fn_name = "pl_list_index_i64"; aty = "i64"; }
+        StrBuf sig;
+        sb_init(&sig);
+        sb_printf(&sig, "i64 @%s(ptr, %s)", fn_name, aty);
+        declare_rt(e, sb_str(&sig));
+        char *v = elem_to_slot_cmp(e, el, gen_expr(e, n->args));
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call i64 @%s(ptr %s, %s %s)\n", t, fn_name,
+                  obj, aty, v);
+        return t;
+    }
+
+    if (strcmp(n->name, "reverse") == 0) {
+        declare_rt(e, "void @pl_list_reverse(ptr)");
+        sb_printf(&e->fn, "  call void @pl_list_reverse(ptr %s)\n", obj);
+        return NULL;
+    }
+    if (strcmp(n->name, "clear") == 0) {
+        declare_rt(e, "void @pl_list_clear(ptr)");
+        sb_printf(&e->fn, "  call void @pl_list_clear(ptr %s)\n", obj);
+        return NULL;
+    }
+    if (strcmp(n->name, "copy") == 0) {
+        declare_rt(e, "ptr @pl_list_copy(ptr)");
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call ptr @pl_list_copy(ptr %s)\n", t, obj);
+        return t;
+    }
+    if (strcmp(n->name, "extend") == 0) {
+        declare_rt(e, "void @pl_list_extend(ptr, ptr)");
+        char *o = gen_expr(e, n->args);
+        sb_printf(&e->fn, "  call void @pl_list_extend(ptr %s, ptr %s)\n", obj, o);
+        return NULL;
+    }
 
     const char *sty = slot_ty(elem);
     const char *push = elem_is_ptr(elem) ? "pl_list_push_ptr" : "pl_list_push_i64";

@@ -435,8 +435,12 @@ static const struct {
     {0, 0},
 };
 
-static void read_string(Lexer *lx) {
+// ★ 第37章：is_f が真なら f"..." です。TK_FSTRING として出し、
+//   **波括弧はそのまま残します**（中身の式はパーサが読みます）。
+//   エスケープ（\n など）はここで解決するので、f"a\n{x}" も書けます。
+static void read_string_kind(Lexer *lx, bool is_f) {
     const char *start = lx->p;
+    if (is_f) lx->p++;        // 'f' を読み飛ばす
     char quote = *lx->p;
     lx->p++;  // 開き引用符
 
@@ -484,10 +488,13 @@ static void read_string(Lexer *lx) {
         lx->p++;
     }
 
-    Token *t = tv_push(lx, TK_STR, start, (int)(lx->p - start));
+    Token *t = tv_push(lx, is_f ? TK_FSTRING : TK_STR, start,
+                       (int)(lx->p - start));
     t->text = sb_str(&sb);
     t->slen = len;
 }
+
+static void read_string(Lexer *lx) { read_string_kind(lx, false); }
 
 // ── 記号の読み取り ──────────────────────────────────────────
 
@@ -627,6 +634,13 @@ TokenVec tokenize(const char *file, const char *src) {
         //
         // ⚠️ 数値より後に判定すること。先にすると 123 の 1 文字目で
         //    識別子の判定に失敗するだけですが、順序を意識する習慣をつけます。
+        // ★ 第37章：f"..." は識別子より **先に**判定します。
+        //   後にすると 'f' が識別子として読まれてしまいます。
+        if (*lx.p == 'f' && (lx.p[1] == '"' || lx.p[1] == '\'')) {
+            read_string_kind(&lx, true);
+            continue;
+        }
+
         if (is_ident_start(*lx.p)) {
             read_ident(&lx);
             continue;
@@ -707,6 +721,7 @@ const char *token_kind_name(TokenKind kind) {
         case TK_IDENT: return "IDENT";
         case TK_KEYWORD: return "KEYWORD";
         case TK_STR: return "STR";
+        case TK_FSTRING: return "FSTRING";
         case TK_NEWLINE: return "NEWLINE";
         case TK_INDENT: return "INDENT";
         case TK_DEDENT: return "DEDENT";

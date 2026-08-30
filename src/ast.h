@@ -74,6 +74,8 @@ typedef enum {
 
     // ⚠️ 追加は**末尾に**。selfhost/ast.po が値を明示しているためです。
     ND_FLOAT,   // 浮動小数点リテラル → sval（正規化済みの文字列。lexer.c 参照）
+    ND_COND,    // 三項演算子 a if c else b → lhs（条件）, rhs（真）, els（偽）
+    ND_SLICE,   // xs[a:b] → lhs（対象）, rhs（開始。省略時 NULL）, els（終端。省略時 NULL）
 } NodeKind;
 
 // 演算子の種類。
@@ -116,6 +118,11 @@ typedef enum {
     OP_POS,     // +x
     OP_BITNOT,  // ~x
     OP_NOT,     // not x
+
+    // ★ 第37章：所属の検査。⚠️ **OP_EQ〜OP_GE の連続には入れません**
+    //   （is_compare が enum の並びに依存しているため。ast.h 123 行の注意）
+    OP_IN,      // x in xs
+    OP_NOTIN,   // x not in xs
 } OpKind;
 
 // 比較演算子か。

@@ -15,7 +15,8 @@ TK_STR: int = 5
 TK_NEWLINE: int = 6
 TK_INDENT: int = 7
 TK_DEDENT: int = 8
-TK_FLOAT: int = 9   # 第34章。C 版の TokenKind と同じ値にすること
+TK_FLOAT: int = 9    # 第34章。C 版の TokenKind と同じ値にすること
+TK_FSTRING: int = 10  # 第37章。f"..."（波括弧は残したまま）
 
 # --dump-tokens に出す名前（C 版の token_kind_name と同じ文字列）
 def kind_name(kind: int) -> str:
@@ -39,6 +40,8 @@ def kind_name(kind: int) -> str:
         return "DEDENT"
     if kind == TK_FLOAT:
         return "FLOAT"
+    if kind == TK_FSTRING:
+        return "FSTRING"
     panic("token.kind_name: unknown kind")
     return ""
 

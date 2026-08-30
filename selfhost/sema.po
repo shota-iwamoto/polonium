@@ -65,6 +65,8 @@ class Sema:
             Builtin("str", ast.TY_INT, ast.TY_STR, "pl_str_from_int"),
             Builtin("str", ast.TY_BOOL, ast.TY_STR, "pl_str_from_bool"),
             Builtin("str", ast.TY_FLOAT, ast.TY_STR, "pl_str_from_float"),
+            # ★ 第37章：str(str) は複製。f-string が型を知らずに包めるように
+            Builtin("str", ast.TY_STR, ast.TY_STR, "pl_str_copy"),
             Builtin("int", ast.TY_STR, ast.TY_INT, "pl_str_to_int"),
             # 第34章：int ↔ float。⚠️ 暗黙変換はしないので必ずここを通す
             Builtin("int", ast.TY_FLOAT, ast.TY_INT, "pl_int_from_float"),
@@ -490,7 +492,89 @@ class Sema:
                         "比較を書いてください（例: x != 0）")
         return self.ty_bool()
 
+    # x in xs / sub in s（第37章）
+    #
+    # ★ 右辺の型で意味が変わります。list[T] なら要素に等しいものがあるか、
+    #   str なら部分文字列として含まれるか。
+    # ⚠️ dict には使えません（d.has(k) を使う）。
+    def check_in(mut self, n: ast.Node) -> ast.Type:
+        l: ast.Type = self.check_expr(unwrap_node(n.lhs))
+        r: ast.Type = self.check_expr(unwrap_node(n.rhs))
+
+        if r.kind == ast.TY_STR:
+            if l.kind != ast.TY_STR:
+                diag.error_at(unwrap_tok(n.tok),
+                              "str の 'in' には str が必要です（左辺は '" +
+                              ast.type_name(l) + "' 型です）")
+            return self.ty_bool()
+        if r.kind == ast.TY_LIST:
+            if not ast.type_assignable(l, ast.elem_of(r)):
+                diag.error_full(unwrap_tok(unwrap_node(n.lhs).tok),
+                                "'in' の左辺が要素の型と合いません",
+                                "これは '" + ast.type_name(l) + "' 型です",
+                                unwrap_node(n.rhs).tok,
+                                "こちらの要素は '" +
+                                ast.type_name(ast.elem_of(r)) + "' 型です", "")
+            return self.ty_bool()
+
+        diag.error_full(unwrap_tok(unwrap_node(n.rhs).tok),
+                        "'" + ast.type_name(r) + "' 型に 'in' は使えません",
+                        "ここには list[T] か str が必要です", None, "",
+                        "dict の鍵を調べるには d.has(k) を使ってください")
+        return self.ty_bool()
+
+    # 三項演算子 a if c else b（第37章）
+    def check_ternary(mut self, n: ast.Node) -> ast.Type:
+        c: ast.Type = self.check_expr(unwrap_node(n.lhs))
+        if c.kind != ast.TY_BOOL:
+            self.bool_required("三項演算子の条件には bool が必要です",
+                               "この 'if' の条件です", n.tok,
+                               unwrap_node(n.lhs), c)
+
+        a: ast.Type = self.check_expr(unwrap_node(n.rhs))
+        b: ast.Type = self.check_expr(unwrap_node(n.els))
+
+        # ★ どちらかが None リテラルなら、もう一方に合わせる
+        if ast.type_assignable(b, a):
+            return a
+        if ast.type_assignable(a, b):
+            return b
+
+        diag.error_full(unwrap_tok(unwrap_node(n.els).tok),
+                        "三項演算子の両側で型が違います",
+                        "こちらは '" + ast.type_name(b) + "' 型です",
+                        unwrap_node(n.rhs).tok,
+                        "こちらは '" + ast.type_name(a) + "' 型です",
+                        "式の型は 1 つに決まらなければなりません" +
+                        "（どちらかを合わせてください）")
+        return a
+
+    # xs[a:b] / s[a:b]（第37章）。⚠️ **新しい値を作ります**（借用ではない）
+    def check_slice(mut self, n: ast.Node) -> ast.Type:
+        t: ast.Type = self.check_expr(unwrap_node(n.lhs))
+        if t.kind != ast.TY_STR and t.kind != ast.TY_LIST:
+            diag.error_full(unwrap_tok(unwrap_node(n.lhs).tok),
+                            "'" + ast.type_name(t) + "' 型はスライスできません",
+                            "ここには str か list[T] が必要です", None, "", "")
+        if n.rhs is not None:
+            a: ast.Type = self.check_expr(unwrap_node(n.rhs))
+            if a.kind != ast.TY_INT:
+                diag.error_at(unwrap_tok(unwrap_node(n.rhs).tok),
+                              "スライスの開始は int です（'" +
+                              ast.type_name(a) + "' 型でした）")
+        if n.els is not None:
+            b: ast.Type = self.check_expr(unwrap_node(n.els))
+            if b.kind != ast.TY_INT:
+                diag.error_at(unwrap_tok(unwrap_node(n.els).tok),
+                              "スライスの終端は int です（'" +
+                              ast.type_name(b) + "' 型でした）")
+        return t
+
     def check_binop(mut self, n: ast.Node) -> ast.Type:
+        # ★ 第37章：in / not in は「両辺が同じ型」ではないので先に分岐
+        if n.op == ast.OP_IN or n.op == ast.OP_NOTIN:
+            return self.check_in(n)
+
         # ★ 第15章：is / is not は型の合わせ方が違うので先に分岐
         if n.op == ast.OP_IS or n.op == ast.OP_ISNOT:
             return self.check_is(n)
@@ -622,6 +706,10 @@ class Sema:
             t = self.ty_int()
         elif n.kind == ast.ND_FLOAT:
             t = self.ty_float()
+        elif n.kind == ast.ND_COND:
+            t = self.check_ternary(n)
+        elif n.kind == ast.ND_SLICE:
+            t = self.check_slice(n)
         elif n.kind == ast.ND_BOOL:
             t = self.ty_bool()
         elif n.kind == ast.ND_STR:
@@ -1375,6 +1463,82 @@ class Sema:
         if ot.kind == ast.TY_CLASS:
             return self.check_class_method(n, unwrap_class(ot.cls))
 
+        # ★ 第37章：list のメソッド。C 版と同じ規則・同じ文言にすること。
+        #   argk: "e"=要素型 / "i"=int / "l"=同じ list / "-"=引数なし
+        #   retk: "e"=要素型 / "i"=int / "n"=None / "l"=同じ list
+        if ot.kind == ast.TY_LIST:
+            names: list[str] = ["pop", "insert", "remove", "index",
+                                "reverse", "clear", "copy", "extend"]
+            argks: list[str] = ["-", "i", "i", "e", "-", "-", "-", "l"]
+            retks: list[str] = ["e", "n", "e", "i", "n", "n", "l", "n"]
+            usages: list[str] = ["xs.pop()", "xs.insert(位置, 値)",
+                                 "xs.remove(位置)", "xs.index(値)",
+                                 "xs.reverse()", "xs.clear()", "xs.copy()",
+                                 "xs.extend(別のリスト)"]
+            mi: int = 0
+            while mi < len(names):
+                if names[mi] == n.name:
+                    el: ast.Type = ast.elem_of(ot)
+                    want: int = 1
+                    if argks[mi] == "-":
+                        want = 0
+                    if n.name == "insert":
+                        want = 2
+                    na: int = count_siblings(n.args)
+                    if na != want:
+                        diag.error_full(unwrap_tok(n.tok),
+                                        n.name + " は " + str(want) +
+                                        " 個の引数を取りますが、" + str(na) +
+                                        " 個渡されました",
+                                        "引数の個数が違います", None, "",
+                                        usages[mi] + " の形で使ってください")
+
+                    if n.name == "insert":
+                        a0: ast.Type = self.check_expr(unwrap_node(n.args))
+                        if a0.kind != ast.TY_INT:
+                            diag.error_at(unwrap_tok(unwrap_node(n.args).tok),
+                                          "insert の位置は int です（'" +
+                                          ast.type_name(a0) + "' 型でした）")
+                        a1n: ast.Node = unwrap_node(unwrap_node(n.args).next)
+                        self.expected = el
+                        a1: ast.Type = self.check_expr(a1n)
+                        self.expected = None
+                        if not ast.type_assignable(a1, el):
+                            diag.error_at(unwrap_tok(a1n.tok),
+                                          "'" + ast.type_name(el) +
+                                          "' のリストに '" + ast.type_name(a1) +
+                                          "' は入れられません")
+                    elif argks[mi] == "i":
+                        b0: ast.Type = self.check_expr(unwrap_node(n.args))
+                        if b0.kind != ast.TY_INT:
+                            diag.error_at(unwrap_tok(unwrap_node(n.args).tok),
+                                          n.name + " の引数は int です（'" +
+                                          ast.type_name(b0) + "' 型でした）")
+                    elif argks[mi] == "e":
+                        self.expected = el
+                        c0: ast.Type = self.check_expr(unwrap_node(n.args))
+                        self.expected = None
+                        if not ast.type_assignable(c0, el):
+                            diag.error_at(unwrap_tok(unwrap_node(n.args).tok),
+                                          "'" + ast.type_name(el) +
+                                          "' のリストから '" + ast.type_name(c0) +
+                                          "' は探せません")
+                    elif argks[mi] == "l":
+                        d0: ast.Type = self.check_expr(unwrap_node(n.args))
+                        if not ast.type_assignable(d0, ot):
+                            diag.error_at(unwrap_tok(unwrap_node(n.args).tok),
+                                          "extend には同じ型のリストが必要です（'" +
+                                          ast.type_name(d0) + "' でした）")
+
+                    if retks[mi] == "e":
+                        return el
+                    if retks[mi] == "i":
+                        return self.ty_int()
+                    if retks[mi] == "l":
+                        return ot
+                    return self.ty_none()
+                mi = mi + 1
+
         if ot.kind == ast.TY_LIST and n.name == "append":
             nargs: int = count_siblings(n.args)
             if nargs != 1:
@@ -1402,7 +1566,8 @@ class Sema:
                         "型 '" + ast.type_name(ot) + "' にメソッド '" + n.name +
                         "' はありません",
                         "このメソッドは存在しません", None, "",
-                        "組み込みの型で使えるのは list[T] の append だけです" +
+                        "list[T] で使えるのは append / pop / insert / remove / " +
+                        "index / reverse / clear / copy / extend です" +
                         "（class のメソッドは自分で定義できます）")
         return self.ty_int()
 

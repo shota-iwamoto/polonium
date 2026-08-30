@@ -250,6 +250,8 @@ ND_EXCEPT: int = 30  # except 節 → type_ref, name（as の名前）, body
 ND_RAISE: int = 31   # raise 文  → lhs
 # ⚠️ 32 / 33 は ND_UNSAFE / ND_PRAGMA（C 版だけが持つ低レベル文）。
 ND_FLOAT: int = 34   # 浮動小数点リテラル → sval（正規化済みの文字列。第34章）
+ND_COND: int = 35    # 三項演算子 a if c else b → lhs（条件）, rhs（真）, els（偽）
+ND_SLICE: int = 36   # xs[a:b] → lhs, rhs（開始）, els（終端）
 
 # ── 仮引数の受け取り方（C 版 ParamMode と同じ順序・同じ値。第21章）──
 PM_BORROW: int = 0   # 既定。読むだけ借りる
@@ -293,6 +295,10 @@ OP_NEG: int = 22
 OP_POS: int = 23
 OP_BITNOT: int = 24
 OP_NOT: int = 25
+# ★ 第37章：所属の検査。⚠️ is_compare は OP_EQ〜OP_GE の連続に
+#   依存しているので、**末尾に**足すこと
+OP_IN: int = 26      # x in xs
+OP_NOTIN: int = 27   # x not in xs
 
 # 比較演算子か（C 版 is_compare。★ OP_EQ 〜 OP_GE が連続していることに依存）
 def is_compare(op: int) -> bool:
@@ -344,6 +350,10 @@ def op_symbol(op: int) -> str:
         return "is"
     if op == OP_ISNOT:
         return "is not"
+    if op == OP_IN:
+        return "in"
+    if op == OP_NOTIN:
+        return "not in"
     if op == OP_NEG:
         return "-"
     if op == OP_POS:
@@ -517,6 +527,18 @@ def dump(n: Node | None, depth: int) -> None:
     elif n.kind == ND_FLOAT:
         # ★ 第34章：正規化済みの文字列をそのまま出す（C 版と同じ形）
         print(pad + "(float " + n.sval + ")")
+    elif n.kind == ND_COND:
+        print(pad + "(cond")
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        dump(n.els, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_SLICE:
+        print(pad + "(slice")
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        dump(n.els, depth + 1)
+        print(pad + ")")
     elif n.kind == ND_BOOL:
         if n.ival != 0:
             print(pad + "(bool True)")

@@ -10,6 +10,7 @@ import strings
 import diag
 import ast
 import token
+import lexer
 
 
 class Parser:
@@ -135,6 +136,97 @@ class Parser:
     # ── 式（優先順位の階層。C 版と同じ順序で並べる）────────
 
     # primary ::= INT | STR | IDENT | None | True | False | "(" expr ")" | list
+    # f"..." を連結式に脱糖する（第37章）
+    #
+    #   f"a{x}b"  →  "a" + str(x) + "b"
+    #
+    # ★ 埋め込んだ式は **その場で字句解析し直して**構文解析します。
+    #   ⚠️ 中身は必ず str(...) で包みます（パーサの時点では型が分からない）。
+    # ⚠️ 波括弧そのものは {{ }} と重ねます（Python と同じ）。
+    def fstring(mut self, t: token.Token) -> ast.Node:
+        src: str = t.text
+        result: ast.Node | None = None
+        lit: list[str] = []
+        i: int = 0
+
+        while i < len(src):
+            c: str = src[i]
+            nx: str = ""
+            if i + 1 < len(src):
+                nx = src[i + 1]
+
+            if c == "{" and nx == "{":
+                lit.append("{")
+                i = i + 2
+                continue
+            if c == "}" and nx == "}":
+                lit.append("}")
+                i = i + 2
+                continue
+            if c == "}":
+                self.fail_full(t, "f-string に対応しない '}' があります",
+                               "ここです", "'}' そのものを書くには '}}' と重ねてください")
+            if c != "{":
+                lit.append(c)
+                i = i + 1
+                continue
+
+            # ── 埋め込み式 ──
+            joined: str = strings.join(lit, "")
+            if len(joined) > 0:
+                sn: ast.Node = ast.new_str_node(t, joined, len(joined))
+                if result is not None:
+                    result = ast.new_binop_node(t, ast.OP_ADD, result, sn)
+                else:
+                    result = sn
+                lit = []
+
+            i = i + 1                      # '{'
+            ex_start: int = i
+            depth: int = 1
+            while i < len(src) and depth > 0:
+                ch: str = src[i]
+                if ch == "{":
+                    depth = depth + 1
+                elif ch == "}":
+                    depth = depth - 1
+                if depth > 0:
+                    i = i + 1
+            if depth != 0:
+                self.fail_full(t, "f-string の '{' が閉じられていません",
+                               "ここです", "")
+            ex: str = strings.substr(src, ex_start, i - ex_start)
+            i = i + 1                      # '}'
+
+            if len(ex) == 0:
+                self.fail_full(t, "f-string の '{}' が空です",
+                               "ここに式が必要です", "")
+
+            # ⚠️ tokenize は行末に改行を要求するので足します
+            sub: Parser = Parser(lexer.tokenize(t.file, ex + "\n"))
+            inner: ast.Node = sub.expr()
+
+            call: ast.Node = ast.new_node(ast.ND_CALL, t)
+            call.name = "str"
+            call.args = inner
+
+            if result is not None:
+                result = ast.new_binop_node(t, ast.OP_ADD, result, call)
+            else:
+                result = call
+
+        joined2: str = strings.join(lit, "")
+        if len(joined2) > 0:
+            sn2: ast.Node = ast.new_str_node(t, joined2, len(joined2))
+            if result is not None:
+                result = ast.new_binop_node(t, ast.OP_ADD, result, sn2)
+            else:
+                result = sn2
+
+        if result is not None:
+            return result
+        return ast.new_str_node(t, "", 0)
+
     def primary(mut self) -> ast.Node:
         open_tok: token.Token | None = self.consume("(")
         if open_tok is not None:
@@ -155,6 +247,9 @@ class Parser:
         if t.kind == token.TK_STR:
             self.advance()
             return ast.new_str_node(t, t.text, t.slen)
+        if t.kind == token.TK_FSTRING:
+            self.advance()
+            return self.fstring(t)
 
         # None リテラル（第15章）
         if t.is_kw("None"):
@@ -210,11 +305,25 @@ class Parser:
         while True:
             open_tok: token.Token = self.peek()
 
-            # 添字 xs[i]（第10章）
+            # 添字 xs[i]（第10章）とスライス xs[a:b]（第37章）
             if self.consume("[") is not None:
+                lo: ast.Node | None = None
+                if not self.peek().is_punct(":"):
+                    lo = self.expr()
+
+                if self.consume(":") is not None:
+                    sl: ast.Node = ast.new_node(ast.ND_SLICE, open_tok)
+                    sl.lhs = n
+                    sl.rhs = lo
+                    if not self.peek().is_punct("]"):
+                        sl.els = self.expr()
+                    self.expect_close("]", open_tok)
+                    n = sl
+                    continue
+
                 idx: ast.Node = ast.new_node(ast.ND_INDEX, open_tok)
                 idx.lhs = n
-                idx.rhs = self.expr()
+                idx.rhs = lo
                 self.expect_close("]", open_tok)
                 n = idx
                 continue
@@ -399,6 +508,16 @@ class Parser:
                 op = ast.OP_ISNOT
             return ast.new_binop_node(is_tok, op, lhs, self.bitor_expr())
 
+        # ★ 第37章：in / not in。比較と同じ段（Python と同じ優先度）
+        in_tok: token.Token = self.peek()
+        if in_tok.is_kw("in"):
+            self.advance()
+            return ast.new_binop_node(in_tok, ast.OP_IN, lhs, self.bitor_expr())
+        if in_tok.is_kw("not") and self.peek_at(1).is_kw("in"):
+            self.advance()
+            self.advance()
+            return ast.new_binop_node(in_tok, ast.OP_NOTIN, lhs, self.bitor_expr())
+
         t: token.Token = self.peek()
         cop: int = self.compare_op(t)
         if cop < 0:
@@ -446,8 +565,27 @@ class Parser:
                 return lhs
         return lhs
 
+    # expr ::= or_expr [ "if" or_expr "else" expr ]（第37章）
+    #
+    # ★ いちばん優先度が低いので or_expr の外側に 1 段だけ積みます。
+    # ⚠️ else 側は expr（自分自身）なので **右結合**（Python と同じ）
     def expr(mut self) -> ast.Node:
-        return self.or_expr()
+        lhs: ast.Node = self.or_expr()
+        t: token.Token = self.peek()
+        if not t.is_kw("if"):
+            return lhs
+        self.advance()
+
+        n: ast.Node = ast.new_node(ast.ND_COND, t)
+        n.rhs = lhs                 # 条件が真のときの値（前に書く）
+        n.lhs = self.or_expr()      # 条件
+        if self.consume_kw("else") is None:
+            diag.error_full(self.peek(), "三項演算子に 'else' がありません",
+                            "ここに 'else' が必要です", None, "",
+                            "書き方は 'a if 条件 else b' です（値を返す式なので、" +
+                            "条件が偽のときの値も必ず要ります）")
+        n.els = self.expr()         # 偽のときの値
+        return n
 
     # ── 文 ──────────────────────────────────────────────────
 
@@ -560,6 +698,35 @@ class Parser:
         if t0.is_kw("pass"):
             self.advance()
             return ast.new_node(ast.ND_PASS, t0)
+
+        # assert_stmt ::= "assert" expr [ "," expr ]（第37章）
+        #
+        # ★ **パーサで脱糖する**：assert cond, msg → if not cond: panic(msg)
+        #   新しいノードも意味解析の規則も要らない（elif と同じ手）。
+        # ⚠️ if の本体は必ず ND_BLOCK にすること（後段がそれを前提にしている）
+        if t0.is_kw("assert"):
+            self.advance()
+            cond: ast.Node = self.expr()
+
+            msg: ast.Node = ast.new_str_node(t0, "", 0)
+            if self.peek().is_punct(","):
+                self.advance()
+                msg = self.expr()
+            else:
+                dm: str = ("assertion failed: " + t0.file + ":" + str(t0.line))
+                msg = ast.new_str_node(t0, dm, len(dm))
+
+            call: ast.Node = ast.new_node(ast.ND_CALL, t0)
+            call.name = "panic"
+            call.args = msg
+
+            body: ast.Node = ast.new_node(ast.ND_BLOCK, t0)
+            body.body = call
+
+            ifn: ast.Node = ast.new_node(ast.ND_IF, t0)
+            ifn.lhs = ast.new_unary_node(t0, ast.OP_NOT, cond)
+            ifn.body = body
+            return ifn
 
         # raise_stmt ::= "raise" expr（第27章）
         if t0.is_kw("raise"):

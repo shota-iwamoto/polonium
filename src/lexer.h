@@ -30,6 +30,7 @@ typedef enum {
     // ⚠️ 追加は**末尾に**。selfhost/token.po が値を明示しているので、
     //    途中に足すと 2 つの実装で番号がずれます。
     TK_FLOAT,    // 浮動小数点リテラル → text（正規化済みの文字列）
+    TK_FSTRING,  // f"..." → text（エスケープ解決済み。波括弧は残す）
 } TokenKind;
 
 typedef struct Token Token;

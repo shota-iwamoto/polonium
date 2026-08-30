@@ -90,6 +90,8 @@ const char *op_symbol(OpKind op) {
         case OP_OR: return "or";
         case OP_IS: return "is";        // 第15章
         case OP_ISNOT: return "is not";
+        case OP_IN: return "in";           // 第37章
+        case OP_NOTIN: return "not in";
         case OP_NEG: return "-";
         case OP_POS: return "+";
         case OP_BITNOT: return "~";
@@ -313,6 +315,23 @@ static void dump(Node *n, int depth) {
         //   （selfhost/ast.po の dump と同じ形にすること）
         case ND_FLOAT:
             printf("(float %s)\n", n->sval);
+            break;
+        // ★ 第37章：三項演算子とスライス。省略された端は (nil) になります。
+        case ND_COND:
+            printf("(cond\n");
+            dump(n->lhs, depth + 1);
+            dump(n->rhs, depth + 1);
+            dump(n->els, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_SLICE:
+            printf("(slice\n");
+            dump(n->lhs, depth + 1);
+            dump(n->rhs, depth + 1);
+            dump(n->els, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
             break;
         case ND_IMPORT:  // 第13章
             printf("(import %s)\n", n->name);
