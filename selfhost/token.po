@@ -71,13 +71,20 @@ class Token:
     ival: int  # TK_INT の値
     slen: int  # text のバイト長
 
-    def init(self, kind: int, file: str, line: int, col: int, src: str,
+    # ⚠️ **file と src を複製してはいけません。**
+    #   トークンごとにソース全体を複製すると、トークン数 × ソース長 で
+    #   **O(n²)** になります（第42章で計測：字句解析だけで 0.55 秒、
+    #   C 版の全工程 0.024 秒に対して 23 倍）。
+    #   ★ どちらも「読むだけ」なので、所有権を受け取って持ち回ります。
+    #     呼び出し側（lexer）は同じ文字列を全トークンに渡すので、
+    #     実体は 1 つのままです。
+    def init(self, kind: int, file: own str, line: int, col: int, src: own str,
              line_start: int, length: int) -> None:
         self.kind = kind
-        self.file = copy(file)
+        self.file = file
         self.line = line
         self.col = col
-        self.src = copy(src)
+        self.src = src
         self.line_start = line_start
         self.len = length
         self.raw = ""
