@@ -778,6 +778,28 @@ static const char *no_implicit_hint(Type *got, Type *want) {
         return diag_fmt("'%s' と '%s' は名前が同じだけの別のクラスです"
                         "（同じ型かどうかは名前ではなく定義で決まります）",
                         got->cls->ir_name, want->cls->ir_name);
+    // ★ 第42章：関数型どうしなら、**どこが違うのか**を言います。
+    //   「暗黙の型変換がありません」では、何を直せばよいか分かりません。
+    if (got->kind == TY_FN && want->kind == TY_FN) {
+        if (got->nparams != want->nparams)
+            return diag_fmt("引数の数が違います（%d 個と %d 個）", got->nparams,
+                            want->nparams);
+        for (int i = 0; i < got->nparams; i++)
+            if (!type_equal(got->params[i], want->params[i]))
+                return diag_fmt("%d 番目の引数の型が違います（'%s' と '%s'）",
+                                i + 1, type_name(got->params[i]),
+                                type_name(want->params[i]));
+        return diag_fmt("戻り型が違います（'%s' と '%s'）", type_name(got->elem),
+                        type_name(want->elem));
+    }
+
+    // ★ 第42章：クラス → インタフェースなら、実装宣言の書き忘れを疑います。
+    if (want->kind == TY_IFACE && got->kind == TY_CLASS)
+        return diag_fmt("'%s' が '%s' を実装すると宣言していません"
+                        "（'class %s(%s):' と書きます）",
+                        got->cls->name, want->iface->name, got->cls->name,
+                        want->iface->name);
+
     return "Polonium には暗黙の型変換がありません（言語仕様 3.5）";
 }
 

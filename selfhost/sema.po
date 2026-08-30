@@ -677,6 +677,31 @@ class Sema:
                         return ("'" + gc.ir_name + "' と '" + wc.ir_name +
                                 "' は名前が同じだけの別のクラスです" +
                                 "（同じ型かどうかは名前ではなく定義で決まります）")
+        # ★ 第42章：関数型どうしなら、**どこが違うのか**を言う。
+        #   「暗黙の型変換がありません」では何を直せばよいか分からない。
+        if got.kind == ast.TY_FN and want.kind == ast.TY_FN:
+            if len(got.params) != len(want.params):
+                return ("引数の数が違います（" + str(len(got.params)) + " 個と " +
+                        str(len(want.params)) + " 個）")
+            fi: int = 0
+            while fi < len(got.params):
+                if not ast.type_equal(got.params[fi], want.params[fi]):
+                    return (str(fi + 1) + " 番目の引数の型が違います（'" +
+                            ast.type_name(got.params[fi]) + "' と '" +
+                            ast.type_name(want.params[fi]) + "'）")
+                fi = fi + 1
+            return ("戻り型が違います（'" + ast.type_name(ast.elem_of(got)) +
+                    "' と '" + ast.type_name(ast.elem_of(want)) + "'）")
+
+        # ★ 第42章：クラス → インタフェースなら、実装宣言の書き忘れを疑う
+        if want.kind == ast.TY_IFACE and got.kind == ast.TY_CLASS:
+            gc2: ast.Class | None = got.cls
+            wi2: ast.Iface | None = want.iface
+            if gc2 is not None and wi2 is not None:
+                return ("'" + gc2.name + "' が '" + wi2.name +
+                        "' を実装すると宣言していません（'class " + gc2.name +
+                        "(" + wi2.name + "):' と書きます）")
+
         return "Polonium には暗黙の型変換がありません（言語仕様 3.5）"
 
     # ── 式の検査 ────────────────────────────────────────────
