@@ -53,7 +53,7 @@ LANG_EXT  := .po
 LANG_CC   := poloniumc
 # ★ 版番号（--version が出す値）。3 か所を揃えること:
 #   ここ / src/langinfo.h の PLC_LANG_VERSION / selfhost/langinfo.po の VERSION
-LANG_VERSION := 0.4.0
+LANG_VERSION := 0.5.0
 CFLAGS  += -DPLC_LANG_NAME='"$(LANG_NAME)"' \
            -DPLC_LANG_EXT='"$(LANG_EXT)"' \
            -DPLC_LANG_CC='"$(LANG_CC)"' \

@@ -122,6 +122,8 @@ class Emitter:
             return "ptr"          # 関数へのポインタ（第38章）
         if t.kind == ast.TY_IFACE:
             return "ptr"          # 実体へのポインタ（第41章）
+        if t.kind == ast.TY_TUPLE:
+            return "ptr"          # 構造体へのポインタ（第44章）
         if t.kind == ast.TY_BOOL:
             return "i1"
         if t.kind == ast.TY_NONE:
@@ -152,6 +154,8 @@ class Emitter:
             return "ptr"          # 第38章
         if t.kind == ast.TY_IFACE:
             return "ptr"          # 第41章
+        if t.kind == ast.TY_TUPLE:
+            return "ptr"          # 第44章
         if t.kind == ast.TY_BOOL:
             return "i8"
         if t.kind == ast.TY_STR:
@@ -377,6 +381,9 @@ class Emitter:
         if n.kind == ast.ND_SLICE:
             return self.gen_slice(n)
 
+        if n.kind == ast.ND_TUPLE:
+            return self.gen_tuple(n)
+
         if n.kind == ast.ND_BINOP:
             return self.gen_binop(n)
 
@@ -519,6 +526,50 @@ class Emitter:
     #
     # ★ 省略された端は「先頭（0）」と「末尾（長さ）」に置き換えてから、
     #   ランタイムの 1 つの関数に渡す。範囲の丸めもランタイム側の仕事。
+    # タプルの LLVM 型を作る（{i64, ptr} のような無名の構造体）
+    #
+    # ★ 名前を付けない。タプルは「並びが同じなら同じ型」なので、
+    #   クラスのように定義を指す必要がないため。
+    def tuple_ty(self, t: ast.Type) -> str:
+        out: str = "{ "
+        i: int = 0
+        while i < len(t.params):
+            if i > 0:
+                out = out + ", "
+            out = out + self.llvm_mem_type(t.params[i])
+            i = i + 1
+        return out + " }"
+
+    # タプル式 (a, b)（第44章）
+    #
+    # ★ ヒープに確保して要素を書き込む。クラスと同じ扱いなので、
+    #   list に入れる・引数で渡す・返す がすべてそのまま通る。
+    def gen_tuple(mut self, n: ast.Node) -> str:
+        t: ast.Type = type_of(n)
+        size: int = 0
+        si: int = 0
+        while si < len(t.params):
+            size = size + ast.type_size(t.params[si])
+            si = si + 1
+
+        self.declare_rt("ptr @pl_alloc(i64)")
+        obj: str = self.new_tmp()
+        self.emit("  " + obj + " = call ptr @pl_alloc(i64 " + str(size) + ")\n")
+
+        ty: str = self.tuple_ty(t)
+        k: int = 0
+        xi: ast.Node | None = n.body
+        while xi is not None:
+            xn: ast.Node = xi
+            v: str = self.gen_expr(xn)
+            pt: str = self.new_tmp()
+            self.emit("  " + pt + " = getelementptr " + ty + ", ptr " + obj +
+                      ", i32 0, i32 " + str(k) + "\n")
+            self.gen_store(t.params[k], v, pt)
+            k = k + 1
+            xi = xn.next
+        return obj
+
     def gen_slice(mut self, n: ast.Node) -> str:
         lhs: ast.Node = node_of(n.lhs)
         is_str: bool = type_of(lhs).kind == ast.TY_STR
@@ -607,6 +658,14 @@ class Emitter:
             self.emit("  " + t + " = icmp " +
                       self.icmp_pred(n.op, self.int_type()) + " i64 " + c +
                       ", 0\n")
+            return t
+
+        # ★ 第44章：float の '**' はランタイムの pl_fpow に落とす。
+        #   ⚠️ libc の pow は使えない（ベアメタルで動く必要があるため）。
+        if n.op == ast.OP_POW and ot.kind == ast.TY_FLOAT:
+            self.declare_rt("double @pl_fpow(double, double)")
+            self.emit("  " + t + " = call double @pl_fpow(double " + l +
+                      ", double " + r + ")\n")
             return t
 
         # ── 検査つきの算術（規約 R10。第9章）──
@@ -707,7 +766,7 @@ class Emitter:
         return (elem.kind == ast.TY_STR or elem.kind == ast.TY_LIST or
                 elem.kind == ast.TY_CLASS or elem.kind == ast.TY_OPT or
                 elem.kind == ast.TY_RC or elem.kind == ast.TY_NULL or
-                elem.kind == ast.TY_IFACE)
+                elem.kind == ast.TY_IFACE or elem.kind == ast.TY_TUPLE)
 
     def slot_ty(self, elem: ast.Type) -> str:
         if self.elem_is_ptr(elem):
@@ -1447,6 +1506,28 @@ class Emitter:
                       self.llvm_type(nt2) + " " + mb + "\n")
             return mt
 
+        # ★ 第44章：print(xs) / str(xs)
+        if n.is_list_str:
+            el: ast.Type = ast.elem_of(type_of(node_of(n.args)))
+            kind: int = 0
+            if el.kind == ast.TY_FLOAT:
+                kind = 1
+            elif el.kind == ast.TY_STR:
+                kind = 2
+            elif el.kind == ast.TY_BOOL:
+                kind = 3
+            lv: str = self.gen_expr(node_of(n.args))
+            if n.name == "print":
+                self.declare_rt("void @pl_print_list(ptr, i64)")
+                self.emit("  call void @pl_print_list(ptr " + lv + ", i64 " +
+                          str(kind) + ")\n")
+                return ""
+            self.declare_rt("ptr @pl_list_str(ptr, i64)")
+            lt: str = self.new_tmp()
+            self.emit("  " + lt + " = call ptr @pl_list_str(ptr " + lv +
+                      ", i64 " + str(kind) + ")\n")
+            return lt
+
         if len(n.builtin) > 0:
             return self.gen_builtin_call(n)
         if n.cls is not None:
@@ -1634,6 +1715,24 @@ class Emitter:
             self.gen_store(type_of(n), v3, n.ir_name)
             return ""
 
+        # ★ 第44章：分解代入 q, r = f()
+        #   右辺を **1 回だけ**評価し、各要素を取り出してそれぞれの箱に入れる。
+        if n.kind == ast.ND_UNPACK:
+            uobj: str = self.gen_expr(node_of(n.rhs))
+            uty: str = self.tuple_ty(type_of(n))
+            uk: int = 0
+            uvi: ast.Node | None = n.params
+            while uvi is not None:
+                uvn: ast.Node = uvi
+                upt: str = self.new_tmp()
+                self.emit("  " + upt + " = getelementptr " + uty + ", ptr " +
+                          uobj + ", i32 0, i32 " + str(uk) + "\n")
+                uval: str = self.gen_load(type_of(uvn), upt)
+                self.gen_store(type_of(uvn), uval, uvn.ir_name)
+                uk = uk + 1
+                uvi = uvn.next
+            return ""
+
         if n.kind == ast.ND_ASSIGN:
             v4: str = self.gen_expr(node_of(n.rhs))
             target: ast.Node = node_of(n.lhs)
@@ -1670,6 +1769,15 @@ class Emitter:
         if node.kind == ast.ND_VARDECL and not node.is_global:
             self.allocas.append("  " + node.ir_name + " = alloca " +
                                 self.llvm_mem_type(type_of(node)) + "\n")
+
+        # ★ 第44章：分解代入で受け取る名前も、ふつうの局所変数と同じ箱が要る
+        if node.kind == ast.ND_UNPACK:
+            avi: ast.Node | None = node.params
+            while avi is not None:
+                avn: ast.Node = avi
+                self.allocas.append("  " + avn.ir_name + " = alloca " +
+                                    self.llvm_mem_type(type_of(avn)) + "\n")
+                avi = avn.next
 
         # ★ 第27章：except ... as e で束縛する変数にも箱が要る
         if node.kind == ast.ND_EXCEPT and len(node.ir_name) > 0:

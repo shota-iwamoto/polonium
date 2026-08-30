@@ -172,6 +172,29 @@ $ printf 'hello\nworld\n' | ./count
 > カーネル側（`runtime/core.c` の 4 フック）には含めていません。
 > 入力の無い環境に「使わないのに実装させる」ことを避けるためです。
 
+### `input()` との使い分け
+
+`input()` は **import なしで使える組み込み関数**です（Python と同じ形）。
+
+```python
+def main() -> int:
+    name: str = input("名前: ")     # プロンプトは省略できます
+    print("hello, " + name)
+    return 0
+```
+
+| | `input()` | `io.read_line()` |
+|---|---|---|
+| import | 要りません | `import io` |
+| プロンプト | 出せます | 出せません |
+| EOF | **`panic` します** | `None` を返します |
+| 向く場面 | 対話的に 1 つ聞く | 入力を最後まで読む |
+
+> **⚠️ EOF で落ちるのは意図的です。** 静かに空文字を返すと、
+> `while` で読み続ける書き方が**止まらなくなります**。
+> 読めないかもしれない場面では `io.read_line()` を使ってください
+> （Python の `input()` が `EOFError` を投げるのと同じ考え方です）。
+
 ---
 
 ## sys

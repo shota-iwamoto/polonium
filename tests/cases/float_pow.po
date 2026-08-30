@@ -1,0 +1,16 @@
+# OUTPUT: 8.0
+# OUTPUT: 1.414214
+# OUTPUT: 1.0
+# OUTPUT: 0.25
+# EXIT: 0
+# 第44章：float の '**'
+#
+# ⚠️ libc の pow は使えない（ベアメタルで動く必要がある）ので、
+#   ランタイムに pl_fpow を自前で置いている。
+
+def main() -> int:
+    print(2.0 ** 3.0)
+    print(2.0 ** 0.5)
+    print(5.0 ** 0.0)
+    print(2.0 ** -2.0)
+    return 0

@@ -746,18 +746,64 @@ class Parser:
             rz.lhs = self.expr()
             return rz
 
-        # return_stmt ::= "return" [ expr ]
+        # return_stmt ::= "return" [ expr { "," expr } ]
+        #
+        # ★ 第44章：カンマで並べるとタプルになる（複数戻り値）。
         if t0.is_kw("return"):
             self.advance()
             r: ast.Node = ast.new_node(ast.ND_RETURN, t0)
             # 値の有無は「次が改行か」で判断する
             if self.peek().kind != token.TK_NEWLINE:
-                r.lhs = self.expr()
+                first: ast.Node = self.expr()
+                if self.peek().is_punct(","):
+                    tup: ast.Node = ast.new_node(ast.ND_TUPLE, t0)
+                    tup.body = first
+                    rtail: ast.Node = first
+                    while self.consume(",") is not None:
+                        nxt: ast.Node = self.expr()
+                        rtail.next = nxt
+                        rtail = nxt
+                    r.lhs = tup
+                else:
+                    r.lhs = first
             return r
 
         # IDENT の次が ':' なら変数宣言（2 トークン先読み）
         if self.peek().kind == token.TK_IDENT and self.peek_at(1).is_punct(":"):
             return self.var_decl()
+
+        # ★ 第44章：分解代入 q, r = divmod(17, 5)
+        #
+        # ⚠️ **宣言も兼ねる**（型は右辺のタプルから決まる）。宣言と代入を
+        #   分けている言語だが、ここで型注釈を書かせると
+        #     q: int, r: int = ...
+        #   となって Python から離れすぎる。**右辺から決まるものは書かせない**、
+        #   という判断（roadmap.md §0 の ③）。
+        if self.peek().kind == token.TK_IDENT and self.peek_at(1).is_punct(","):
+            ut: token.Token = self.peek()
+            up: ast.Node = ast.new_node(ast.ND_UNPACK, ut)
+            utail: ast.Node | None = None
+            while True:
+                nm: token.Token = self.peek()
+                if nm.kind != token.TK_IDENT:
+                    self.fail_hint(nm, "受け取る名前を書いてください（例: q, r = f()）",
+                                   "名前が必要です")
+                self.advance()
+                v: ast.Node = ast.new_node(ast.ND_VARDECL, nm)
+                v.name = copy(nm.text)
+                if utail is None:
+                    up.params = v
+                else:
+                    utail.next = v
+                utail = v
+                if self.consume(",") is None:
+                    break
+            if self.consume("=") is None:
+                self.fail_hint(self.peek(),
+                               "分解代入は 'q, r = f()' の形で書きます",
+                               "'=' が必要です")
+            up.rhs = self.expr()
+            return up
 
         lhs: ast.Node = self.expr()
         t: token.Token = self.peek()
@@ -1122,6 +1168,39 @@ class Parser:
 
     # type_ref ::= [ IDENT "." ] IDENT [ "[" type_ref "]" ] [ "|" None ]
     def type_ref(mut self, what: str) -> ast.Node:
+        # ★ 第44章：タプル型 (A, B)
+        #   ⚠️ **1 要素のタプルは書けない。** (int) は「括弧で囲んだ int」と
+        #     区別できないため。Python の (1,) のような記法は入れない。
+        tuo: token.Token = self.peek()
+        if tuo.is_punct("("):
+            self.advance()
+            tn: ast.Node = ast.new_node(ast.ND_TYPEREF, tuo)
+            tn.name = "(tuple)"
+            ttail: ast.Node | None = None
+            while True:
+                ta: ast.Node = self.type_ref("タプルの要素の型を書いてください")
+                slot: ast.Node = ast.new_node(ast.ND_TYPEREF, ta.tok)
+                slot.lhs = ta
+                if ttail is None:
+                    tn.targs = slot
+                else:
+                    ttail.next = slot
+                ttail = slot
+                if self.consume(",") is None:
+                    break
+            self.expect_close(")", tuo)
+            cnt: int = 0
+            ci: ast.Node | None = tn.targs
+            while ci is not None:
+                cn: ast.Node = ci
+                cnt = cnt + 1
+                ci = cn.next
+            if cnt < 2:
+                self.fail_hint(tuo,
+                               "2 つ以上の型を書いてください（1 要素のタプルはありません）",
+                               "タプルの要素が " + str(cnt) + " 個です")
+            return tn
+
         # ★ 第38章：関数型 fn(A, B) -> C
         #
         # ⚠️ 'fn' は **予約語にしていません。** 型の位置でだけ、識別子 "fn" の

@@ -143,6 +143,10 @@ class Sema:
             Builtin("hash", ast.TY_INT, ast.TY_INT, "pl_hash_i64"),
             Builtin("hash", ast.TY_FLOAT, ast.TY_INT, "pl_hash_f64"),
             Builtin("hash", ast.TY_BOOL, ast.TY_INT, "pl_hash_i64"),
+            # ★ 第44章：input(プロンプト) — Python と同じ形。
+            #   ⚠️ EOF では panic する。読めないかもしれない場面では
+            #     io.read_line()（None が返る）を使うこと。
+            Builtin("input", ast.TY_STR, ast.TY_STR, "pl_input"),
             Builtin("copy", ast.TY_STR, ast.TY_STR, "pl_str_copy")]
 
     # ── プリミティブ型のシングルトン ────────────────────────
@@ -660,6 +664,21 @@ class Sema:
                                    "'" + ast.type_name(rel) + "' は rc に入れられません")
             return ast.type_rc(rel)
 
+        # ★ 第44章：タプル型 (A, B)
+        if tr.name == "(tuple)":
+            tt: ast.Type = ast.Type(ast.TY_TUPLE)
+            tai: ast.Node | None = tr.targs
+            while tai is not None:
+                tan: ast.Node = tai
+                et: ast.Type = self.resolve_type(unwrap_node(tan.lhs))
+                if et.kind == ast.TY_NONE:
+                    diag.error_at_hint(unwrap_tok(tan.tok),
+                                       "None 型の値は存在しないので要素にできません",
+                                       "タプルの要素に None は使えません")
+                tt.params.append(et)
+                tai = tan.next
+            return tt
+
         # ★ 第40章：型引数の名前（class Dict[K, V] の K）。
         #   ⚠️ **クラス名より先に**引く。テンプレートを読む間だけ有効。
         tb: TBinds | None = self.tbind
@@ -791,10 +810,12 @@ class Sema:
         if t.kind == ast.TY_INT:
             return op != ast.OP_TRUEDIV
         # ★ float は int のちょうど裏返し。'/' が使えて '//' '%' とビット演算が使えない
-        #   ⚠️ '**' は int 専用（pow をランタイムに持たないため。C 版と同じ）
+        #   ★ 第44章：'**' は float でも使える。ランタイムに pl_fpow を自前で
+        #     置いた（libc の pow はベアメタルで使えないため）。
         if t.kind == ast.TY_FLOAT:
             return (op == ast.OP_ADD or op == ast.OP_SUB or
-                    op == ast.OP_MUL or op == ast.OP_TRUEDIV)
+                    op == ast.OP_MUL or op == ast.OP_TRUEDIV or
+                    op == ast.OP_POW)
         # ★ 第39章：str は連結（+）と繰り返し（*）
         if t.kind == ast.TY_STR:
             return op == ast.OP_ADD or op == ast.OP_MUL
@@ -869,6 +890,59 @@ class Sema:
         return a
 
     # xs[a:b] / s[a:b]（第37章）。⚠️ **新しい値を作ります**（借用ではない）
+    # タプル式 a, b（第44章）
+    #
+    # ★ 期待型（左辺や戻り型）が分かっていれば、それに合わせて要素を検査する。
+    #   分からなければ、そのまま要素の型を並べたタプルになる。
+    def check_tuple(mut self, n: mut ast.Node) -> ast.Type:
+        want: ast.Type | None = self.expected
+        n_elems: int = 0
+        ei: ast.Node | None = n.body
+        while ei is not None:
+            en: ast.Node = ei
+            n_elems = n_elems + 1
+            ei = en.next
+
+        has_want: bool = False
+        wt: ast.Type = self.ty_int()
+        if want is not None:
+            wt = want
+            if wt.kind == ast.TY_TUPLE:
+                has_want = True
+
+        if has_want and len(wt.params) != n_elems:
+            diag.error_full(unwrap_tok(n.tok),
+                            "タプルの要素の数が違います（" + str(n_elems) +
+                            " 個と " + str(len(wt.params)) + " 個）",
+                            "ここは " + str(n_elems) + " 個です", None, "",
+                            "'" + ast.type_name(wt) + "' が必要です")
+
+        t: ast.Type = ast.Type(ast.TY_TUPLE)
+        k: int = 0
+        xi: ast.Node | None = n.body
+        while xi is not None:
+            xn: ast.Node = xi
+            if has_want:
+                self.expected = wt.params[k]
+            else:
+                self.expected = None
+            et: ast.Type = self.check_expr(xn)
+            self.expected = None
+            if has_want:
+                if not ast.type_assignable(et, wt.params[k]):
+                    diag.error_full(unwrap_tok(xn.tok),
+                                    "タプルの " + str(k + 1) + " 番目の型が合いません",
+                                    "これは '" + ast.type_name(et) + "' 型です",
+                                    None, "",
+                                    "ここには '" + ast.type_name(wt.params[k]) +
+                                    "' が必要です")
+                t.params.append(wt.params[k])
+            else:
+                t.params.append(et)
+            k = k + 1
+            xi = xn.next
+        return t
+
     def check_slice(mut self, n: ast.Node) -> ast.Type:
         t: ast.Type = self.check_expr(unwrap_node(n.lhs))
         if t.kind != ast.TY_STR and t.kind != ast.TY_LIST:
@@ -1060,6 +1134,8 @@ class Sema:
             t = self.check_ternary(n)
         elif n.kind == ast.ND_SLICE:
             t = self.check_slice(n)
+        elif n.kind == ast.ND_TUPLE:
+            t = self.check_tuple(n)
         elif n.kind == ast.ND_BOOL:
             t = self.ty_bool()
         elif n.kind == ast.ND_STR:
@@ -1317,6 +1393,8 @@ class Sema:
     def check_stmt(mut self, n: mut ast.Node) -> None:
         if n.kind == ast.ND_VARDECL:
             self.check_vardecl(n)
+        elif n.kind == ast.ND_UNPACK:
+            self.check_unpack(n)
         elif n.kind == ast.ND_ASSIGN:
             self.check_assign(n)
         elif n.kind == ast.ND_BLOCK:
@@ -1555,6 +1633,15 @@ class Sema:
 
     def check_builtin_call(mut self, n: mut ast.Node) -> ast.Type:
         nargs: int = count_siblings(n.args)
+
+        # ★ 第44章：input() は引数なしでも書ける（Python と同じ）。
+        #   ⚠️ 引数を省いたときは、空のプロンプトを渡したことにする。
+        if n.name == "input" and nargs == 0:
+            empty: ast.Node = ast.new_str_node(n.tok, "", 0)
+            empty.type = self.ty_str()
+            n.args = empty
+            nargs = 1
+
         if nargs != 1:
             diag.error_full(unwrap_tok(n.tok),
                             n.name + " は 1 個の引数を取りますが、" + str(nargs) +
@@ -1564,6 +1651,28 @@ class Sema:
 
         arg: ast.Node = unwrap_node(n.args)
         at: ast.Type = self.check_expr(arg)
+
+        # ★ 第44章：print(xs) / str(xs) — list をそのまま表示できるようにする。
+        #   ⚠️ 要素の型ごとにランタイム関数を呼び分けるので、**要素が
+        #     int / float / str / bool のときだけ**。入れ子（list[list[int]]）は
+        #     要素をさらに文字列にする手立てが要るので、ここで弾く。
+        if at.kind == ast.TY_LIST and (n.name == "print" or n.name == "str"):
+            ek: int = ast.elem_of(at).kind
+            if (ek != ast.TY_INT and ek != ast.TY_FLOAT and
+                    ek != ast.TY_STR and ek != ast.TY_BOOL):
+                diag.error_full(unwrap_tok(arg.tok),
+                                "'" + ast.type_name(at) + "' はそのまま " +
+                                n.name + " できません",
+                                "要素が '" + ast.type_name(ast.elem_of(at)) +
+                                "' 型です", None, "",
+                                "そのまま出せるのは list[int] / list[float] / " +
+                                "list[str] / list[bool] だけです。" +
+                                "ほかは for でまわしてください")
+            n.is_list_str = True
+            if n.name == "print":
+                return self.ty_none()
+            return self.ty_str()
+
         i: int = 0
         while i < len(self.builtins):
             b: Builtin = self.builtins[i]
@@ -2256,6 +2365,39 @@ class Sema:
         return unwrap_type(f.ret)
 
     # return の検査
+    # 分解代入 q, r = f()（第44章）
+    #
+    # ★ **宣言も兼ねる。** 型は右辺のタプルから決まるので書かせない
+    #   （roadmap.md §0 の ③：右辺から決まるものは書かせない）。
+    def check_unpack(mut self, n: mut ast.Node) -> None:
+        rhs: ast.Node = unwrap_node(n.rhs)
+        rt: ast.Type = self.check_expr(rhs)
+        if rt.kind != ast.TY_TUPLE:
+            diag.error_full(unwrap_tok(rhs.tok),
+                            "分解代入の右辺がタプルではありません",
+                            "これは '" + ast.type_name(rt) + "' 型です", None, "",
+                            "分解できるのは (A, B) を返すものだけです" +
+                            "（複数の値を返す関数を書いてください）")
+
+        nvars: int = count_siblings(n.params)
+        if nvars != len(rt.params):
+            diag.error_full(unwrap_tok(n.tok),
+                            "受け取る数が合いません（" + str(nvars) + " 個と " +
+                            str(len(rt.params)) + " 個）",
+                            "ここは " + str(nvars) + " 個です", None, "",
+                            "右辺は '" + ast.type_name(rt) + "' です")
+
+        k: int = 0
+        vi: ast.Node | None = n.params
+        while vi is not None:
+            vn: ast.Node = vi
+            e: types.VarEntry = self.declare(vn.name, rt.params[k], vn.tok)
+            vn.ir_name = e.ir_name
+            vn.type = rt.params[k]
+            k = k + 1
+            vi = vn.next
+        n.type = rt
+
     def check_return(mut self, n: ast.Node) -> None:
         fn: types.FuncSig = unwrap_sig(self.cur_func)
         want: ast.Type = unwrap_type(fn.ret)
@@ -3208,8 +3350,11 @@ def sema_program(mods: module.Module | None, entry: module.Module | None) -> Non
     while len(s.pending) > 0:
         batch: list[Instance] = s.pending
         s.pending = []                  # ★ 先に外す（この回の分だけを処理する）
-        k: int = 0
-        while k < len(batch):
+        # ⚠️ **新しく積んだものから**処理する。C 版は連結リストの先頭に
+        #   足して先頭から辿るので、この向きでないと実体を出す順番が
+        #   C 版とずれる（IR が 1 バイト単位で一致しなくなる）。
+        k: int = len(batch) - 1
+        while k >= 0:
             it: Instance = batch[k]
             io2: types.ModuleSyms | None = it.owner
             if io2 is not None:
@@ -3229,7 +3374,7 @@ def sema_program(mods: module.Module | None, entry: module.Module | None) -> Non
                     mm3 = m3.next
             s.tbind = None
             s.inst_site = None
-            k = k + 1
+            k = k - 1
 
     # ★ 第41章：vtable の長さを codegen に伝える
     ast.set_iface_slots(s.next_slot)
