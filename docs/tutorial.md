@@ -40,7 +40,7 @@ hello, polonium
 
 ```bash
 $ poloniumc --version
-poloniumc 0.3.0 (stage0)
+poloniumc 0.4.0 (stage0)
 target: x86_64-apple-macosx26.0.0
 ```
 
