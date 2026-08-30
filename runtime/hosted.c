@@ -144,6 +144,22 @@ char *pl_read_line(void) {
     return out;
 }
 
+// input(prompt) — プロンプトを出して 1 行読む（第44章）
+//
+// ★ Python の input() に合わせます。
+//   ⚠️ **EOF では panic します。** Python も EOFError を投げます。
+//     「読めなかった」を静かに空文字列にすると、ループが止まらなくなります。
+//     読めないかもしれない場面では io.read_line()（None が返る）を使ってください。
+char *pl_input(const char *prompt) {
+    if (prompt && prompt[0]) {
+        fputs(prompt, stdout);
+        fflush(stdout);
+    }
+    char *line = pl_read_line();
+    if (!line) pl_panic("input: 入力がありません（EOF）");
+    return line;
+}
+
 // 標準入力を最後まで読む。何も無ければ空文字列。
 char *pl_read_all(void) {
     long long cap = 4096;

@@ -904,17 +904,64 @@ static Node *simple_stmt(Parser *p) {
         return n;
     }
 
-    // return_stmt ::= "return" [ expr ]
+    // return_stmt ::= "return" [ expr { "," expr } ]
+    //
+    // ★ 第44章：カンマで並べるとタプルになります（複数戻り値）。
     if (tok_is_kw(t0, "return")) {
         advance(p);
         Node *n = new_node(ND_RETURN, t0);
         // 値の有無は「次が改行か」で判断する
-        if (peek(p)->kind != TK_NEWLINE) n->lhs = expr(p);
+        if (peek(p)->kind != TK_NEWLINE) {
+            Node *first = expr(p);
+            if (tok_is(peek(p), ",")) {
+                Node *tup = new_node(ND_TUPLE, t0);
+                tup->body = first;
+                Node *tail = first;
+                while (consume(p, ",")) {
+                    tail->next = expr(p);
+                    tail = tail->next;
+                }
+                n->lhs = tup;
+            } else {
+                n->lhs = first;
+            }
+        }
         return n;
     }
 
     // IDENT の次が ':' なら変数宣言。2 トークン先読みで判別する。
     if (peek(p)->kind == TK_IDENT && tok_is(peek_at(p, 1), ":")) return var_decl(p);
+
+    // ★ 第44章：分解代入 q, r = divmod(17, 5)
+    //
+    // ⚠️ **宣言も兼ねます**（型は右辺のタプルから決まります）。宣言と代入を
+    //   分けている言語ですが、ここで型注釈を書かせると
+    //     q: int, r: int = ...
+    //   となって Python から離れすぎます。**右辺から決まるものは書かせない**、
+    //   という判断です（roadmap.md §0 の ③）。
+    if (peek(p)->kind == TK_IDENT && tok_is(peek_at(p, 1), ",")) {
+        Token *ut = peek(p);
+        Node *n = new_node(ND_UNPACK, ut);
+        Node *tail = NULL;
+        for (;;) {
+            Token *nm = peek(p);
+            if (nm->kind != TK_IDENT)
+                error_at_hint(nm, "受け取る名前を書いてください（例: q, r = f()）",
+                              "名前が必要です");
+            advance(p);
+            Node *v = new_node(ND_VARDECL, nm);
+            v->name = nm->text;
+            if (tail) tail->next = v; else n->params = v;
+            tail = v;
+            if (!consume(p, ",")) break;
+        }
+        if (!consume(p, "="))
+            error_at_hint(peek(p),
+                          "分解代入は 'q, r = f()' の形で書きます",
+                          "'=' が必要です");
+        n->rhs = expr(p);
+        return n;
+    }
 
     Node *lhs = expr(p);
     Token *t = peek(p);
@@ -1454,6 +1501,33 @@ static Token *type_name_token(Parser *p, const char *what) {
 //   文字列 1 個では表せません。再帰下降なら再帰 1 行で読めます。
 // ★ 第13章：モジュール修飾（lexer.Token）が書けるようになりました。
 static Node *type_ref(Parser *p, const char *what) {
+    // ★ 第44章：タプル型 (A, B)
+    //   ⚠️ **1 要素のタプルは書けません。** (int) は「括弧で囲んだ int」と
+    //     区別できないためです。Python の (1,) のような記法は入れません。
+    Token *tuo = peek(p);
+    if (tok_is(tuo, "(")) {
+        advance(p);
+        Node *n = new_node(ND_TYPEREF, tuo);
+        n->name = "(tuple)";
+        Node *tail = NULL;
+        for (;;) {
+            Node *a = type_ref(p, "タプルの要素の型を書いてください");
+            Node *slot = new_node(ND_TYPEREF, a->tok);
+            slot->lhs = a;
+            if (tail) tail->next = slot; else n->targs = slot;
+            tail = slot;
+            if (!consume(p, ",")) break;
+        }
+        expect_close(p, ")", tuo);
+        int cnt = 0;
+        for (Node *a = n->targs; a; a = a->next) cnt++;
+        if (cnt < 2)
+            error_at_hint(tuo,
+                          "2 つ以上の型を書いてください（1 要素のタプルはありません）",
+                          "タプルの要素が %d 個です", cnt);
+        return n;
+    }
+
     // ★ 第38章：関数型 fn(A, B) -> C
     //
     // ⚠️ 'fn' は **予約語にしていません。** 型の位置でだけ、識別子 "fn" の

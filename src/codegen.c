@@ -162,6 +162,7 @@ static const char *llvm_type(Type *t) {
         case TY_FLOAT: return "double";  // IEEE 754 倍精度
         case TY_FN: return "ptr";        // 関数へのポインタ（第38章）
         case TY_IFACE: return "ptr";     // 実体へのポインタ（第41章）
+        case TY_TUPLE: return "ptr";     // 構造体へのポインタ（第44章）
         case TY_BOOL: return "i1";   // レジスタ上は 1 ビット
         case TY_NONE: return "void";  // 値がない（第8章）
         case TY_STR: return "ptr";    // 参照型（第9章）
@@ -186,6 +187,7 @@ static const char *llvm_mem_type(Type *t) {
         case TY_FLOAT: return "double";
         case TY_FN: return "ptr";   // 第38章
         case TY_IFACE: return "ptr";  // 第41章
+        case TY_TUPLE: return "ptr";  // 第44章
         case TY_BOOL: return "i8";  // メモリ上は 1 バイト
         case TY_STR: return "ptr";  // ポインタをそのまま置く（第9章）
         case TY_LIST: return "ptr"; // 第10章
@@ -442,6 +444,7 @@ static char *gen_logical(Emitter *e, Node *n);
 static char *gen_cond(Emitter *e, Node *n);      // 第37章：三項演算子
 static char *gen_in(Emitter *e, Node *n);        // 第37章：in / not in
 static char *gen_slice(Emitter *e, Node *n);     // 第37章：スライス
+static char *gen_tuple(Emitter *e, Node *n);     // 第44章：タプル
 static bool elem_is_ptr(Type *elem);
 static char *elem_to_slot_cmp(Emitter *e, Type *elem, char *v);
 static char *gen_call(Emitter *e, Node *n);
@@ -541,6 +544,16 @@ static char *gen_expr(Emitter *e, Node *n) {
             // ★ 0 除算は SIGFPE でプロセスが死にます。何が起きたか分からない
             //   より、メッセージを出して死ぬほうが親切です。分岐を IR に出さず、
             //   ランタイム関数に押し込むのが R10 の実践です。
+            // ★ 第44章：float の '**' はランタイムの pl_fpow に落とします。
+            //   ⚠️ libc の pow は使えません（ベアメタルで動く必要があるため）。
+            if (n->op == OP_POW && ot->kind == TY_FLOAT) {
+                declare_rt(e, "double @pl_fpow(double, double)");
+                sb_printf(&e->fn,
+                          "  %s = call double @pl_fpow(double %s, double %s)\n",
+                          t, l, r);
+                return t;
+            }
+
             if (n->op == OP_FLOORDIV || n->op == OP_MOD || n->op == OP_POW) {
                 const char *fn = n->op == OP_FLOORDIV ? "pl_floordiv"
                                  : n->op == OP_MOD    ? "pl_mod"
@@ -601,6 +614,9 @@ static char *gen_expr(Emitter *e, Node *n) {
 
         case ND_SLICE:
             return gen_slice(e, n);
+
+        case ND_TUPLE:
+            return gen_tuple(e, n);
 
         case ND_METHOD:
             return gen_method(e, n);
@@ -707,6 +723,45 @@ static char *gen_logical(Emitter *e, Node *n) {
     // ④ 合流点
     emit_label(e, end_l);
     return gen_load(e, ty_bool, res);
+}
+
+// タプルの LLVM 型を作る（{i64, ptr} のような無名の構造体）
+//
+// ★ 名前を付けません。タプルは「並びが同じなら同じ型」なので、
+//   クラスのように定義を指す必要がないためです。
+static const char *tuple_ty(Type *t) {
+    StrBuf sb;
+    sb_init(&sb);
+    sb_printf(&sb, "{ ");
+    for (int i = 0; i < t->nparams; i++)
+        sb_printf(&sb, "%s%s", i ? ", " : "", llvm_mem_type(t->params[i]));
+    sb_printf(&sb, " }");
+    return sb_str(&sb);
+}
+
+// タプル式 (a, b)（第44章）
+//
+// ★ ヒープに確保して要素を書き込みます。クラスと同じ扱いなので、
+//   list に入れる・引数で渡す・返す がすべてそのまま通ります。
+static char *gen_tuple(Emitter *e, Node *n) {
+    Type *t = n->type;
+    int size = 0;
+    for (int i = 0; i < t->nparams; i++) size += type_size(t->params[i]);
+
+    declare_rt(e, "ptr @pl_alloc(i64)");
+    char *obj = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call ptr @pl_alloc(i64 %d)\n", obj, size);
+
+    const char *ty = tuple_ty(t);
+    int k = 0;
+    for (Node *x = n->body; x; x = x->next, k++) {
+        char *v = gen_expr(e, x);
+        char *pt = new_tmp(e);
+        sb_printf(&e->fn, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n", pt,
+                  ty, obj, k);
+        gen_store(e, t->params[k], v, pt);
+    }
+    return obj;
 }
 
 // xs[a:b] / s[a:b]（第37章）
@@ -831,7 +886,7 @@ static bool elem_is_ptr(Type *elem) {
     return elem->kind == TY_STR || elem->kind == TY_LIST ||
            elem->kind == TY_CLASS || elem->kind == TY_OPT ||
            elem->kind == TY_RC || elem->kind == TY_NULL ||
-           elem->kind == TY_IFACE;
+           elem->kind == TY_IFACE || elem->kind == TY_TUPLE;
 }
 
 // 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる。規約 R5）
@@ -2029,6 +2084,28 @@ static char *gen_call(Emitter *e, Node *n) {
         return t;
     }
 
+    // ★ 第44章：print(xs) / str(xs)
+    if (n->is_list_str) {
+        Type *el = n->args->type->elem;
+        int kind = el->kind == TY_FLOAT ? 1
+                 : el->kind == TY_STR   ? 2
+                 : el->kind == TY_BOOL  ? 3
+                                        : 0;
+        char *v = gen_expr(e, n->args);
+        bool is_print = strcmp(n->name, "print") == 0;
+        declare_rt(e, is_print ? "void @pl_print_list(ptr, i64)"
+                               : "ptr @pl_list_str(ptr, i64)");
+        if (is_print) {
+            sb_printf(&e->fn, "  call void @pl_print_list(ptr %s, i64 %d)\n", v,
+                      kind);
+            return NULL;
+        }
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call ptr @pl_list_str(ptr %s, i64 %d)\n", t, v,
+                  kind);
+        return t;
+    }
+
     if (n->builtin) return gen_builtin_call(e, n);
     if (n->cls) return gen_new(e, n);  // ★ 第12章：インスタンス生成
 
@@ -2227,6 +2304,24 @@ static char *gen_stmt(Emitter *e, Node *n) {
             return NULL;
         }
 
+        // ★ 第44章：分解代入 q, r = f()
+        //   右辺を **1 回だけ**評価し、各要素を取り出してそれぞれの箱に入れます。
+        case ND_UNPACK: {
+            char *obj = gen_expr(e, n->rhs);
+            const char *ty = tuple_ty(n->type);
+            int k = 0;
+            for (Node *v = n->params; v; v = v->next, k++) {
+                char *pt = new_tmp(e);
+                sb_printf(&e->fn,
+                          "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n", pt,
+                          ty, obj, k);
+                char *val = gen_load(e, v->type, pt);
+                gen_store(e, v->type, val, v->ir_name);
+                scope_add(e, v);
+            }
+            return NULL;
+        }
+
         case ND_ASSIGN: {
             char *val = maybe_retain(e, n->rhs, gen_expr(e, n->rhs));
 
@@ -2294,6 +2389,12 @@ static void collect_allocas(Emitter *e, Node *n) {
     if (n->kind == ND_VARDECL && !n->is_global)
         sb_printf(&e->allocas, "  %s = alloca %s\n", n->ir_name,
                   llvm_mem_type(n->type));
+
+    // ★ 第44章：分解代入で受け取る名前も、ふつうの局所変数と同じ箱が要ります
+    if (n->kind == ND_UNPACK)
+        for (Node *v = n->params; v; v = v->next)
+            sb_printf(&e->allocas, "  %s = alloca %s\n", v->ir_name,
+                      llvm_mem_type(v->type));
 
     // ★ 第27章：except ... as e で束縛する変数も、ふつうの局所変数と同じ箱が要ります。
     if (n->kind == ND_EXCEPT && n->ir_name)

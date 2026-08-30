@@ -406,6 +406,84 @@ long long pl_ipow(long long base, long long exp) {
     return r;
 }
 
+// float のべき乗（第44章）
+//
+// ★ **libc の pow は使えません**（ベアメタルで動く必要があるため）。
+//   lib/math.po と同じ手で自前に持ちます:
+//     指数が整数なら **繰り返し二乗法**（負の底も扱える／誤差も小さい）
+//     そうでなければ exp(y·log(x))
+//
+// ⚠️ math.po の exp / log と **同じアルゴリズム**にしてあります。
+//   片方だけ直すと `2.0 ** 0.5` と `math.pow(2.0, 0.5)` がずれます。
+static double pl_exp_(double x) {
+    if (x != x) return x;
+    if (x > 710.0) return 1.0e308 * 10.0;
+    if (x < -746.0) return 0.0;
+
+    const double LN2 = 0.6931471805599453;
+    double q = x / LN2;
+    long long k = (long long)(q >= 0 ? q + 0.5 : q - 0.5);
+    double r = x - (double)k * LN2;
+
+    double term = 1.0, s = 1.0;
+    for (int n = 1; n <= 14; n++) {
+        term = term * r / (double)n;
+        s += term;
+    }
+    // 2^k を掛ける
+    double out = s;
+    if (k >= 0) for (long long i = 0; i < k; i++) out *= 2.0;
+    else        for (long long i = 0; i < -k; i++) out /= 2.0;
+    return out;
+}
+
+static double pl_log_(double x) {
+    double inf = 1.0e308 * 10.0;
+    if (x != x || x < 0.0) return inf - inf;   // NaN
+    if (x == 0.0) return -inf;
+    if (x > 1.0e308) return x;
+
+    const double LN2 = 0.6931471805599453;
+    double m = x;
+    long long k = 0;
+    while (m >= 2.0) { m /= 2.0; k++; }
+    while (m < 1.0)  { m *= 2.0; k--; }
+
+    double z = (m - 1.0) / (m + 1.0);
+    double z2 = z * z, term = z, s = z;
+    for (int n = 3; n <= 33; n += 2) {
+        term *= z2;
+        s += term / (double)n;
+    }
+    return 2.0 * s + (double)k * LN2;
+}
+
+double pl_fpow(double x, double y) {
+    if (y == 0.0) return 1.0;
+    if (x != x || y != y) return x != x ? x : y;   // NaN
+    if (x == 1.0) return 1.0;
+
+    // 指数が整数なら繰り返し二乗法（負の底もここで扱える）
+    double ty = y < 0 ? -y : y;
+    if (ty <= 1024.0 && (double)(long long)ty == ty) {
+        long long n = (long long)ty;
+        double base = x, r = 1.0;
+        while (n > 0) {
+            if (n & 1) r *= base;
+            base *= base;
+            n >>= 1;
+        }
+        return y < 0.0 ? 1.0 / r : r;
+    }
+
+    if (x < 0.0) {
+        double inf = 1.0e308 * 10.0;
+        return inf - inf;      // 負の数の非整数乗は実数にならない → NaN
+    }
+    if (x == 0.0) return y > 0.0 ? 0.0 : 1.0e308 * 10.0;
+    return pl_exp_(y * pl_log_(x));
+}
+
 // ── プロセス ───────────────────────────────────────────────
 
 
@@ -567,6 +645,84 @@ long long pl_list_index_str(PlList *l, const char *v) {
 }
 
 void pl_list_push_i64(PlList *l, long long v);   // 下で定義
+
+// ── list を文字列にする（第44章）──────────────────────────────
+//
+// ★ `print(xs)` / `str(xs)` のためのものです。要素の型ごとに 1 本ずつ
+//   用意します。**要素の型はコンパイル時に決まっている**ので、
+//   どれを呼ぶかは codegen が選べます。
+//
+// ⚠️ 形は Python に寄せます: [1, 2, 3] / ["a", "b"] / [True, False]
+//   文字列だけ引用符で囲むのは、空文字や空白を含む要素が見えるようにするためです。
+//
+// ⚠️ **入れ子（list[list[int]]）は対象外です。** 要素をさらに文字列に
+//   する手立てが要るためで、sema が先に弾きます。
+
+// 組み立て用の可変長バッファ（この節の中だけで使う）
+typedef struct {
+    char *p;
+    long long len;
+    long long cap;
+} SBuf;
+
+static void sb_need(SBuf *b, long long n) {
+    if (b->len + n <= b->cap) return;
+    long long ncap = b->cap ? b->cap * 2 : 64;
+    while (ncap < b->len + n) ncap *= 2;
+    char *np = pl_alloc(ncap);
+    pl_memcpy(np, b->p, b->len);
+    b->p = np;
+    b->cap = ncap;
+}
+
+static void sb_put(SBuf *b, const char *s, long long n) {
+    sb_need(b, n);
+    pl_memcpy(b->p + b->len, s, n);
+    b->len += n;
+}
+
+static void sb_putc(SBuf *b, char c) { sb_put(b, &c, 1); }
+
+static char *sb_finish(SBuf *b) {
+    char *out = pl_str_alloc(b->len);
+    pl_memcpy(out, b->p, b->len);
+    out[b->len] = '\0';
+    return out;
+}
+
+// 要素の種類。codegen が数で渡します
+//   0 = int / 1 = float / 2 = str / 3 = bool
+char *pl_list_str(PlList *l, long long kind) {
+    SBuf b = {0};
+    sb_putc(&b, '[');
+    for (long long i = 0; i < l->len; i++) {
+        if (i) sb_put(&b, ", ", 2);
+        long long raw = ((long long *)l->data)[i];
+        char tmp[64];
+        if (kind == 0) {
+            sb_put(&b, tmp, pl_itoa(raw, tmp));
+        } else if (kind == 1) {
+            double d;
+            pl_memcpy(&d, &raw, 8);
+            sb_put(&b, tmp, pl_ftoa(d, tmp));
+        } else if (kind == 2) {
+            const char *s = (const char *)raw;
+            sb_putc(&b, '"');
+            if (s) sb_put(&b, s, pl_str_len(s));
+            sb_putc(&b, '"');
+        } else {
+            const char *t = raw ? "True" : "False";
+            sb_put(&b, t, pl_cstr_len(t));
+        }
+    }
+    sb_putc(&b, ']');
+    return sb_finish(&b);
+}
+
+void pl_print_list(PlList *l, long long kind) {
+    char *s = pl_list_str(l, kind);
+    pl_print_str(s);
+}
 
 // ── ハッシュ（第42章）────────────────────────────────────────
 //

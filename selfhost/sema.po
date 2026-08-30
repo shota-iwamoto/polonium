@@ -454,6 +454,25 @@ class Sema:
         # T そのもの
         if tr.name == name and tr.lhs is None:
             return actual
+        # ★ 第43章：関数型 fn(A) -> B。**引数と戻り型の両方**を見る。
+        #   これが無いと map_to[T, U](xs: list[T], f: fn(T) -> U) の U が
+        #   決められない（U は f の戻り型にしか現れない）。
+        if tr.name == "fn" and actual.kind == ast.TY_FN:
+            fi: int = 0
+            fa: ast.Node | None = tr.body
+            while fa is not None:
+                fan: ast.Node = fa
+                if fi < len(actual.params):
+                    got: ast.Type | None = self.unify_tparam(name, fan,
+                                                             actual.params[fi])
+                    if got is not None:
+                        return got
+                fi = fi + 1
+                fa = fan.next
+            if tr.rhs is not None and actual.elem is not None:
+                return self.unify_tparam(name, tr.rhs, ast.elem_of(actual))
+            return None
+
         # list[T] / rc[T] → 中身を見る
         if tr.lhs is not None and actual.elem is not None:
             return self.unify_tparam(name, tr.lhs, ast.elem_of(actual))
@@ -1984,6 +2003,13 @@ class Sema:
             return self.check_new(n, c)
 
         f: types.FuncSig | None = self.lookup_func_in(ms, n.name)
+
+        # ★ 第43章：他のモジュールのジェネリック関数も実体化する。
+        #   ⚠️ 実体はテンプレートのモジュールに作られるので、呼ぶ側から見ると
+        #     ふつうの「他モジュールの関数」になる。
+        if f is not None and f.tmpl is not None:
+            f = self.instantiate_func(f, n)
+
         if f is None:
             hint: str = "そのモジュールのトップレベルに def があるか確認してください"
             if self.lookup_global_in(ms, n.name) is not None:

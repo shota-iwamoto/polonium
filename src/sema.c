@@ -643,6 +643,21 @@ static bool unify_tparam(const char *name, Node *decl_tr, Type *actual,
         *out = actual;
         return true;
     }
+    // ★ 第43章：関数型 fn(A) -> B。**引数と戻り型の両方**を見ます。
+    //   これが無いと map_to[T, U](xs: list[T], f: fn(T) -> U) の U が
+    //   決められません（U は f の戻り型にしか現れないため）。
+    if (decl_tr->name && strcmp(decl_tr->name, "fn") == 0 &&
+        actual->kind == TY_FN) {
+        int i = 0;
+        for (Node *a = decl_tr->body; a; a = a->next, i++) {
+            if (i >= actual->nparams) break;
+            if (unify_tparam(name, a, actual->params[i], out)) return true;
+        }
+        if (decl_tr->rhs && actual->elem)
+            return unify_tparam(name, decl_tr->rhs, actual->elem, out);
+        return false;
+    }
+
     // list[T] / rc[T] / ptr[T] → 中身を見る
     if (decl_tr->lhs && actual->elem)
         return unify_tparam(name, decl_tr->lhs, actual->elem, out);
@@ -763,6 +778,25 @@ static Type *resolve_base_type(Sema *s, Node *tr) {
         if (tr->lhs)
             error_at_hint(tr->tok, "要素型を取るのは list と rc だけです",
                           "型 '%s' は要素型を取りません", tr->name);
+        return t;
+    }
+
+    // ★ 第44章：タプル型 (A, B)
+    if (strcmp(tr->name, "(tuple)") == 0) {
+        Type *t = xmalloc(sizeof(Type));
+        t->kind = TY_TUPLE;
+        int n = 0;
+        for (Node *a = tr->targs; a; a = a->next) n++;
+        t->nparams = n;
+        t->params = xmalloc(sizeof(Type *) * (size_t)n);
+        int k = 0;
+        for (Node *a = tr->targs; a; a = a->next) {
+            Type *et = resolve_type(s, a->lhs);
+            if (et->kind == TY_NONE)
+                error_at_hint(a->tok, "None 型の値は存在しないので要素にできません",
+                              "タプルの要素に None は使えません");
+            t->params[k++] = et;
+        }
         return t;
     }
 
@@ -904,9 +938,11 @@ static bool op_supports(OpKind op, Type *t) {
     if (t->kind == TY_FLOAT) {
         switch (op) {
             case OP_ADD: case OP_SUB: case OP_MUL: case OP_TRUEDIV:
+            // ★ 第44章：'**' を float でも使えるようにしました。
+            //   ランタイムに pl_fpow を自前で置いています（libc の pow は
+            //   ベアメタルで使えないため）。
+            case OP_POW:
                 return true;
-            // ⚠️ '**' は int 専用です。float のべき乗には pow が要り、
-            //    ランタイムは libc 無しで動く必要があるためまだ持ちません。
 
             default:
                 return false;
@@ -938,6 +974,7 @@ static Type *bool_required(const char *message, const char *where_label,
     diag_fail(&d);
 }
 
+static Type *check_tuple(Sema *s, Node *n);     // 第44章：タプル
 static Type *check_slice(Sema *s, Node *n);     // 第37章：スライス
 static Type *check_in(Sema *s, Node *n);        // 第37章：in / not in
 
@@ -1044,6 +1081,49 @@ static Type *check_logical(Sema *s, Node *n) {
     if (l->kind != TY_BOOL) return bool_required(msg, lbl, n->tok, n->lhs, l);
     if (r->kind != TY_BOOL) return bool_required(msg, lbl, n->tok, n->rhs, r);
     return ty_bool;
+}
+
+// タプル式 a, b（第44章）
+//
+// ★ 期待型（左辺や戻り型）が分かっていれば、それに合わせて要素を検査します。
+//   分からなければ、そのまま要素の型を並べたタプルになります。
+static Type *check_tuple(Sema *s, Node *n) {
+    Type *want = s->expected;
+    int n_elems = 0;
+    for (Node *x = n->body; x; x = x->next) n_elems++;
+
+    if (want && want->kind == TY_TUPLE && want->nparams != n_elems) {
+        Diag d = {0};
+        d.message = diag_fmt("タプルの要素の数が違います（%d 個と %d 個）",
+                             n_elems, want->nparams);
+        d.primary.tok = n->tok;
+        d.primary.label = diag_fmt("ここは %d 個です", n_elems);
+        d.hint = diag_fmt("'%s' が必要です", type_name(want));
+        diag_fail(&d);
+    }
+
+    Type *t = xmalloc(sizeof(Type));
+    t->kind = TY_TUPLE;
+    t->nparams = n_elems;
+    t->params = xmalloc(sizeof(Type *) * (size_t)n_elems);
+    int k = 0;
+    for (Node *x = n->body; x; x = x->next, k++) {
+        s->expected = (want && want->kind == TY_TUPLE) ? want->params[k] : NULL;
+        Type *et = check_expr(s, x);
+        s->expected = NULL;
+        if (want && want->kind == TY_TUPLE &&
+            !type_assignable(et, want->params[k])) {
+            Diag d = {0};
+            d.message = diag_fmt("タプルの %d 番目の型が合いません", k + 1);
+            d.primary.tok = x->tok;
+            d.primary.label = diag_fmt("これは '%s' 型です", type_name(et));
+            d.hint = diag_fmt("ここには '%s' が必要です",
+                              type_name(want->params[k]));
+            diag_fail(&d);
+        }
+        t->params[k] = (want && want->kind == TY_TUPLE) ? want->params[k] : et;
+    }
+    return t;
 }
 
 // xs[a:b] / s[a:b]（第37章）
@@ -1249,6 +1329,8 @@ static Type *check_expr(Sema *s, Node *n) {
         case ND_COND: t = check_ternary(s, n); break;
         // ★ 第37章：スライス。**同じ型を返します**（str→str, list[T]→list[T]）
         case ND_SLICE: t = check_slice(s, n); break;
+        // ★ 第44章：タプル式 (a, b)
+        case ND_TUPLE: t = check_tuple(s, n); break;
         case ND_FLOAT: t = ty_float; break;
         case ND_BOOL: t = ty_bool; break;
         case ND_STR: t = ty_str; break;
@@ -1611,6 +1693,10 @@ const Builtin BUILTINS[] = {
     {"hash", TY_INT, TY_INT, "pl_hash_i64"},
     {"hash", TY_FLOAT, TY_INT, "pl_hash_f64"},
     {"hash", TY_BOOL, TY_INT, "pl_hash_i64"},
+    // ★ 第44章：input(プロンプト) — Python と同じ形。
+    //   ⚠️ EOF では panic します。読めないかもしれない場面では
+    //     io.read_line()（None が返る）を使ってください。
+    {"input", TY_STR, TY_STR, "pl_input"},
     {"copy", TY_STR, TY_STR, "pl_str_copy"},
     {NULL, 0, 0, NULL},
 };
@@ -1643,6 +1729,15 @@ static const char *builtin_arg_types(const char *name) {
 static Type *check_builtin_call(Sema *s, Node *n) {
     int nargs = 0;
     for (Node *a = n->args; a; a = a->next) nargs++;
+
+    // ★ 第44章：input() は引数なしでも書けます（Python と同じ）。
+    //   ⚠️ 引数を省いたときは、空のプロンプトを渡したことにします。
+    if (strcmp(n->name, "input") == 0 && nargs == 0) {
+        n->args = new_str_node(n->tok, "", 0);
+        n->args->type = ty_str;
+        nargs = 1;
+    }
+
     if (nargs != 1) {
         Diag d = {0};
         d.message = diag_fmt("%s は 1 個の引数を取りますが、%d 個渡されました",
@@ -1654,6 +1749,28 @@ static Type *check_builtin_call(Sema *s, Node *n) {
     }
 
     Type *at = check_expr(s, n->args);
+
+    // ★ 第44章：print(xs) / str(xs) — list をそのまま表示できるようにします。
+    //   ⚠️ 要素の型ごとにランタイム関数を呼び分けるので、**要素が
+    //     int / float / str / bool のときだけ**です。入れ子（list[list[int]]）は
+    //     要素をさらに文字列にする手立てが要るので、ここで弾きます。
+    if (at->kind == TY_LIST &&
+        (strcmp(n->name, "print") == 0 || strcmp(n->name, "str") == 0)) {
+        TypeKind ek = at->elem->kind;
+        if (ek != TY_INT && ek != TY_FLOAT && ek != TY_STR && ek != TY_BOOL) {
+            Diag d = {0};
+            d.message = diag_fmt("'%s' はそのまま %s できません", type_name(at),
+                                 n->name);
+            d.primary.tok = n->args->tok;
+            d.primary.label = diag_fmt("要素が '%s' 型です", type_name(at->elem));
+            d.hint = "そのまま出せるのは list[int] / list[float] / list[str] / "
+                     "list[bool] だけです。ほかは for でまわしてください";
+            diag_fail(&d);
+        }
+        n->is_list_str = true;
+        return strcmp(n->name, "print") == 0 ? ty_none : ty_str;
+    }
+
     for (int i = 0; BUILTINS[i].name; i++) {
         if (strcmp(BUILTINS[i].name, n->name) != 0) continue;
         if (BUILTINS[i].arg != (int)at->kind) continue;
@@ -1952,6 +2069,12 @@ static Type *check_module_call(Sema *s, Node *n, ModuleSyms *ms) {
     }
 
     FuncSig *f = lookup_func_in(ms, n->name);
+
+    // ★ 第43章：他のモジュールのジェネリック関数も実体化します。
+    //   ⚠️ 実体はテンプレートのモジュールに作られるので、呼ぶ側から見ると
+    //     ふつうの「他モジュールの関数」になります。
+    if (f && f->tmpl) f = instantiate_func(s, f, n);
+
     if (!f) {
         Diag d = {0};
         d.message = diag_fmt("モジュール '%s' に関数 '%s' はありません",
@@ -2573,9 +2696,47 @@ static void check_return(Sema *s, Node *n) {
     }
 }
 
+// 分解代入 q, r = f()（第44章）
+//
+// ★ **宣言も兼ねます。** 型は右辺のタプルから決まるので書かせません
+//   （roadmap.md §0 の ③：右辺から決まるものは書かせない）。
+static void check_unpack(Sema *s, Node *n) {
+    Type *rt = check_expr(s, n->rhs);
+    if (rt->kind != TY_TUPLE) {
+        Diag d = {0};
+        d.message = "分解代入の右辺がタプルではありません";
+        d.primary.tok = n->rhs->tok;
+        d.primary.label = diag_fmt("これは '%s' 型です", type_name(rt));
+        d.hint = "分解できるのは (A, B) を返すものだけです"
+                 "（複数の値を返す関数を書いてください）";
+        diag_fail(&d);
+    }
+
+    int nvars = 0;
+    for (Node *v = n->params; v; v = v->next) nvars++;
+    if (nvars != rt->nparams) {
+        Diag d = {0};
+        d.message = diag_fmt("受け取る数が合いません（%d 個と %d 個）", nvars,
+                             rt->nparams);
+        d.primary.tok = n->tok;
+        d.primary.label = diag_fmt("ここは %d 個です", nvars);
+        d.hint = diag_fmt("右辺は '%s' です", type_name(rt));
+        diag_fail(&d);
+    }
+
+    int k = 0;
+    for (Node *v = n->params; v; v = v->next, k++) {
+        VarEntry *e = declare(s, v->name, rt->params[k], v->tok);
+        v->ir_name = e->ir_name;
+        v->type = rt->params[k];
+    }
+    n->type = rt;
+}
+
 static void check_stmt(Sema *s, Node *n) {
     switch (n->kind) {
         case ND_VARDECL: check_vardecl(s, n); break;
+        case ND_UNPACK: check_unpack(s, n); break;   // 第44章
         case ND_ASSIGN: check_assign(s, n); break;
         case ND_BLOCK: check_block(s, n); break;
         case ND_RETURN: check_return(s, n); break;

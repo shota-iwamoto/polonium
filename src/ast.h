@@ -77,6 +77,8 @@ typedef enum {
     ND_COND,    // 三項演算子 a if c else b → lhs（条件）, rhs（真）, els（偽）
     ND_SLICE,   // xs[a:b] → lhs（対象）, rhs（開始。省略時 NULL）, els（終端。省略時 NULL）
     ND_IFACE,   // interface 宣言 → name, body（本体の無い ND_FUNC の並び）
+    ND_TUPLE,   // (a, b) → body（要素。next で連結）。第44章
+    ND_UNPACK,  // a, b = f() → params（受け取る名前の並び）, rhs。第44章
 } NodeKind;
 
 // 演算子の種類。
@@ -362,6 +364,9 @@ struct Node {
 
     // ★ 第39章：min / max（2 引数なので組み込みの表に載らない）
     bool is_minmax;
+
+    // ★ 第44章：print(list) / str(list)（要素の型で呼び分ける）
+    bool is_list_str;
 
     // ★ 第41章：この class が実装するインタフェースの並び（ND_TYPEREF）
     Node *ifaces;

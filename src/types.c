@@ -119,6 +119,7 @@ int type_size(Type *t) {
         case TY_BOOL: return 1;  // メモリ上は i8（規約 R5）
         case TY_INT:
         case TY_IFACE:  // 第41章：実体へのポインタ
+        case TY_TUPLE:  // 第44章：構造体へのポインタ
         case TY_FN:     // 関数へのポインタ
         case TY_FLOAT:  // double も 8 バイト
         case TY_STR:
@@ -166,6 +167,14 @@ bool type_equal(Type *a, Type *b) {
     // ★ 第41章：インタフェースも定義で比べます（名前ではありません）
     if (a->kind == TY_IFACE) return a->iface == b->iface;
 
+    // ★ 第44章：タプルは「並びが同じ」なら同じ型です（名前はありません）
+    if (a->kind == TY_TUPLE) {
+        if (a->nparams != b->nparams) return false;
+        for (int i = 0; i < a->nparams; i++)
+            if (!type_equal(a->params[i], b->params[i])) return false;
+        return true;
+    }
+
     // ★ 第15章：T | None は中身どうしを比べる。
     //   type_equal を触るのは 4 度目です（ch5 → ch10 → ch12 → ch15）。
     if (a->kind == TY_OPT) return type_equal(a->elem, b->elem);
@@ -190,6 +199,15 @@ const char *type_name(Type *t) {
         }
         case TY_CLASS: return t->name;  // 第12章
         case TY_IFACE: return t->name;  // 第41章
+        case TY_TUPLE: {  // 第44章
+            StrBuf sb;
+            sb_init(&sb);
+            sb_printf(&sb, "(");
+            for (int i = 0; i < t->nparams; i++)
+                sb_printf(&sb, "%s%s", i ? ", " : "", type_name(t->params[i]));
+            sb_printf(&sb, ")");
+            return sb_str(&sb);
+        }
         case TY_PTR: {  // 第30章
             StrBuf sb;
             sb_init(&sb);
@@ -243,5 +261,5 @@ Type *type_from_kind(int kind) {
 }
 
 const char *type_name_list(void) {
-    return "int, float, bool, str, None, list[T], T | None, fn(...) -> T";
+    return "int, float, bool, str, None, list[T], T | None, fn(...) -> T, (A, B)";
 }

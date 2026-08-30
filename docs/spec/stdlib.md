@@ -20,6 +20,7 @@ def main() -> int:
 | [`sys`](#sys) | コマンドライン引数・環境変数・外部コマンド |
 | [`dict`](#dict) | ハッシュ表 |
 | [`pair`](#pair) | 2 つ・3 つの値をまとめる（タプルの代わり） |
+| [`lists`](#lists) | **型を問わない**リスト操作 |
 | [`math`](#math) | **数学関数** — Python の `math` 相当 |
 | [`linalg`](#linalg) | **ベクトルと行列** — 線形代数 |
 | [`stats`](#stats) | **統計** — Python の `statistics` 相当 |
@@ -622,3 +623,64 @@ def main() -> int:
 
 ⚠️ **所有権を受け取ります**（`own`）。入れ物の中身を組にして返すことは
 できません（借りたものを渡せないため）。
+
+---
+
+## lists
+
+**型を問わない**リスト操作です（ジェネリック関数）。`list[int]` も
+`list[str]` も同じ関数で扱えます。
+
+| 調べる | |
+|---|---|
+| `index_of(xs, x) -> int` | 最初の位置。無ければ `-1` |
+| `contains(xs, x) -> bool` | 含むか |
+| `count_if(xs, pred) -> int` | 条件を満たす数 |
+| `all_of(xs, pred)` / `any_of(xs, pred)` | すべて／どれか |
+
+| 取り出す | |
+|---|---|
+| `first_or(xs, default)` / `last_or(xs, default)` | 空なら `default` |
+| `max_of(xs)` / `min_of(xs)` | ⚠️ 空なら `panic` |
+
+| 順番を得る | |
+|---|---|
+| `sorted_indices(xs) -> list[int]` | 昇順に見るための**添字の並び**（安定） |
+| `indices_where(xs, keep) -> list[int]` | 条件を満たす要素の**添字** |
+| `reversed_indices(xs) -> list[int]` | 逆順の**添字** |
+
+```python
+import lists
+
+def main() -> int:
+    xs: list[str] = ["b", "a", "c"]
+    for i in lists.sorted_indices(xs):
+        print(xs[i])                     # a / b / c
+    return 0
+```
+
+### ⚠️ なぜ「添字」を返すのか
+
+**要素を別のリストに移すものは、汎用には書けません。**
+
+```python
+def filter[T](xs: list[T], keep: fn(T) -> bool) -> list[T]:
+    out: list[T] = []
+    for x in xs:
+        if keep(x):
+            out.append(x)     # ← E-BORROW-3
+    return out
+```
+
+借りた要素を別の入れ物に保存することになり、`T` が所有型（`str` / `list` /
+クラス）のときに壊れます。**添字なら `int`（コピー型）なので、中身は元の
+リストが持ったまま**でいられます。
+
+`list[float]` を実際に並べ替えたいときは `stats.sorted` を使ってください
+（`float` はコピー型なので移せます）。
+
+### ⚠️ 比較を伴うものは、比較できる型にしか使えません
+
+`max_of` / `sorted_indices` / `index_of` は `<` や `==` を使います。
+クラスを渡すと、実体化したときに「演算子が適用できません」と言われます
+（型制約が無いためです）。

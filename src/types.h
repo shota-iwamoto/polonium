@@ -44,6 +44,7 @@ typedef enum {
     TY_FLOAT, // float → double（IEEE 754 倍精度。第34章）
     TY_FN,    // fn(A, B) -> C → ptr（関数へのポインタ。第38章）
     TY_IFACE, // interface → ptr（実体へのポインタ。第41章）
+    TY_TUPLE, // (A, B) → ptr（要素を並べた構造体へのポインタ。第44章）
 
 } TypeKind;
 

@@ -339,6 +339,21 @@ static void dump(Node *n, int depth) {
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
+        // ★ 第44章：タプルと分解代入
+        case ND_TUPLE:
+            printf("(tuple\n");
+            for (Node *x = n->body; x; x = x->next) dump(x, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_UNPACK:
+            printf("(unpack");
+            for (Node *v = n->params; v; v = v->next) printf(" %s", v->name);
+            printf("\n");
+            dump(n->rhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
         // ★ 第41章：インタフェース（本体の無い def の並び）
         case ND_IFACE:
             printf("(interface %s\n", n->name);
