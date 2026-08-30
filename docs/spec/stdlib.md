@@ -18,7 +18,8 @@ def main() -> int:
 | [`strings`](#strings) | 文字列の操作 |
 | [`io`](#io) | ファイル・標準出力・標準エラー・標準入力 |
 | [`sys`](#sys) | コマンドライン引数・環境変数・外部コマンド |
-| [`dict`](#dict) | 文字列を鍵とするハッシュ表 |
+| [`dict`](#dict) | ハッシュ表 |
+| [`pair`](#pair) | 2 つ・3 つの値をまとめる（タプルの代わり） |
 | [`math`](#math) | **数学関数** — Python の `math` 相当 |
 | [`linalg`](#linalg) | **ベクトルと行列** — 線形代数 |
 | [`stats`](#stats) | **統計** — Python の `statistics` 相当 |
@@ -176,7 +177,8 @@ def main() -> int:
 | `get(k: K) -> V` | 値。**無ければ実行時エラー** |
 | `get_or(k: K, default: own V) -> V` | 値。無ければ `default` |
 | `set(mut self, k: own K, v: own V) -> None` | 入れる（あれば上書き）。**鍵と値の所有権を取ります** |
-| `remove(k: K) -> bool` | 消す。あったら `True`。⚠️ **O(n)** |
+| `remove(k: K) -> bool` | 消す。あったら `True`。**O(1)**（墓石方式） |
+| `key_at(i) -> K` / `val_at(i) -> V` | `i` 番目。**順に見るときに使います** |
 | `len() -> int` | 個数 |
 | `keys() -> list[K]` / `values() -> list[V]` | 一覧。**入れた順**に返します |
 
@@ -201,8 +203,16 @@ note: この実体化（Dict$Node$int）で使われました
 ⚠️ ハッシュは FNV-1a です。**暗号用ではありません。** 敵が鍵を選べる場面
 （外部入力を鍵にするサーバなど）では、衝突を狙われて線形探索に落とされます。
 
-⚠️ **削除は O(n) です。** 詰めると後ろの添字が全部ずれるので、バケツを
-丸ごと張り直します。取り出しは O(1) のままですが、削除が多い使い方には向きません。
+⚠️ **`items()` のように「組のリスト」を返すことはできません。** 中身は表が
+持っているので、組にして返すと「借りたものを保存する」ことになります
+（`E-BORROW-1` / `E-BORROW-3`）。順に見るときは `key_at` / `val_at` を使います。
+
+```python
+i: int = 0
+while i < d.len():
+    print(f"{d.key_at(i)} -> {d.val_at(i)}")
+    i = i + 1
+```
 
 ```python
 import dict
@@ -553,3 +563,32 @@ def main() -> int:
 ```
 
 ⚠️ 渡す関数は **`raises` しないもの**に限ります（関数型はエラーの受け渡しを表しません）。
+
+---
+
+## pair
+
+**タプルの代わり**です。タプル（`(int, str)`）はありません — ジェネリクスで
+足りるからで、タプルが足すのは構文の短さだけです。
+
+| 型 | 説明 |
+|---|---|
+| `Pair[A, B]` | `first` / `second` |
+| `Triple[A, B, C]` | `first` / `second` / `third` |
+
+```python
+import pair
+
+def divmod2(a: int, b: int) -> pair.Pair[int, int]:
+    return pair.Pair(a // b, a % b)
+
+def main() -> int:
+    r: pair.Pair[int, int] = divmod2(17, 5)
+    print(f"{r.first} 余り {r.second}")     # 3 余り 2
+    return 0
+```
+
+⚠️ **分解代入（`a, b = f()`）は書けません。** `p.first` / `p.second` を使います。
+
+⚠️ **所有権を受け取ります**（`own`）。入れ物の中身を組にして返すことは
+できません（借りたものを渡せないため）。

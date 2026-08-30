@@ -172,3 +172,24 @@ class Dict[K, V]:
         if self.dead > 0:
             self.compact()
         return self.vals_
+
+    # 鍵と値の組を、添字で順に取り出す（第42章）
+    #
+    # ⚠️ **items() のようにリストを返すことはできません。**
+    #   中身は表が持っているので、組にして返すと「借りたものを保存する」
+    #   ことになります（E-BORROW-1 / E-BORROW-3）。
+    #   ★ 代わりに「i 番目の鍵」「i 番目の値」を返します。
+    #
+    #       i: int = 0
+    #       while i < d.len():
+    #           print(f"{d.key_at(i)} -> {d.val_at(i)}")
+    #           i = i + 1
+    def key_at(mut self, i: int) -> K:
+        if self.dead > 0:
+            self.compact()
+        return self.keys_[i]
+
+    def val_at(mut self, i: int) -> V:
+        if self.dead > 0:
+            self.compact()
+        return self.vals_[i]
