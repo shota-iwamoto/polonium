@@ -822,16 +822,22 @@ $ ./wc examples/sample.txt
 
 ## 付録: いま無いもの
 
-正直に書いておきます。**これらは未実装です。**
+正直に書いておきます。**これらは未実装です。**（`poloniumc 0.3.0` で確認）
 
 | 無いもの | 代わりに |
 |---|---|
-| ジェネリクス | `dict.Dict` は `str → int` 固定。添字を値に入れる定石を使う |
-| 継承・インタフェース | 合成（フィールドに持つ） |
-| クロージャ・`lambda` | トップレベルの関数 |
-| スライス `xs[a:b]` | `for` と添字 |
-| タプル・集合・内包表記 | `list` と `for` |
-| 例外 | `raises` / `try` / `except`（§10） |
-| 文字列の書式化（f-string） | `+` と `str(...)` |
+| **ジェネリクス** | `dict.Dict` は `str → int` 固定。添字を値に入れる定石を使う（§7） |
+| **継承・インタフェース** | 合成（フィールドに持つ） |
+| **クロージャ・`lambda`** | トップレベルの関数を渡す（関数型はあります。§5.1） |
+| **タプル・複数戻り値** | `list` かクラスを返す |
+| 集合 | `dict.Dict` を「値は使わない表」として使う |
+| 内包表記 | `for` と `append`、または `numeric.map` / `numeric.filter` |
+| `dict` の `in` | `d.has(k)` |
+| f-string の書式指定 `{x:>8}` | `strings.lpad` / `strings.rpad` |
+| 例外（アンワインド） | `raises` / `try` / `except`（§10。**設計上入れません**） |
 
-言語の現在地と今後は [roadmap.md](roadmap.md) と [design/future-features.md](design/future-features.md) にあります。
+**上の 4 つが実用上いちばん効きます。** とくにジェネリクスが無いせいで、
+`str → クラス` の表を作れません。
+
+言語の現在地と今後は [roadmap.md](roadmap.md) と
+[design/future-features.md](design/future-features.md) にあります。

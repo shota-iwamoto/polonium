@@ -206,6 +206,17 @@ class Parser:
             sub: Parser = Parser(lexer.tokenize(t.file, ex + "\n"))
             inner: ast.Node = sub.expr()
 
+            # ⚠️ **式を最後まで読み切ったかを確かめる。**
+            #    これが無いと f"{x:>8}" のような書式指定が「x」だけ読まれて
+            #    **黙って無視される**（エラーにするより悪い）。
+            rest: token.Token = sub.peek()
+            if rest.kind != token.TK_NEWLINE and rest.kind != token.TK_EOF:
+                self.fail_full(t,
+                               "f-string の中の式を解釈できません: '" + ex + "'",
+                               "ここです",
+                               "書式指定（f\"{x:>8}\" のような桁揃え）はありません。" +
+                               "strings.lpad / strings.rpad を使ってください")
+
             call: ast.Node = ast.new_node(ast.ND_CALL, t)
             call.name = "str"
             call.args = inner

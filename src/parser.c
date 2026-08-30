@@ -234,6 +234,20 @@ static Node *fstring(Parser *p, Token *t) {
         sp.pos = 0;
         Node *inner = expr(&sp);
 
+        // ⚠️ **式を最後まで読み切ったかを確かめます。**
+        //    これが無いと f"{x:>8}" のような書式指定が「x」だけ読まれて
+        //    **黙って無視され**ます。エラーにするより悪い挙動です。
+        if (peek(&sp)->kind != TK_NEWLINE && peek(&sp)->kind != TK_EOF) {
+            Diag d = {0};
+            d.message = diag_fmt("f-string の中の式を解釈できません: '%.*s'",
+                                 exlen, ex);
+            d.primary.tok = t;
+            d.primary.label = "ここです";
+            d.hint = "書式指定（f\"{x:>8}\" のような桁揃え）はありません。"
+                     "strings.lpad / strings.rpad を使ってください";
+            diag_fail(&d);
+        }
+
         // ★ 位置は f-string のトークンに揃えます。部分文字列の中の位置を
         //   そのまま出すと、元のソースに無い行番号になってしまいます。
         Node *call = new_node(ND_CALL, t);
