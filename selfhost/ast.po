@@ -441,6 +441,8 @@ class Node:
     is_func_ref: bool
     # ★ 第38章：関数ポインタ越しの呼び出し
     is_indirect: bool
+    # ★ 第39章：min / max（2 引数なので組み込みの表に載らない）
+    is_minmax: bool
     type_ref: Node | None   # 型注釈の木
 
     # ── 第27章：エラー処理 ──
@@ -468,6 +470,7 @@ class Node:
         self.is_global = False
         self.is_func_ref = False    # 第38章
         self.is_indirect = False    # 第38章
+        self.is_minmax = False      # 第39章
         self.mode = PM_BORROW
         # ── 第27章 ──
         self.can_fail = False

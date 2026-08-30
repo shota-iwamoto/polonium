@@ -489,6 +489,30 @@ static char *gen_expr(Emitter *e, Node *n) {
             //    動いていました。比較演算子で初めてこの前提が崩れます。
             Type *ot = n->lhs->type;
 
+            // ★ 第39章：繰り返しと list の連結（新しい値を作る）
+            if (n->op == OP_MUL && ot->kind == TY_STR) {
+                declare_rt(e, "ptr @pl_str_repeat(ptr, i64)");
+                sb_printf(&e->fn,
+                          "  %s = call ptr @pl_str_repeat(ptr %s, i64 %s)\n", t,
+                          l, r);
+                return t;
+            }
+            if (ot->kind == TY_LIST &&
+                (n->op == OP_ADD || n->op == OP_MUL)) {
+                if (n->op == OP_ADD) {
+                    declare_rt(e, "ptr @pl_list_concat(ptr, ptr)");
+                    sb_printf(&e->fn,
+                              "  %s = call ptr @pl_list_concat(ptr %s, ptr %s)\n",
+                              t, l, r);
+                } else {
+                    declare_rt(e, "ptr @pl_list_repeat(ptr, i64)");
+                    sb_printf(&e->fn,
+                              "  %s = call ptr @pl_list_repeat(ptr %s, i64 %s)\n",
+                              t, l, r);
+                }
+                return t;
+            }
+
             // ── 文字列（第9章）──────────────────────────────
             if (ot->kind == TY_STR) {
                 if (n->op == OP_ADD) {
@@ -874,6 +898,22 @@ static char *gen_index(Emitter *e, Node *n) {
     Type *ot = n->lhs->type;
     char *obj = gen_expr(e, n->lhs);
     char *idx = gen_expr(e, n->rhs);
+
+    // ★ 第39章：負の添字は **末尾から**数えます（xs[-1] が最後。Python と同じ）。
+    //   ⚠️ 正規化だけをランタイムに任せ、範囲の検査は今までどおり
+    //     pl_list_check / pl_str_index が行います（規約 R10）。
+    {
+        declare_rt(e, ot->kind == TY_STR ? "i64 @pl_str_len(ptr)"
+                                         : "i64 @pl_list_len(ptr)");
+        declare_rt(e, "i64 @pl_norm_index(i64, i64)");
+        char *ln = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call i64 @%s(ptr %s)\n", ln,
+                  ot->kind == TY_STR ? "pl_str_len" : "pl_list_len", obj);
+        char *ni = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call i64 @pl_norm_index(i64 %s, i64 %s)\n",
+                  ni, idx, ln);
+        idx = ni;
+    }
 
     // str の添字は 1 文字の str を返す（型システム 5.8）
     if (ot->kind == TY_STR) {
@@ -1869,6 +1909,26 @@ static char *gen_call(Emitter *e, Node *n) {
     // ★ 第30章：低レベルの組み込み（sema が ir_name を付けない目印）
     if (!n->ir_name && !n->cls && !n->builtin && is_lowlevel_name(n->name))
         return gen_lowlevel(e, n);
+
+    // ★ 第39章：min / max。**分岐を作らず select 1 命令**で済ませます。
+    //   両辺とも必ず評価されますが、どちらも副作用のない値なので問題ありません。
+    if (n->is_minmax) {
+        char *a = gen_expr(e, n->args);
+        char *b = gen_expr(e, n->args->next);
+        bool isf = n->type->kind == TY_FLOAT;
+        bool is_min = strcmp(n->name, "min") == 0;
+        char *c = new_tmp(e);
+        if (isf)
+            sb_printf(&e->fn, "  %s = fcmp %s double %s, %s\n", c,
+                      is_min ? "olt" : "ogt", a, b);
+        else
+            sb_printf(&e->fn, "  %s = icmp %s i64 %s, %s\n", c,
+                      is_min ? "slt" : "sgt", a, b);
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = select i1 %s, %s %s, %s %s\n", t, c,
+                  llvm_type(n->type), a, llvm_type(n->type), b);
+        return t;
+    }
 
     if (n->builtin) return gen_builtin_call(e, n);
     if (n->cls) return gen_new(e, n);  // ★ 第12章：インスタンス生成

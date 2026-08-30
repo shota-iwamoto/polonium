@@ -320,6 +320,9 @@ struct Node {
     // ★ 第38章：関数ポインタ越しの呼び出し（ir_name はその変数の箱）
     bool is_indirect;
 
+    // ★ 第39章：min / max（2 引数なので組み込みの表に載らない）
+    bool is_minmax;
+
     // ND_WHILE の増分処理（第11章）。for の脱糖でだけ使います。
     // ★ C の for(init; cond; incr) の incr にあたるもの。
     //   ここに置くと continue の飛び先を「増分」にできます。

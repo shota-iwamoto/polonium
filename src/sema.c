@@ -593,8 +593,13 @@ static bool op_supports(OpKind op, Type *t) {
     // ★ 第12章：クラスと list は「参照」なので、比べられるのは
     //   同一性（== / !=）だけです。大小関係には意味がありません
     //   （言語仕様 4.3 / docs/spec/type-system.md 5.6）。
-    if (t->kind == TY_CLASS || t->kind == TY_LIST)
+    if (t->kind == TY_CLASS)
         return op == OP_EQ || op == OP_NE;
+
+    // ★ 第39章：list は連結（+）と繰り返し（*）ができます。
+    //   ⚠️ どちらも **新しい list を作ります**（元は変わりません）。
+    if (t->kind == TY_LIST)
+        return op == OP_EQ || op == OP_NE || op == OP_ADD || op == OP_MUL;
 
     // ★ 第15章：T | None には何も適用できません。
     //   == で比べたいなら、先に絞り込んでもらいます（None かどうかは is で調べる）。
@@ -623,9 +628,9 @@ static bool op_supports(OpKind op, Type *t) {
                 return false;
         }
     }
-    // str に許すのは連結の '+' だけ（言語仕様 4.2 の表）。
-    // ⚠️ Python の "ab" * 3 は便利だが、v1 では採用しない。
-    if (t->kind == TY_STR) return op == OP_ADD;
+    // ★ 第39章：str は連結（+）と繰り返し（*）。
+    //   v1 では * を採用していませんでしたが、実用上よく使うので入れました。
+    if (t->kind == TY_STR) return op == OP_ADD || op == OP_MUL;
     return false;  // ★ bool に算術・ビット演算は使えない
 }
 
@@ -661,6 +666,14 @@ static Type *check_binop(Sema *s, Node *n) {
 
     Type *l = check_expr(s, n->lhs);
     Type *r = check_expr(s, n->rhs);
+
+    // ★ 第39章：繰り返し（"ab" * 3 / [0] * 3）だけは **両辺の型が違います**。
+    //   左が str か list、右が int という組み合わせだけを認めます。
+    //   ⚠️ 3 * "ab"（左右が逆）は認めません。「何を何回」の順を固定して、
+    //     読むときに迷わないようにします。
+    if (n->op == OP_MUL && (l->kind == TY_STR || l->kind == TY_LIST) &&
+        r->kind == TY_INT)
+        return l;
 
     // ★ 検査は 2 段構え（docs/spec/type-system.md 5.3）
     //   ① 両辺の型が等しいか
@@ -1301,6 +1314,12 @@ const Builtin BUILTINS[] = {
     // ★ 第26章：借りたものを保存したいときの逃げ道（決定 D8）。
     //   ⚠️ いまは str だけです。list[T] の複製は要素の所有まで考える必要が
     //      あるので、`rc[T]`（第28章）と一緒に見直します。
+    // ★ 第39章：Python で最も使う組み込みを足しました。
+    //   ⚠️ min / max は **2 引数**の表では表せない（引数 2 個）ので、
+    //     ここではなく check_call で特別扱いします。
+    {"abs", TY_INT, TY_INT, "pl_iabs"},
+    {"abs", TY_FLOAT, TY_FLOAT, "pl_fabs"},
+    {"sum", TY_LIST, TY_INT, "pl_list_sum"},
     {"copy", TY_STR, TY_STR, "pl_str_copy"},
     {NULL, 0, 0, NULL},
 };
@@ -1980,6 +1999,34 @@ static Type *check_call(Sema *s, Node *n) {
     // ── 第30章：低レベルの組み込み ──
     const LowLevel *ll = lowlevel_of(n->name);
     if (ll && !lookup_func(s, n->name)) return check_lowlevel_call(s, n, ll);
+
+    // ★ 第39章：min / max。**2 引数**なので組み込みの表（1 引数）では
+    //   表せません。ここで特別扱いします。
+    //   ⚠️ Python の min([1,2,3])（リストを渡す形）は入れていません。
+    //     リストの最小は linalg.vmin を使ってください。
+    if ((strcmp(n->name, "min") == 0 || strcmp(n->name, "max") == 0) &&
+        !lookup_func(s, n->name)) {
+        int nargs = 0;
+        for (Node *a = n->args; a; a = a->next) nargs++;
+        if (nargs != 2)
+            error_at_hint(n->tok, diag_fmt("%s(a, b) の形で使ってください", n->name),
+                          diag_fmt("%s は 2 個の引数を取ります", n->name));
+        Type *a0 = check_expr(s, n->args);
+        Type *a1 = check_expr(s, n->args->next);
+        if (!type_equal(a0, a1))
+            error_at(n->args->next->tok,
+                     "%s の 2 つの引数は同じ型である必要があります（'%s' と '%s'）",
+                     n->name, type_name(a0), type_name(a1));
+        if (a0->kind != TY_INT && a0->kind != TY_FLOAT)
+            error_at_hint(n->args->tok,
+                          "min / max が使えるのは int と float です",
+                          "'%s' 型には使えません", type_name(a0));
+        n->builtin = NULL;
+        n->ir_name = NULL;
+        n->is_minmax = true;
+        n->type = a0;
+        return a0;
+    }
 
     // ── 第28章：rc(x) — 共有所有にくるむ ──
     //

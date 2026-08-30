@@ -76,6 +76,10 @@ class Sema:
             Builtin("exit", ast.TY_INT, ast.TY_NONE, "pl_exit"),
             Builtin("panic", ast.TY_STR, ast.TY_NONE, "pl_panic"),
             # ★ 第26章：借りたものを保存したいときの逃げ道（決定 D8）
+            # ★ 第39章：Python で最も使う組み込み
+            Builtin("abs", ast.TY_INT, ast.TY_INT, "pl_iabs"),
+            Builtin("abs", ast.TY_FLOAT, ast.TY_FLOAT, "pl_fabs"),
+            Builtin("sum", ast.TY_LIST, ast.TY_INT, "pl_list_sum"),
             Builtin("copy", ast.TY_STR, ast.TY_STR, "pl_str_copy")]
 
     # ── プリミティブ型のシングルトン ────────────────────────
@@ -475,8 +479,12 @@ class Sema:
 
     # 二項演算子が、その型に適用できるか
     def op_supports(self, op: int, t: ast.Type) -> bool:
-        if t.kind == ast.TY_CLASS or t.kind == ast.TY_LIST:
+        if t.kind == ast.TY_CLASS:
             return op == ast.OP_EQ or op == ast.OP_NE
+        # ★ 第39章：list は連結（+）と繰り返し（*）ができる
+        if t.kind == ast.TY_LIST:
+            return (op == ast.OP_EQ or op == ast.OP_NE or
+                    op == ast.OP_ADD or op == ast.OP_MUL)
         if t.kind == ast.TY_OPT or t.kind == ast.TY_NULL:
             return False
         if ast.is_compare(op):
@@ -488,8 +496,9 @@ class Sema:
         if t.kind == ast.TY_FLOAT:
             return (op == ast.OP_ADD or op == ast.OP_SUB or
                     op == ast.OP_MUL or op == ast.OP_TRUEDIV)
+        # ★ 第39章：str は連結（+）と繰り返し（*）
         if t.kind == ast.TY_STR:
-            return op == ast.OP_ADD
+            return op == ast.OP_ADD or op == ast.OP_MUL
         return False
 
     # 「ここには bool が必要」というエラー
@@ -594,6 +603,12 @@ class Sema:
         rhs: ast.Node = unwrap_node(n.rhs)
         l: ast.Type = self.check_expr(lhs)
         r: ast.Type = self.check_expr(rhs)
+
+        # ★ 第39章：繰り返し（"ab" * 3 / [0] * 3）だけは両辺の型が違う。
+        #   ⚠️ 3 * "ab"（左右が逆）は認めない（「何を何回」の順を固定する）
+        if n.op == ast.OP_MUL and r.kind == ast.TY_INT:
+            if l.kind == ast.TY_STR or l.kind == ast.TY_LIST:
+                return l
 
         # ★ 検査は 2 段構え（型システム 5.3）
         if not ast.type_equal(l, r):
@@ -1735,6 +1750,31 @@ class Sema:
             n.is_indirect = True
             n.type = ast.elem_of(ftv)
             return ast.elem_of(ftv)
+
+        # ★ 第39章：min / max（2 引数なので組み込みの表では表せない）
+        #   ⚠️ Python の min([1,2,3]) は入れていない（linalg.vmin を使う）
+        if (n.name == "min" or n.name == "max") and self.lookup_func(n.name) is None:
+            nm: int = count_siblings(n.args)
+            if nm != 2:
+                diag.error_at_hint(unwrap_tok(n.tok),
+                                   n.name + "(a, b) の形で使ってください",
+                                   n.name + " は 2 個の引数を取ります")
+            m0: ast.Type = self.check_expr(unwrap_node(n.args))
+            m1n: ast.Node = unwrap_node(unwrap_node(n.args).next)
+            m1: ast.Type = self.check_expr(m1n)
+            if not ast.type_equal(m0, m1):
+                diag.error_at(unwrap_tok(m1n.tok),
+                              n.name + " の 2 つの引数は同じ型である必要があります（'" +
+                              ast.type_name(m0) + "' と '" + ast.type_name(m1) + "'）")
+            if m0.kind != ast.TY_INT and m0.kind != ast.TY_FLOAT:
+                diag.error_at_hint(unwrap_tok(unwrap_node(n.args).tok),
+                                   "min / max が使えるのは int と float です",
+                                   "'" + ast.type_name(m0) + "' 型には使えません")
+            n.builtin = ""
+            n.ir_name = ""
+            n.is_minmax = True
+            n.type = m0
+            return m0
 
         # ── 第28章：rc(x) — 共有所有にくるむ ──
         #

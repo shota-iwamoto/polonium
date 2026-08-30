@@ -276,6 +276,16 @@ long long pl_str_len(const char *s) {
     return ((const long long *)s)[-1] & ~PL_STR_STATIC;
 }
 
+// 文字列の繰り返し（第39章。"ab" * 3）
+char *pl_str_repeat(const char *s, long long n) {
+    if (n < 0) n = 0;
+    long long m = pl_str_len(s);
+    char *out = pl_str_alloc(m * n);
+    for (long long k = 0; k < n; k++) pl_memcpy(out + k * m, s, m);
+    out[m * n] = '\0';
+    return out;
+}
+
 char *pl_str_concat(const char *a, const char *b) {
     long long la = pl_str_len(a);
     long long lb = pl_str_len(b);
@@ -460,7 +470,8 @@ static void pl_list_grow(PlList *l) {
 
 // 範囲検査（規約 R10）。
 // ★ 検査をここに置くので、生成する IR に分岐が 1 つも出ません。
-// ⚠️ 負の添字は「範囲外」です。Python の xs[-1] は採用しません。
+// ⚠️ 負の添字は **末尾からの位置**です（第39章。Python と同じ）。
+//   xs[-1] が最後の要素。呼ぶ側で正規化してから渡します。
 static void pl_list_check(PlList *l, long long i) {
     if (i < 0 || i >= l->len) {
         char buf[80];
@@ -502,6 +513,9 @@ long long pl_str_find(const char *hay, const char *needle) {
 //     負の値 → 0、長さを超える → 長さ、開始 > 終端 → 空
 char *pl_str_slice(const char *s, long long lo, long long hi) {
     long long n = pl_str_len(s);
+    // ★ 第39章：負の端は末尾から数えます（s[:-1] で最後の 1 文字を落とす）
+    if (lo < 0) lo += n;
+    if (hi < 0) hi += n;
     if (lo < 0) lo = 0;
     if (hi > n) hi = n;
     if (lo > hi) lo = hi;
@@ -554,12 +568,58 @@ long long pl_list_index_str(PlList *l, const char *v) {
 
 void pl_list_push_i64(PlList *l, long long v);   // 下で定義
 
+// 組み込み関数（第39章）
+long long pl_iabs(long long v) { return v < 0 ? -v : v; }
+double pl_fabs(double v) { return v < 0.0 ? -v : v; }
+
+// ── 負の添字の正規化（第39章）────────────────────────────────
+//
+// ★ Python と同じく、負の添字は **末尾から**数えます（-1 が最後）。
+//   ⚠️ 正規化だけで、範囲の検査はしません（後段の pl_list_check / pl_str_index
+//     がそのまま担当します）。-100 のような値は負のまま渡り、そこで落ちます。
+long long pl_norm_index(long long i, long long len) {
+    if (i < 0) return i + len;
+    return i;
+}
+
+// list[int] の総和（第39章）
+// ⚠️ **int のリストだけ**です。float の総和は要素の型で命令が変わるので、
+//   linalg.vsum を使ってください（sema が型を見て弾きます）。
+long long pl_list_sum(PlList *l) {
+    long long s = 0;
+    for (long long i = 0; i < l->len; i++) s += ((long long *)l->data)[i];
+    return s;
+}
+
+// list の連結（新しい list を作る）
+PlList *pl_list_concat(PlList *a, PlList *b) {
+    PlList *out = pl_list_new();
+    for (long long i = 0; i < a->len; i++)
+        pl_list_push_i64(out, ((long long *)a->data)[i]);
+    for (long long i = 0; i < b->len; i++)
+        pl_list_push_i64(out, ((long long *)b->data)[i]);
+    return out;
+}
+
+// list の繰り返し（負や 0 なら空）
+PlList *pl_list_repeat(PlList *a, long long n) {
+    PlList *out = pl_list_new();
+    for (long long k = 0; k < n; k++)
+        for (long long i = 0; i < a->len; i++)
+            pl_list_push_i64(out, ((long long *)a->data)[i]);
+    return out;
+}
+
+
 // list のスライス（第37章）。**新しい list を作ります**（借用ではありません）
 //
 // ⚠️ 要素をそのまま写すので、参照型なら「同じものを指す 2 つのリスト」に
 //   なります。所有権の観点では借用と同じ扱いが要るため、複製した中身の
 //   解放は行いません（仕様 §6 の一時値と同じ扱い）。
 PlList *pl_list_slice(PlList *l, long long lo, long long hi) {
+    // ★ 第39章：負の端は末尾から数えます
+    if (lo < 0) lo += l->len;
+    if (hi < 0) hi += l->len;
     if (lo < 0) lo = 0;
     if (hi > l->len) hi = l->len;
     if (lo > hi) lo = hi;

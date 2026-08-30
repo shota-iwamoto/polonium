@@ -569,6 +569,23 @@ class Emitter:
         # ⚠️ オペランドの型は「結果の型」ではない（比較の結果は bool）
         ot: ast.Type = type_of(lhs)
 
+        # ★ 第39章：繰り返しと list の連結（新しい値を作る）
+        if n.op == ast.OP_MUL and ot.kind == ast.TY_STR:
+            self.declare_rt("ptr @pl_str_repeat(ptr, i64)")
+            self.emit("  " + t + " = call ptr @pl_str_repeat(ptr " + l +
+                      ", i64 " + r + ")\n")
+            return t
+        if ot.kind == ast.TY_LIST and (n.op == ast.OP_ADD or n.op == ast.OP_MUL):
+            if n.op == ast.OP_ADD:
+                self.declare_rt("ptr @pl_list_concat(ptr, ptr)")
+                self.emit("  " + t + " = call ptr @pl_list_concat(ptr " + l +
+                          ", ptr " + r + ")\n")
+            else:
+                self.declare_rt("ptr @pl_list_repeat(ptr, i64)")
+                self.emit("  " + t + " = call ptr @pl_list_repeat(ptr " + l +
+                          ", i64 " + r + ")\n")
+            return t
+
         # ── 文字列（第9章）──
         if ot.kind == ast.TY_STR:
             if n.op == ast.OP_ADD:
@@ -741,7 +758,22 @@ class Emitter:
         obj_node: ast.Node = node_of(n.lhs)
         ot: ast.Type = type_of(obj_node)
         obj: str = self.gen_expr(obj_node)
-        idx: str = self.gen_expr(node_of(n.rhs))
+        idx0: str = self.gen_expr(node_of(n.rhs))
+
+        # ★ 第39章：負の添字は **末尾から**数える（Python と同じ）。
+        #   ⚠️ 正規化だけをランタイムに任せ、範囲の検査は今までどおり
+        #     pl_list_check / pl_str_index が行う（規約 R10）。
+        lenfn0: str = "pl_list_len"
+        if ot.kind == ast.TY_STR:
+            lenfn0 = "pl_str_len"
+        self.declare_rt("i64 @" + lenfn0 + "(ptr)")
+        self.declare_rt("i64 @pl_norm_index(i64, i64)")
+        ln0: str = self.new_tmp()
+        self.emit("  " + ln0 + " = call i64 @" + lenfn0 + "(ptr " + obj + ")\n")
+        ni0: str = self.new_tmp()
+        self.emit("  " + ni0 + " = call i64 @pl_norm_index(i64 " + idx0 +
+                  ", i64 " + ln0 + ")\n")
+        idx: str = ni0
 
         # str の添字は 1 文字の str を返す
         if ot.kind == ast.TY_STR:
@@ -1294,6 +1326,31 @@ class Emitter:
         return g
 
     def gen_call(mut self, n: ast.Node) -> str:
+        # ★ 第39章：min / max。**分岐を作らず select 1 命令**で済ませる
+        if n.is_minmax:
+            ma: str = self.gen_expr(node_of(n.args))
+            mb: str = self.gen_expr(node_of(node_of(n.args).next))
+            nt2: ast.Type = type_of(n)
+            isf: bool = nt2.kind == ast.TY_FLOAT
+            pr: str = "sgt"
+            if n.name == "min":
+                pr = "slt"
+            if isf:
+                pr = "ogt"
+                if n.name == "min":
+                    pr = "olt"
+            mc: str = self.new_tmp()
+            cmpop: str = "icmp"
+            if isf:
+                cmpop = "fcmp"
+            self.emit("  " + mc + " = " + cmpop + " " + pr + " " +
+                      self.llvm_type(nt2) + " " + ma + ", " + mb + "\n")
+            mt: str = self.new_tmp()
+            self.emit("  " + mt + " = select i1 " + mc + ", " +
+                      self.llvm_type(nt2) + " " + ma + ", " +
+                      self.llvm_type(nt2) + " " + mb + "\n")
+            return mt
+
         if len(n.builtin) > 0:
             return self.gen_builtin_call(n)
         if n.cls is not None:
