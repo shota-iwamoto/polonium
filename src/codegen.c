@@ -63,6 +63,7 @@ typedef struct {
     // ── 第13章：モジュール ──
     Node *ast;             // 今生成しているモジュールの AST
     struct StrLit *types;  // 型定義を出済みのクラス（重複排除）
+    struct StrLit *vtables;  // 第41章：vtable を出済みのクラス
 } Emitter;
 
 // 出力済みの文字列リテラル / declare を覚えておくための小さなリスト。
@@ -160,6 +161,7 @@ static const char *llvm_type(Type *t) {
         case TY_INT: return "i64";
         case TY_FLOAT: return "double";  // IEEE 754 倍精度
         case TY_FN: return "ptr";        // 関数へのポインタ（第38章）
+        case TY_IFACE: return "ptr";     // 実体へのポインタ（第41章）
         case TY_BOOL: return "i1";   // レジスタ上は 1 ビット
         case TY_NONE: return "void";  // 値がない（第8章）
         case TY_STR: return "ptr";    // 参照型（第9章）
@@ -183,6 +185,7 @@ static const char *llvm_mem_type(Type *t) {
         case TY_INT: return "i64";
         case TY_FLOAT: return "double";
         case TY_FN: return "ptr";   // 第38章
+        case TY_IFACE: return "ptr";  // 第41章
         case TY_BOOL: return "i8";  // メモリ上は 1 バイト
         case TY_STR: return "ptr";  // ポインタをそのまま置く（第9章）
         case TY_LIST: return "ptr"; // 第10章
@@ -824,9 +827,11 @@ static bool elem_is_ptr(Type *elem) {
     //   list[Token] が動きます。第10章の設計がそのまま効いています。
     // ★ 第15章：T | None もポインタ（None は null）。
     // ★ 第28章：rc[T] もポインタ（数え札付きの箱を指す）。
+    // ★ 第41章：インタフェースの値も「実体へのポインタ」1 個です
     return elem->kind == TY_STR || elem->kind == TY_LIST ||
            elem->kind == TY_CLASS || elem->kind == TY_OPT ||
-           elem->kind == TY_RC || elem->kind == TY_NULL;
+           elem->kind == TY_RC || elem->kind == TY_NULL ||
+           elem->kind == TY_IFACE;
 }
 
 // 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる。規約 R5）
@@ -1046,6 +1051,39 @@ static char *gen_method(Emitter *e, Node *n) {
             declare_extern(e, llvm_type(n->type), n->ir_name, sb_str(&types));
         }
         return emit_call(e, n, sb_str(&args));
+    }
+
+    // ★ 第41章：インタフェース越しの呼び出し。
+    //   ① 実体の先頭から vtable を読む ② スロットの関数ポインタを読む ③ 呼ぶ
+    //   ⚠️ 呼び先はコンパイル時には決まりません（実行時の型で決まります）。
+    if (n->is_iface_call) {
+        char *obj = gen_expr(e, n->lhs);
+        declare_rt(e, "ptr @pl_check_not_none(ptr)");
+        char *ok = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call ptr @pl_check_not_none(ptr %s)\n", ok, obj);
+
+        char *vt = new_tmp(e);
+        sb_printf(&e->fn, "  %s = load ptr, ptr %s\n", vt, ok);
+        char *slotp = new_tmp(e);
+        sb_printf(&e->fn,
+                  "  %s = getelementptr [%d x ptr], ptr %s, i32 0, i32 %d\n",
+                  slotp, pl_iface_slots, vt, n->iface_slot);
+        char *fp = new_tmp(e);
+        sb_printf(&e->fn, "  %s = load ptr, ptr %s\n", fp, slotp);
+
+        StrBuf ia, it;
+        sb_init(&ia);
+        sb_init(&it);
+        sb_printf(&ia, "ptr %s", ok);
+        gen_args(e, n->args, &ia, &it, false);
+        if (n->type->kind == TY_NONE) {
+            sb_printf(&e->fn, "  call void %s(%s)\n", fp, sb_str(&ia));
+            return NULL;
+        }
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call %s %s(%s)\n", t, llvm_type(n->type), fp,
+                  sb_str(&ia));
+        return t;
     }
 
     // クラスのメソッド（第12章）。self を第 1 引数に渡すだけ。
@@ -1274,12 +1312,67 @@ static char *gen_field(Emitter *e, Node *n) {
 //   ① ヒープに確保する（pl_alloc は calloc なので必ずゼロ初期化される）
 //   ② 参照型フィールドに既定値を入れる（12.6 節）
 //   ③ init があれば呼ぶ
+// ── 第41章：vtable ──────────────────────────────────────────
+//
+// ★ クラス 1 つにつき **1 本**の表を出します。中身は「プログラム全体の
+//   インタフェース・メソッドのスロット数」ぶんの関数ポインタの配列で、
+//   そのクラスが実装しているスロットだけが埋まり、残りは null です。
+//
+// 🤔 なぜスロットを全体で一意にするのか
+//   1 つのクラスが複数のインタフェースを実装できるようにするためです。
+//   インタフェースごとに 0 から番号を振ると、呼ぶ側（インタフェースしか
+//   知らない）がどの表のどこを見ればよいか決められません。
+//   ⚠️ 代わりに表は疎になります。インタフェースが増えると全クラスの表が
+//     伸びるので、数が多くなったら別の方式（実行時に探す）が要ります。
+static void gen_vtable(Emitter *e, Class *c) {
+    if (!c->impls) return;
+    for (StrLit *t = e->vtables; t; t = t->next)
+        if (strcmp(t->label, c->ir_name) == 0) return;  // 出済み
+
+    StrLit *rec = xmalloc(sizeof(StrLit));
+    rec->label = c->ir_name;
+    rec->next = e->vtables;
+    e->vtables = rec;
+
+    int n = pl_iface_slots;
+    sb_printf(&e->globals, "@vt.%s = private constant [%d x ptr] [", c->ir_name,
+              n);
+    for (int i = 0; i < n; i++) {
+        const char *fn = NULL;
+        for (IfaceList *l = c->impls; l && !fn; l = l->next)
+            for (IMethod *im = l->iface->methods; im; im = im->next)
+                if (im->slot == i) {
+                    // ★ そのクラスの実装（名前は "Class.method" で修飾済み）
+                    static char buf[256];
+                    snprintf(buf, sizeof(buf), "%s.%s", c->ir_name, im->name);
+                    fn = buf;
+                    break;
+                }
+        if (fn)
+            sb_printf(&e->globals, "%sptr @%s", i ? ", " : "", fn);
+        else
+            sb_printf(&e->globals, "%sptr null", i ? ", " : "");
+    }
+    sb_printf(&e->globals, "]\n");
+}
+
 static char *gen_new(Emitter *e, Node *n) {
     Class *c = n->cls;
 
     declare_rt(e, "ptr @pl_alloc(i64)");
     char *obj = new_tmp(e);
     sb_printf(&e->fn, "  %s = call ptr @pl_alloc(i64 %d)\n", obj, c->size);
+
+    // ★ 第41章：インタフェースを実装するなら、先頭に vtable を入れます。
+    //   ⚠️ ここを忘れると、インタフェース越しの呼び出しが null を呼びます。
+    if (c->impls) {
+        gen_vtable(e, c);
+        char *vp = new_tmp(e);
+        sb_printf(&e->fn,
+                  "  %s = getelementptr %%%s.type, ptr %s, i32 0, i32 0\n", vp,
+                  c->ir_name, obj);
+        sb_printf(&e->fn, "  store ptr @vt.%s, ptr %s\n", c->ir_name, vp);
+    }
 
     // ★ ゼロ初期化では足りない型に、有効な値を入れておきます。
     //   str → ""、list[T] → 空のリスト。
@@ -1344,6 +1437,12 @@ static void gen_class_type(Emitter *e, Class *c) {
 
     sb_printf(&e->header, "%%%s.type = type { ", c->ir_name);
     bool first = true;
+    // ★ 第41章：インタフェースを実装するなら、先頭に vtable へのポインタ。
+    //   ⚠️ sema の layout_class と **並びを揃えること**（ずれると全部壊れます）。
+    if (c->impls) {
+        sb_printf(&e->header, "ptr");
+        first = false;
+    }
     for (Field *f = c->fields; f; f = f->next) {
         sb_printf(&e->header, "%s%s", first ? "" : ", ", llvm_mem_type(f->type));
         first = false;

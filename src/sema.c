@@ -81,6 +81,7 @@ struct FuncSig {
 //   他のモジュールの中身は、必ず修飾（lexer.Token）を通してしか見えません。
 struct ModuleSyms {
     Module *mod;
+    Iface *ifaces;     // 第41章：インタフェース
     FuncSig *funcs;    // トップレベル関数とメソッド
     Class *classes;
     Scope *globals;    // グローバル変数のスコープ
@@ -108,6 +109,8 @@ typedef struct {
                        // ★ 第13章：これは「今検査中のモジュールの」表です
     FuncSig *cur_func; // 今どの関数を検査中か（return の検査に必要）
     Class *classes;    // クラス表（第12章。同上、モジュールごと）
+    Iface *ifaces;     // 第41章：インタフェース表（モジュールごと）
+    int next_slot;     // 第41章：次に振る vtable のスロット番号
 
     // ── 第13章：モジュール ──
     ModuleSyms *cur;   // 今検査中のモジュール
@@ -211,11 +214,13 @@ static void enter_module(Sema *s, ModuleSyms *ms) {
     if (s->cur) {  // 今のモジュールの状態を保存する
         s->cur->funcs = s->funcs;
         s->cur->classes = s->classes;
+        s->cur->ifaces = s->ifaces;
         s->cur->globals = s->scope;
     }
     s->cur = ms;
     s->funcs = ms->funcs;
     s->classes = ms->classes;
+    s->ifaces = ms->ifaces;
     s->scope = ms->globals;
 }
 
@@ -233,6 +238,19 @@ static char *mangle(const char *prefix, const char *name);
 
 static char *mod_mangle(Sema *s, const char *name) {
     return mangle(s->cur->mod->name, name);
+}
+
+// ── 第41章：インタフェースを引く ────────────────────────────
+static Iface *lookup_iface_in(ModuleSyms *ms, const char *name) {
+    for (Iface *i = ms->ifaces; i; i = i->next)
+        if (strcmp(i->name, name) == 0) return i;
+    return NULL;
+}
+
+static Iface *lookup_iface(Sema *s, const char *name) {
+    for (Iface *i = s->ifaces; i; i = i->next)
+        if (strcmp(i->name, name) == 0) return i;
+    return NULL;
 }
 
 static FuncSig *lookup_func_in(ModuleSyms *ms, const char *name) {
@@ -617,6 +635,10 @@ static Type *resolve_base_type(Sema *s, Node *tr) {
                               tr->mod_name);
             diag_fail(&d);
         }
+        // ★ 第41章：他のモジュールのインタフェース
+        Iface *mi = lookup_iface_in(ms, tr->name);
+        if (mi) return type_iface(mi->name, mi);
+
         Class *c = lookup_class_in(ms, tr->name);
         if (!c) {
             Diag d = {0};
@@ -699,6 +721,15 @@ static Type *resolve_base_type(Sema *s, Node *tr) {
             error_at_hint(tr->tok, "要素型を取るのは list と rc だけです",
                           "型 '%s' は要素型を取りません", tr->name);
         return t;
+    }
+
+    // ★ 第41章：インタフェース名も型として書けます（list[Show] など）
+    Iface *ifc0 = lookup_iface(s, tr->name);
+    if (ifc0) {
+        if (tr->lhs)
+            error_at_hint(tr->tok, "インタフェースは型引数を取りません",
+                          "型 '%s' は型引数を取りません", tr->name);
+        return type_iface(ifc0->name, ifc0);
     }
 
     // ★ 第12章：組み込みの型名で無ければ、クラス名として引きます。
@@ -1873,6 +1904,55 @@ static Type *check_method(Sema *s, Node *n) {
 
     if (ot->kind == TY_CLASS) return check_class_method(s, n, ot->cls);
 
+    // ★ 第41章：インタフェース越しの呼び出し。
+    //   どの実装が呼ばれるかは **実行時に**決まります（vtable を引く）。
+    if (ot->kind == TY_IFACE) {
+        Iface *ifc = ot->iface;
+        IMethod *im = NULL;
+        for (IMethod *q = ifc->methods; q; q = q->next)
+            if (strcmp(q->name, n->name) == 0) { im = q; break; }
+        if (!im) {
+            Diag d = {0};
+            d.message = diag_fmt("インタフェース '%s' に '%s' はありません",
+                                 ifc->name, n->name);
+            d.primary.tok = n->tok;
+            d.primary.label = "このメソッドは宣言されていません";
+            d.related.tok = ifc->tok;
+            d.related.label = "インタフェースの定義はここです";
+            d.hint = "インタフェース越しに呼べるのは、そこに宣言したものだけです";
+            diag_fail(&d);
+        }
+
+        Node *sig = im->sig;
+        int want = 0;
+        for (Node *pm = sig->params; pm; pm = pm->next) want++;
+        want--;                       // self は数えない
+        int nargs = 0;
+        for (Node *a = n->args; a; a = a->next) nargs++;
+        if (nargs != want)
+            error_at_hint(n->tok,
+                          diag_fmt("'%s.%s' は %d 個の引数を取ります", ifc->name,
+                                   n->name, want),
+                          "引数の個数が違います（%d 個渡されました）", nargs);
+
+        int k = 1;
+        Node *pm = sig->params->next;
+        for (Node *a = n->args; a; a = a->next, pm = pm->next, k++) {
+            Type *wt = resolve_type(s, pm->type_ref);
+            s->expected = wt;
+            Type *at = check_expr(s, a);
+            s->expected = NULL;
+            if (!type_assignable(at, wt))
+                error_at_hint(a->tok,
+                              diag_fmt("ここには '%s' が必要です", type_name(wt)),
+                              "%d 番目の引数が '%s' 型です", k, type_name(at));
+        }
+
+        n->iface_slot = im->slot;
+        n->is_iface_call = true;
+        return resolve_type(s, sig->type_ref);
+    }
+
     // ★ 第37章：list のメソッドを増やしました。
     //   引数と戻り型は「表」で持ちます。1 つずつ if を書くと、増やすたびに
     //   同じ形のコードが並ぶためです。
@@ -2719,7 +2799,13 @@ static int align_up(int offset, int align) {
 }
 
 static void layout_class(Class *c) {
-    int offset = 0, max_align = 1, index = 0;
+    // ★ 第41章：インタフェースを 1 つでも実装するなら、**先頭に隠しフィールド**
+    //   （vtable へのポインタ）を 1 つ置きます。これがあるおかげで、
+    //   クラス → インタフェースの変換が「何もしない」で済みます。
+    //   ⚠️ 利用者から見える名前は付けません（フィールドの並びには入れない）。
+    int offset = c->impls ? 8 : 0;
+    int max_align = c->impls ? 8 : 1;
+    int index = c->impls ? 1 : 0;
     for (Field *f = c->fields; f; f = f->next) {
         int a = type_align(f->type);
         offset = align_up(offset, a);  // ★ パディングはここで入る
@@ -2872,8 +2958,186 @@ static void check_fields_initialized(Sema *s, Class *c) {
     }
 }
 
+// ── 第41章：インタフェース ──────────────────────────────────
+//
+// ★ 表現の決め方（design/future-features.md §2 から変更しました）
+//
+//   設計書ではファットポインタ（実体 + vtable の 2 語）を想定していましたが、
+//   この処理系は **「値はどれも 8 バイト」** という前提で組まれています
+//   （list の要素も、フィールドも、引数も）。2 語にすると全部に手が要ります。
+//
+//   そこで **vtable へのポインタをオブジェクトの先頭に隠しフィールドとして
+//   持たせる**方式にしました。こうすると:
+//     - インタフェースの値は「ただのポインタ」＝ 8 バイトのまま
+//     - クラス → インタフェースの変換が **何もしないで済む**（同じポインタ）
+//   代わりに、インタフェースを実装するクラスは 8 バイト大きくなります。
+//
+// ⚠️ メソッドのスロット番号は **プログラム全体で一意**にします。
+//   1 つのクラスが複数のインタフェースを実装できるようにするためです
+//   （クラスごとの vtable は「全スロットぶんの配列」になります）。
+static void declare_iface(Sema *s, Node *n) {
+    if (lookup_iface(s, n->name) || lookup_class(s, n->name)) {
+        Diag d = {0};
+        d.message = diag_fmt("'%s' は既に定義されています", n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "ここで再定義されています";
+        diag_fail(&d);
+    }
+
+    Iface *ifc = xmalloc(sizeof(Iface));
+    ifc->name = n->name;
+    ifc->ir_name = mod_mangle(s, n->name);
+    ifc->tok = n->tok;
+    ifc->owner = s->cur;
+
+    IMethod tail = {0};
+    IMethod *cur = &tail;
+    int nm = 0;
+    for (Node *m = n->body; m; m = m->next) {
+        for (IMethod *q = tail.next; q; q = q->next)
+            if (strcmp(q->name, m->name) == 0)
+                error_at_hint(m->tok,
+                              "同じ名前のメソッドを 2 度書くことはできません",
+                              "メソッド '%s' が重複しています", m->name);
+        IMethod *im = xmalloc(sizeof(IMethod));
+        im->name = m->name;
+        im->sig = m;
+        im->slot = s->next_slot++;   // ★ プログラム全体で一意
+        cur->next = im;
+        cur = im;
+        nm++;
+    }
+    ifc->methods = tail.next;
+    ifc->nmethods = nm;
+
+    ifc->next = s->ifaces;
+    s->ifaces = ifc;
+    n->type = type_iface(n->name, ifc);
+}
+
+// 型注釈に書かれたインタフェース名を引く
+static Iface *resolve_iface_ref(Sema *s, Node *tr) {
+    if (tr->mod_name) {
+        ModuleSyms *ms = lookup_import(s, tr->mod_name);
+        if (!ms)
+            error_at_hint(tr->tok,
+                          diag_fmt("ファイルの先頭に 'import %s' を書いてください",
+                                   tr->mod_name),
+                          "モジュール '%s' を import していません", tr->mod_name);
+        Iface *i = lookup_iface_in(ms, tr->name);
+        if (!i)
+            error_at_hint(tr->tok, "インタフェース名を確認してください",
+                          "モジュール '%s' にインタフェース '%s' はありません",
+                          tr->mod_name, tr->name);
+        return i;
+    }
+    Iface *i = lookup_iface(s, tr->name);
+    if (!i) {
+        Diag d = {0};
+        d.message = diag_fmt("インタフェース '%s' が見つかりません", tr->name);
+        d.primary.tok = tr->tok;
+        d.primary.label = "ここに書けるのはインタフェース名だけです";
+        d.hint = lookup_class(s, tr->name)
+                     ? diag_fmt("'%s' はクラスです。継承はありません", tr->name)
+                     : "interface で宣言してから使ってください";
+        diag_fail(&d);
+    }
+    return i;
+}
+
+// クラスが宣言どおりのメソッドを持っているかを確かめる
+static void check_implements(Sema *s, Class *c, Iface *ifc, Token *at) {
+    for (IMethod *im = ifc->methods; im; im = im->next) {
+        StrBuf key;
+        sb_init(&key);
+        sb_printf(&key, "%s.%s", c->name, im->name);
+        FuncSig *f = lookup_func(s, sb_str(&key));
+        if (!f) {
+            Diag d = {0};
+            d.message = diag_fmt("クラス '%s' に '%s' がありません", c->name,
+                                 im->name);
+            d.primary.tok = at;
+            d.primary.label = diag_fmt("'%s' を実装すると宣言しています",
+                                       ifc->name);
+            d.related.tok = im->sig->tok;
+            d.related.label = "このメソッドが必要です";
+            diag_fail(&d);
+        }
+
+        // 引数の型と戻り型が一致するか（self は数えない）
+        Node *sig = im->sig;
+        int want = 0;
+        for (Node *pm = sig->params; pm; pm = pm->next) want++;
+        if (f->nparams != want) {
+            Diag d = {0};
+            d.message = diag_fmt("'%s.%s' の引数の数が宣言と違います", c->name,
+                                 im->name);
+            d.primary.tok = f->tok;
+            d.primary.label = diag_fmt("%d 個です", f->nparams);
+            d.related.tok = sig->tok;
+            d.related.label = diag_fmt("宣言では %d 個です", want);
+            diag_fail(&d);
+        }
+        int k = 0;
+        for (Node *pm = sig->params; pm; pm = pm->next, k++) {
+            if (k == 0) continue;   // self
+            Type *wt = resolve_type(s, pm->type_ref);
+            if (!type_equal(f->params[k], wt)) {
+                Diag d = {0};
+                d.message = diag_fmt("'%s.%s' の %d 番目の引数の型が宣言と違います",
+                                     c->name, im->name, k);
+                d.primary.tok = f->tok;
+                d.primary.label = diag_fmt("'%s' 型です", type_name(f->params[k]));
+                d.related.tok = pm->tok;
+                d.related.label = diag_fmt("宣言では '%s' 型です", type_name(wt));
+                diag_fail(&d);
+            }
+        }
+        Type *wr = resolve_type(s, sig->type_ref);
+        if (!type_equal(f->ret, wr)) {
+            Diag d = {0};
+            d.message = diag_fmt("'%s.%s' の戻り型が宣言と違います", c->name,
+                                 im->name);
+            d.primary.tok = f->tok;
+            d.primary.label = diag_fmt("'%s' を返します", type_name(f->ret));
+            d.related.tok = sig->tok;
+            d.related.label = diag_fmt("宣言では '%s' です", type_name(wr));
+            diag_fail(&d);
+        }
+        if (f->nraises > 0)
+            error_at_hint(f->tok,
+                          "インタフェース越しには呼べません"
+                          "（エラーの受け渡しを表せないため）",
+                          "'%s.%s' は raises します", c->name, im->name);
+    }
+}
+
+// クラスがそのインタフェースを実装しているか
+static bool class_implements(Class *c, Iface *ifc) {
+    for (IfaceList *l = c->impls; l; l = l->next)
+        if (l->iface == ifc) return true;
+    return false;
+}
+
 static void declare_class_members(Sema *s, Node *n) {
     Class *c = n->cls;
+
+    // ★ 第41章：実装するインタフェースを先に決めます。
+    //   レイアウト（隠しフィールドの有無）がこれで変わるためです。
+    //   ⚠️ メソッドの照合は、メソッドを登録した**後**に行います。
+    IfaceList *itail = NULL;
+    for (Node *ir = n->ifaces; ir; ir = ir->next) {
+        Iface *ifc = resolve_iface_ref(s, ir);
+        for (IfaceList *l = c->impls; l; l = l->next)
+            if (l->iface == ifc)
+                error_at_hint(ir->tok, "同じインタフェースを 2 度書けません",
+                              "'%s' は既に書かれています", ifc->name);
+        IfaceList *nl = xmalloc(sizeof(IfaceList));
+        nl->iface = ifc;
+        nl->next = NULL;
+        if (itail) itail->next = nl; else c->impls = nl;
+        itail = nl;
+    }
 
     // ① フィールド（宣言順にリストの末尾へ足す。並び順がレイアウトになる）
     Field tail = {0};
@@ -2915,6 +3179,10 @@ static void declare_class_members(Sema *s, Node *n) {
 
     // ③ 第15章：クラス型のフィールドが None から始まらないことを確かめる
     check_fields_initialized(s, c);
+
+    // ④ 第41章：宣言したインタフェースを本当に実装しているか
+    for (Node *ir = n->ifaces; ir; ir = ir->next)
+        check_implements(s, c, resolve_iface_ref(s, ir), ir->tok);
 }
 
 // extern の引数と戻り値に使える型か（第14章）。
@@ -3169,6 +3437,10 @@ static void check_main(Sema *s, Node *ast) {
 
 // モジュール 1 つぶんの宣言を登録する（パス 1a / 1b / 1c）
 static void declare_module(Sema *s, Node *ast) {
+    // ★ 第41章：インタフェースを最初に登録します（クラスが実装を宣言するため）
+    for (Node *d = ast->body; d; d = d->next)
+        if (d->kind == ND_IFACE) declare_iface(s, d);
+
     // 1a：クラス名だけ先に登録する（クラスどうしが互いを参照できるように）
     for (Node *d = ast->body; d; d = d->next)
         if (d->kind == ND_CLASS) declare_class(s, d);
@@ -3188,6 +3460,7 @@ static void declare_module(Sema *s, Node *ast) {
         else if (d->kind == ND_CLASS) continue;  // 1a / 1b で済んでいる
         else if (d->kind == ND_IMPORT) continue;  // 読み込みは module.c が済ませた
         else if (d->kind == ND_PRAGMA) continue;  // 第31章：設定（宣言ではない）
+        else if (d->kind == ND_IFACE) continue;   // 第41章：上で済んでいる
         else UNREACHABLE();  // parser が保証している
     }
 }
@@ -3217,6 +3490,9 @@ static void check_module(Sema *s, Node *ast) {
 // ファイル単位でもう 1 回やっているだけです。
 void sema_program(Module *mods, Module *entry) {
     Sema s = {0};
+
+    // ★ 第41章：型の代入互換に「実装しているか」を教える
+    class_implements_hook = class_implements;
 
     // 各モジュールのシンボル表を用意する（この時点では空）
     ModuleSyms *tail = NULL;
@@ -3260,6 +3536,9 @@ void sema_program(Module *mods, Module *entry) {
             s.tbind = NULL;
         }
     }
+
+    // ★ 第41章：vtable の長さを codegen に伝える
+    pl_iface_slots = s.next_slot;
 
     // main は入口モジュールにだけ要る（他のモジュールにあっても構わない）
     enter_module(&s, entry->syms);

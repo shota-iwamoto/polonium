@@ -76,6 +76,7 @@ typedef enum {
     ND_FLOAT,   // 浮動小数点リテラル → sval（正規化済みの文字列。lexer.c 参照）
     ND_COND,    // 三項演算子 a if c else b → lhs（条件）, rhs（真）, els（偽）
     ND_SLICE,   // xs[a:b] → lhs（対象）, rhs（開始。省略時 NULL）, els（終端。省略時 NULL）
+    ND_IFACE,   // interface 宣言 → name, body（本体の無い ND_FUNC の並び）
 } NodeKind;
 
 // 演算子の種類。
@@ -157,6 +158,35 @@ struct Field {
 struct ModuleSyms;
 
 typedef struct Class Class;
+// ── 第41章：インタフェース ──────────────────────────────────
+//
+// ★ 「振る舞いだけ」を集めたものです。フィールドは持ちません。
+//   実装は継承ではなく **宣言**（class C(I): と書く）で表します。
+typedef struct IMethod IMethod;
+struct IMethod {
+    char *name;
+    Node *sig;      // 本体の無い ND_FUNC（引数と戻り型を持つ）
+    int slot;       // ★ プログラム全体で一意の番号（vtable の添字）
+    IMethod *next;
+};
+
+typedef struct IfaceList IfaceList;
+struct IfaceList {
+    struct Iface *iface;
+    IfaceList *next;
+};
+
+typedef struct Iface Iface;
+struct Iface {
+    char *name;
+    char *ir_name;
+    Token *tok;
+    IMethod *methods;
+    int nmethods;
+    struct ModuleSyms *owner;
+    Iface *next;
+};
+
 struct Class {
     char *name;
     char *ir_name;   // IR 上の修飾名（第13章。"lexer.Token"）。型は %lexer.Token.type
@@ -176,6 +206,12 @@ struct Class {
 
     // ★ 第40章：この実体の元になったテンプレート（実体でなければ NULL）
     Class *from_template;
+
+    // ★ 第41章：実装するインタフェースの並び（無ければ NULL）。
+    //   1 つでも実装していると、**先頭に隠しフィールド（vtable への
+    //   ポインタ）が 1 つ増えます**。これがあるおかげで、クラスから
+    //   インタフェースへの変換が「何もしない」で済みます。
+    struct IfaceList *impls;
 
     Class *next;
 };
@@ -327,6 +363,13 @@ struct Node {
     // ★ 第39章：min / max（2 引数なので組み込みの表に載らない）
     bool is_minmax;
 
+    // ★ 第41章：この class が実装するインタフェースの並び（ND_TYPEREF）
+    Node *ifaces;
+
+    // ★ 第41章：インタフェース越しの呼び出し（vtable の何番目か）
+    bool is_iface_call;
+    int iface_slot;
+
     // ★ 第40章：ジェネリクス。
     //   ND_TYPEREF … 型引数の並び（Dict[str, int] の str と int）を targs に
     //   ND_CLASS   … 型引数の名前の並び（class Dict[K, V] の K と V）を targs に
@@ -365,6 +408,11 @@ Node *new_unary_node(Token *tok, OpKind op, Node *operand);
 
 // 第40章：AST の深い複製（ジェネリクスの単相化）
 Node *ast_clone(Node *n);
+
+// ★ 第41章：プログラム全体のインタフェース・メソッド数（vtable の長さ）。
+//   ⚠️ sema が数え、codegen が読みます。codegen の引数を増やさないための
+//     割り切りです（引数を増やすと 2 つの実装の両方に手が要るため）。
+extern int pl_iface_slots;
 Node *new_var_node(Token *tok, char *name);
 
 // AST を S 式で標準出力に表示する（--dump-ast 用）。

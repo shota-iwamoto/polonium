@@ -56,8 +56,17 @@ Type *type_strip_opt(Type *t) { return t->kind == TY_OPT ? t->elem : t; }
 //       type_equal(S, T)                             (a) 完全一致
 //       または (T が T2|None で S が None リテラル)     (b)
 //       または (T が T2|None で assignable(S → T2))    (c) 広げる方向だけ許す
+// 第41章：クラスがインタフェースを実装しているか（sema が入れる）
+bool (*class_implements_hook)(struct Class *c, struct Iface *i) = NULL;
+
 bool type_assignable(Type *from, Type *to) {
     if (type_equal(from, to)) return true;
+
+    // ★ 第41章：クラス → インタフェース（実装していれば代入できる）。
+    //   ⚠️ **値の変換は起きません。** vtable へのポインタはオブジェクトの
+    //     先頭に入っているので、ポインタはそのままです。
+    if (to->kind == TY_IFACE && from->kind == TY_CLASS && class_implements_hook)
+        return class_implements_hook(from->cls, to->iface);
     if (to->kind != TY_OPT) return false;
     if (from->kind == TY_NULL) return true;
     return type_assignable(from, to->elem);
@@ -85,6 +94,14 @@ Type *type_ptr(Type *elem) {
     return t;
 }
 
+// 第41章：インタフェースの型
+Type *type_iface(char *name, struct Iface *i) {
+    Type *t = new_type(TY_IFACE);
+    t->name = name;
+    t->iface = i;
+    return t;
+}
+
 Type *type_class(char *name, struct Class *cls) {
     Type *t = new_type(TY_CLASS);
     t->name = name;
@@ -101,6 +118,7 @@ int type_size(Type *t) {
     switch (t->kind) {
         case TY_BOOL: return 1;  // メモリ上は i8（規約 R5）
         case TY_INT:
+        case TY_IFACE:  // 第41章：実体へのポインタ
         case TY_FN:     // 関数へのポインタ
         case TY_FLOAT:  // double も 8 バイト
         case TY_STR:
@@ -145,6 +163,9 @@ bool type_equal(Type *a, Type *b) {
     //   定義ポインタで比べておけば、そのとき何も直さずに済みます。
     if (a->kind == TY_CLASS) return a->cls == b->cls;
 
+    // ★ 第41章：インタフェースも定義で比べます（名前ではありません）
+    if (a->kind == TY_IFACE) return a->iface == b->iface;
+
     // ★ 第15章：T | None は中身どうしを比べる。
     //   type_equal を触るのは 4 度目です（ch5 → ch10 → ch12 → ch15）。
     if (a->kind == TY_OPT) return type_equal(a->elem, b->elem);
@@ -168,6 +189,7 @@ const char *type_name(Type *t) {
             return sb_str(&sb);
         }
         case TY_CLASS: return t->name;  // 第12章
+        case TY_IFACE: return t->name;  // 第41章
         case TY_PTR: {  // 第30章
             StrBuf sb;
             sb_init(&sb);

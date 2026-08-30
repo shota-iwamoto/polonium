@@ -91,6 +91,8 @@ static const char *KEYWORDS[] = {
     // ★ del / try / except / with は v1 の時点で予約済みなので下の表にあります。
     // ⚠️ raise は v1 の時点で予約済み（下の表）。ここに書くと重複します。
     "own", "mut", "raises", "unsafe", "pragma",
+    // 第41章：インタフェース
+    "interface",
     // 将来のために予約（使うとエラーになる）
     "assert", "const", "del", "except", "finally", "from", "global", "lambda",
     "match", "nonlocal", "raise", "try", "with", "yield",

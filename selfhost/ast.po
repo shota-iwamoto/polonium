@@ -22,6 +22,11 @@ TY_RC: int = 8       # rc[T]（共有所有。第28章）
 # ⚠️ 9 は TY_PTR（C 版だけが持つ低レベル型）。値をずらさないよう空けます。
 TY_FLOAT: int = 10   # float → double（第34章）
 TY_FN: int = 11      # fn(A, B) -> C → ptr（関数へのポインタ。第38章）
+TY_IFACE: int = 12   # interface → ptr（実体へのポインタ。第41章）
+
+# ★ 第41章：プログラム全体のインタフェース・メソッド数（vtable の長さ）。
+#   ⚠️ sema が数え、codegen が読みます（codegen の引数を増やさないための割り切り）。
+IFACE_SLOTS: int = 0
 
 
 class Type:
@@ -29,6 +34,7 @@ class Type:
     elem: Type | None     # list[T] の要素型 / T | None の中身 / fn の**戻り型**
     name: str             # クラス名（エラーメッセージ用）
     cls: Class | None     # 定義への参照。★ 型の同一性はこれで判定する
+    iface: Iface | None   # 第41章：TY_IFACE のときの定義への参照
     opt: Type | None      # この型の「T | None」版（1 個だけ作る）
     # ★ 第38章：関数型の引数の並び（fn 以外では空）
     params: list[Type]
@@ -54,6 +60,37 @@ class Field:
         self.offset = 0
 
 
+# ── 第41章：インタフェース ──────────────────────────────────
+#
+# ★ 「振る舞いだけ」を集めたもの。フィールドは持たない。
+#   実装は継承ではなく **宣言**（class C(I): と書く）で表す。
+class IMethod:
+    name: str
+    sig: Node | None    # 本体の無い ND_FUNC
+    slot: int           # ★ プログラム全体で一意（vtable の添字）
+
+    def init(self, name: str, sig: Node, slot: int) -> None:
+        self.name = copy(name)
+        self.sig = sig
+        self.slot = slot
+
+
+class Iface:
+    name: str
+    ir_name: str
+    tok: token.Token | None
+    methods: list[IMethod]
+    owner_name: str
+    next: Iface | None
+
+    def init(self, name: str, tok: token.Token | None) -> None:
+        self.name = copy(name)
+        self.tok = tok
+        self.ir_name = ""
+        self.owner_name = ""
+        self.methods = []
+
+
 class Class:
     name: str
     ir_name: str          # IR 上の修飾名（"lexer.Token"）
@@ -68,6 +105,9 @@ class Class:
     owner_name: str   # 定義されているモジュール名（第13章）
     # ★ 第40章：この実体の元になったテンプレート（実体でなければ None）
     from_template: Class | None
+    # ★ 第41章：実装するインタフェースの並び。1 つでもあると
+    #   **先頭に隠しフィールド（vtable へのポインタ）が増える**。
+    impls: list[Iface]
     next: Class | None
 
     def init(self, name: str, tok: token.Token | None) -> None:
@@ -79,6 +119,7 @@ class Class:
         self.size = 0
         self.align = 0
         self.has_init = False
+        self.impls = []      # 第41章
 
 
 # ── プリミティブ型のシングルトン ────────────────────────────
@@ -113,6 +154,14 @@ def type_rc(elem: Type | None) -> Type:
     t: Type = Type(TY_RC)
     t.elem = elem
     return t
+
+# 第41章：インタフェースの型
+def type_iface(name: str, i: Iface | None) -> Type:
+    t: Type = Type(TY_IFACE)
+    t.name = copy(name)
+    t.iface = i
+    return t
+
 
 def type_class(name: str, c: Class | None) -> Type:
     t: Type = Type(TY_CLASS)
@@ -168,9 +217,22 @@ def type_equal(a: Type, b: Type) -> bool:
         return type_equal(elem_of(a), elem_of(b))
     if a.kind == TY_CLASS:
         return same_class(a, b)
+    # ★ 第41章：インタフェースも定義で比べる（名前ではない）
+    if a.kind == TY_IFACE:
+        return same_iface(a, b)
     if a.kind == TY_OPT:
         return type_equal(elem_of(a), elem_of(b))
     return True
+
+# ★ 第41章：インタフェースも「同じ定義か」で比べる
+# ⚠️ 'T | None' 同士は == で比べられないので、先に絞り込みます
+def same_iface(a: Type, b: Type) -> bool:
+    ia: Iface | None = a.iface
+    ib: Iface | None = b.iface
+    if ia is None or ib is None:
+        return False
+    return ia == ib
+
 
 # ★ クラスは「同じ定義か」で比べる（名前の一致ではない）
 def same_class(a: Type, b: Type) -> bool:
@@ -187,6 +249,19 @@ def same_class(a: Type, b: Type) -> bool:
 def type_assignable(from_: Type, to: Type) -> bool:
     if type_equal(from_, to):
         return True
+
+    # ★ 第41章：クラス → インタフェース（実装していれば代入できる）。
+    #   ⚠️ **値の変換は起きない。** vtable へのポインタはオブジェクトの
+    #     先頭に入っているので、ポインタはそのまま。
+    if to.kind == TY_IFACE and from_.kind == TY_CLASS:
+        c: Class | None = from_.cls
+        ti: Iface | None = to.iface
+        if c is not None and ti is not None:
+            for im in c.impls:
+                if im == ti:
+                    return True
+        return False
+
     if to.kind != TY_OPT:
         return False
     if from_.kind == TY_NULL:
@@ -204,6 +279,8 @@ def type_name(t: Type) -> str:
         return "str"
     if t.kind == TY_FLOAT:
         return "float"
+    if t.kind == TY_IFACE:
+        return t.name
     if t.kind == TY_FN:
         ps: list[str] = []
         for pt in t.params:
@@ -273,6 +350,7 @@ ND_RAISE: int = 31   # raise 文  → lhs
 ND_FLOAT: int = 34   # 浮動小数点リテラル → sval（正規化済みの文字列。第34章）
 ND_COND: int = 35    # 三項演算子 a if c else b → lhs（条件）, rhs（真）, els（偽）
 ND_SLICE: int = 36   # xs[a:b] → lhs, rhs（開始）, els（終端）
+ND_IFACE: int = 37   # interface 宣言 → name, body（本体の無い ND_FUNC の並び）
 
 # ── 仮引数の受け取り方（C 版 ParamMode と同じ順序・同じ値。第21章）──
 PM_BORROW: int = 0   # 既定。読むだけ借りる
@@ -449,6 +527,11 @@ class Node:
     #   ND_TYPEREF … 型引数の並び（Dict[str, int] の str と int）
     #   ND_CLASS   … 型引数の名前の並び（class Dict[K, V] の K と V）
     targs: Node | None
+    # ★ 第41章：この class が実装するインタフェースの並び（ND_TYPEREF）
+    ifaces: Node | None
+    # ★ 第41章：インタフェース越しの呼び出し（vtable の何番目か）
+    is_iface_call: bool
+    iface_slot: int
     type_ref: Node | None   # 型注釈の木
 
     # ── 第27章：エラー処理 ──
@@ -478,6 +561,9 @@ class Node:
         self.is_indirect = False    # 第38章
         self.is_minmax = False      # 第39章
         self.targs = None           # 第40章
+        self.ifaces = None          # 第41章
+        self.is_iface_call = False  # 第41章
+        self.iface_slot = 0
         self.mode = PM_BORROW
         # ── 第27章 ──
         self.can_fail = False
@@ -562,6 +648,14 @@ def dump(n: Node | None, depth: int) -> None:
     elif n.kind == ND_FLOAT:
         # ★ 第34章：正規化済みの文字列をそのまま出す（C 版と同じ形）
         print(pad + "(float " + n.sval + ")")
+    elif n.kind == ND_IFACE:
+        print(pad + "(interface " + n.name)
+        mi: Node | None = n.body
+        while mi is not None:
+            mn: Node = mi
+            dump(mn, depth + 1)
+            mi = mn.next
+        print(pad + ")")
     elif n.kind == ND_COND:
         print(pad + "(cond")
         dump(n.lhs, depth + 1)
@@ -625,7 +719,14 @@ def dump(n: Node | None, depth: int) -> None:
         dump(n.lhs, depth + 1)
         print(pad + ")")
     elif n.kind == ND_CLASS:
-        print(pad + "(class " + n.name)
+        cparts: list[str] = []
+        cparts.append(pad + "(class " + n.name)
+        ifn: Node | None = n.ifaces
+        while ifn is not None:
+            ifx: Node = ifn
+            cparts.append(" :" + ifx.name)
+            ifn = ifx.next
+        print(strings.join(cparts, ""))
         dump_siblings(n.body, depth + 1)
         print(pad + ")")
     elif n.kind == ND_FIELDDECL:
@@ -760,6 +861,14 @@ def ast_clone(n: Node | None) -> Node | None:
     c.params = ast_clone(src.params)
     c.type_ref = ast_clone(src.type_ref)
     c.targs = ast_clone(src.targs)
+    c.ifaces = ast_clone(src.ifaces)
     c.incr = ast_clone(src.incr)
     c.next = ast_clone(src.next)
     return c
+
+
+def set_iface_slots(n: int) -> None:
+    IFACE_SLOTS = n
+
+def iface_slots() -> int:
+    return IFACE_SLOTS

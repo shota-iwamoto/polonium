@@ -1640,7 +1640,7 @@ static Node *param(Parser *p, bool allow_self) {
 // func_def ::= "def" IDENT "(" [ param_list ] ")" "->" type ":" block
 //
 // in_class … クラス本体の中か（第12章。true なら第 1 引数に self を書ける）
-static Node *func_def(Parser *p, bool in_class) {
+static Node *func_def_x(Parser *p, bool in_class, bool in_iface) {
     Token *kw = advance(p);  // "def"
 
     Token *name_tok = peek(p);
@@ -1713,8 +1713,73 @@ static Node *func_def(Parser *p, bool in_class) {
         n->raises = rhead.next;
     }
 
+    // ★ 第41章：インタフェースの中では本体を書きません。
+    //   `def show(self) -> str` で改行します（':' も本体も書かない）。
+    if (in_iface) {
+        if (tok_is(peek(p), ":")) {
+            Diag d = {0};
+            d.message = "インタフェースのメソッドに本体は書けません";
+            d.primary.tok = peek(p);
+            d.primary.label = "ここに ':' は書けません";
+            d.hint = "インタフェースは「何ができるか」だけを並べます"
+                     "（実装はクラス側に書きます）";
+            diag_fail(&d);
+        }
+        expect_newline(p);
+        return n;
+    }
+
     expect_colon(p, "def の宣言");
     n->body = block(p);
+    return n;
+}
+
+static Node *func_def(Parser *p, bool in_class) {
+    return func_def_x(p, in_class, false);
+}
+
+// interface_def ::= "interface" IDENT ":" NEWLINE INDENT { def_sig } DEDENT（第41章）
+//
+// ★ 「振る舞いだけ」を集めたものです。フィールドは持ちません
+//   （持てるようにすると、それは継承になります）。
+static Node *iface_def(Parser *p) {
+    Token *kw = advance(p);  // "interface"
+
+    Token *name_tok = peek(p);
+    if (name_tok->kind != TK_IDENT)
+        error_at_hint(name_tok,
+                      "interface の後には名前を書きます（例: interface Show:）",
+                      "インタフェース名が必要です");
+    advance(p);
+
+    Node *n = new_node(ND_IFACE, kw);
+    n->name = name_tok->text;
+
+    expect_colon(p, "interface の宣言");
+    expect(p, TK_NEWLINE, "改行", "':' の後は改行して本体を字下げしてください");
+    expect(p, TK_INDENT, "字下げされた本体",
+           "インタフェースの中身は字下げして書きます（スペース 4 個を推奨）");
+
+    Node head = {0};
+    Node *cur = &head;
+    while (peek(p)->kind != TK_DEDENT && peek(p)->kind != TK_EOF) {
+        if (!tok_is_kw(peek(p), "def")) {
+            Diag d = {0};
+            d.message = "インタフェースに書けるのはメソッドの宣言だけです";
+            d.primary.tok = peek(p);
+            d.primary.label = "ここには def を書きます";
+            d.hint = "フィールドは持てません（持てるようにすると継承になります）";
+            diag_fail(&d);
+        }
+        cur->next = func_def_x(p, true, true);
+        cur = cur->next;
+    }
+    expect(p, TK_DEDENT, "字下げの終わり", "インタフェースの本体が閉じていません");
+
+    if (!head.next)
+        error_at_hint(kw, "メソッドを 1 つ以上書いてください",
+                      "空のインタフェースは書けません");
+    n->body = head.next;
     return n;
 }
 
@@ -1777,6 +1842,41 @@ static Node *class_def(Parser *p) {
             if (!consume(p, ",")) break;
         }
         expect_close(p, "]", topen);
+    }
+
+    // ★ 第41章：実装するインタフェース class Point(Show):
+    //   ⚠️ **継承ではありません。** 書けるのはインタフェース名だけで、
+    //     フィールドも実装も受け継ぎません（design/future-features.md §2）。
+    Token *iopen = peek(p);
+    if (consume(p, "(")) {
+        Node *tail = NULL;
+        for (;;) {
+            Token *it = peek(p);
+            if (it->kind != TK_IDENT)
+                error_at_hint(it,
+                              "class の '(' に書けるのはインタフェース名です"
+                              "（継承はありません）",
+                              "インタフェース名が必要です");
+            advance(p);
+            Node *slot = new_node(ND_TYPEREF, it);
+            slot->name = it->text;
+            // モジュール修飾（shapes.Drawable）
+            if (tok_is(peek(p), ".")) {
+                advance(p);
+                Token *m = peek(p);
+                if (m->kind != TK_IDENT)
+                    error_at_hint(m, "モジュール修飾の後には名前を書きます",
+                                  "インタフェース名が必要です");
+                advance(p);
+                slot->mod_name = slot->name;
+                slot->name = m->text;
+                slot->tok = m;
+            }
+            if (tail) tail->next = slot; else n->ifaces = slot;
+            tail = slot;
+            if (!consume(p, ",")) break;
+        }
+        expect_close(p, ")", iopen);
     }
 
     expect_colon(p, "class の宣言");
@@ -1954,6 +2054,12 @@ static Node *program(Parser *p) {
 
         if (tok_is_kw(t, "class")) {  // 第12章
             cur->next = class_def(p);
+            cur = cur->next;
+            continue;
+        }
+
+        if (tok_is_kw(t, "interface")) {  // 第41章
+            cur->next = iface_def(p);
             cur = cur->next;
             continue;
         }

@@ -56,7 +56,8 @@ class Emitter:
 
     strs: StrLit | None      # 文字列リテラルの共有
     decled: list[str]        # declare の重複排除
-    emitted_types: list[str] # 型定義の重複排除（第13章）
+    emitted_types: list[str]     # 型定義の重複排除（第13章）
+    emitted_vtables: list[str]   # 第41章：vtable の重複排除
     str_counter: int
 
     triple: str
@@ -82,6 +83,7 @@ class Emitter:
         self.terminated = False
         self.decled = []
         self.emitted_types = []
+        self.emitted_vtables = []
         self.str_counter = 0
         self.triple = copy(triple)
         # ── 第27章 ──
@@ -118,6 +120,8 @@ class Emitter:
             return "double"
         if t.kind == ast.TY_FN:
             return "ptr"          # 関数へのポインタ（第38章）
+        if t.kind == ast.TY_IFACE:
+            return "ptr"          # 実体へのポインタ（第41章）
         if t.kind == ast.TY_BOOL:
             return "i1"
         if t.kind == ast.TY_NONE:
@@ -146,6 +150,8 @@ class Emitter:
             return "double"
         if t.kind == ast.TY_FN:
             return "ptr"          # 第38章
+        if t.kind == ast.TY_IFACE:
+            return "ptr"          # 第41章
         if t.kind == ast.TY_BOOL:
             return "i8"
         if t.kind == ast.TY_STR:
@@ -696,10 +702,12 @@ class Emitter:
 
     # ── list[T]（第10章）────────────────────────────────────
 
+    # ★ 第41章：インタフェースの値も「実体へのポインタ」1 個
     def elem_is_ptr(self, elem: ast.Type) -> bool:
         return (elem.kind == ast.TY_STR or elem.kind == ast.TY_LIST or
                 elem.kind == ast.TY_CLASS or elem.kind == ast.TY_OPT or
-                elem.kind == ast.TY_RC or elem.kind == ast.TY_NULL)
+                elem.kind == ast.TY_RC or elem.kind == ast.TY_NULL or
+                elem.kind == ast.TY_IFACE)
 
     def slot_ty(self, elem: ast.Type) -> str:
         if self.elem_is_ptr(elem):
@@ -898,6 +906,37 @@ class Emitter:
         obj_node: ast.Node = node_of(n.lhs)
         ot: ast.Type = type_of(obj_node)
 
+        # ★ 第41章：インタフェース越しの呼び出し。
+        #   ① 実体の先頭から vtable を読む ② スロットの関数ポインタを読む ③ 呼ぶ
+        #   ⚠️ 呼び先はコンパイル時には決まらない（実行時の型で決まる）。
+        if n.is_iface_call:
+            iobj: str = self.gen_expr(obj_node)
+            self.declare_rt("ptr @pl_check_not_none(ptr)")
+            iok: str = self.new_tmp()
+            self.emit("  " + iok + " = call ptr @pl_check_not_none(ptr " +
+                      iobj + ")\n")
+            ivt: str = self.new_tmp()
+            self.emit("  " + ivt + " = load ptr, ptr " + iok + "\n")
+            islotp: str = self.new_tmp()
+            self.emit("  " + islotp + " = getelementptr [" +
+                      str(ast.iface_slots()) + " x ptr], ptr " + ivt +
+                      ", i32 0, i32 " + str(n.iface_slot) + "\n")
+            ifp: str = self.new_tmp()
+            self.emit("  " + ifp + " = load ptr, ptr " + islotp + "\n")
+
+            iargs2: list[str] = []
+            itypes2: list[str] = []
+            iargs2.append("ptr " + iok)
+            self.gen_args(n.args, iargs2, itypes2, False)
+            ia2: str = strings.join(iargs2, "")
+            if type_of(n).kind == ast.TY_NONE:
+                self.emit("  call void " + ifp + "(" + ia2 + ")\n")
+                return ""
+            it2: str = self.new_tmp()
+            self.emit("  " + it2 + " = call " + self.llvm_type(type_of(n)) +
+                      " " + ifp + "(" + ia2 + ")\n")
+            return it2
+
         # クラスのメソッド（第12章）。self を第 1 引数に渡すだけ
         # ★ 第28章：rc[T] の中身のメソッドも同じように呼べる
         if ot.kind == ast.TY_CLASS or ot.kind == ast.TY_RC:
@@ -1057,12 +1096,64 @@ class Emitter:
         return self.gen_load(type_of(n), self.gen_field_ptr(n))
 
     # インスタンス生成 Token(1, "x")
+    # ── 第41章：vtable ──────────────────────────────────────
+    #
+    # ★ クラス 1 つにつき **1 本**の表を出す。中身は「プログラム全体の
+    #   インタフェース・メソッドのスロット数」ぶんの関数ポインタの配列で、
+    #   そのクラスが実装しているスロットだけが埋まり、残りは null。
+    #
+    # 🤔 なぜスロットを全体で一意にするのか
+    #   1 つのクラスが複数のインタフェースを実装できるようにするため。
+    #   インタフェースごとに 0 から振ると、呼ぶ側（インタフェースしか
+    #   知らない）がどの表のどこを見ればよいか決められない。
+    #   ⚠️ 代わりに表は疎になる。
+    def gen_vtable(mut self, c: ast.Class) -> None:
+        if len(c.impls) == 0:
+            return
+        vi: int = 0
+        while vi < len(self.emitted_vtables):
+            if self.emitted_vtables[vi] == c.ir_name:
+                return
+            vi = vi + 1
+        self.emitted_vtables.append(c.ir_name)
+
+        n2: int = ast.iface_slots()
+        parts: list[str] = []
+        parts.append("@vt." + c.ir_name + " = private constant [" + str(n2) +
+                     " x ptr] [")
+        i: int = 0
+        while i < n2:
+            fn: str = ""
+            for l in c.impls:
+                for im in l.methods:
+                    if im.slot == i:
+                        fn = c.ir_name + "." + im.name
+            sep: str = ", "
+            if i == 0:
+                sep = ""
+            if len(fn) > 0:
+                parts.append(sep + "ptr @" + fn)
+            else:
+                parts.append(sep + "ptr null")
+            i = i + 1
+        parts.append("]\n")
+        self.globals_.append(strings.join(parts, ""))
+
     def gen_new(mut self, n: ast.Node) -> str:
         c: ast.Class = class_of(n.cls)
 
         self.declare_rt("ptr @pl_alloc(i64)")
         obj: str = self.new_tmp()
         self.emit("  " + obj + " = call ptr @pl_alloc(i64 " + str(c.size) + ")\n")
+
+        # ★ 第41章：インタフェースを実装するなら、先頭に vtable を入れる。
+        #   ⚠️ ここを忘れると、インタフェース越しの呼び出しが null を呼ぶ。
+        if len(c.impls) > 0:
+            self.gen_vtable(c)
+            vp: str = self.new_tmp()
+            self.emit("  " + vp + " = getelementptr %" + c.ir_name +
+                      ".type, ptr " + obj + ", i32 0, i32 0\n")
+            self.emit("  store ptr @vt." + c.ir_name + ", ptr " + vp + "\n")
 
         # ★ ゼロ初期化では足りない型に、有効な値を入れておく（12.6 節）
         f: ast.Field | None = c.fields
@@ -1119,6 +1210,11 @@ class Emitter:
         parts: list[str] = []
         parts.append("%" + c.ir_name + ".type = type { ")
         first: bool = True
+        # ★ 第41章：インタフェースを実装するなら、先頭に vtable へのポインタ。
+        #   ⚠️ sema の layout_class と **並びを揃えること**（ずれると全部壊れる）。
+        if len(c.impls) > 0:
+            parts.append("ptr")
+            first = False
         f: ast.Field | None = c.fields
         while f is not None:
             fld: ast.Field = f

@@ -82,6 +82,7 @@ class Sema:
     try_stack: list[ast.Node]
 
     # ── 第40章：ジェネリクス ──
+    next_slot: int                # 第41章：次に振る vtable のスロット番号
     tbind: TBinds | None          # 今有効な型引数の束縛
     pending: list[Instance]       # 本体をあとで検査する実体
 
@@ -94,6 +95,7 @@ class Sema:
         self.try_stack = []
         self.tbind = None
         self.pending = []
+        self.next_slot = 0
         self.builtins = [
             Builtin("print", ast.TY_INT, ast.TY_NONE, "pl_print_int"),
             Builtin("print", ast.TY_STR, ast.TY_NONE, "pl_print_str"),
@@ -230,6 +232,19 @@ class Sema:
                 return f
             f = f.next
         return None
+
+    # ── 第41章：インタフェースを引く ────────────────────────
+    def lookup_iface_in(self, ms: types.ModuleSyms, name: str) -> ast.Iface | None:
+        i: ast.Iface | None = ms.ifaces
+        while i is not None:
+            x: ast.Iface = i
+            if x.name == name:
+                return x
+            i = x.next
+        return None
+
+    def lookup_iface(self, name: str) -> ast.Iface | None:
+        return self.lookup_iface_in(self.cur_syms(), name)
 
     def lookup_class_in(self, ms: types.ModuleSyms, name: str) -> ast.Class | None:
         c: ast.Class | None = ms.classes
@@ -529,6 +544,11 @@ class Sema:
                                 "ファイルの先頭に 'import " + tr.mod_name +
                                 "' を書いてください")
                 return self.ty_int()
+            # ★ 第41章：他のモジュールのインタフェース
+            mif: ast.Iface | None = self.lookup_iface_in(ms, tr.name)
+            if mif is not None:
+                return ast.type_iface(mif.name, mif)
+
             c: ast.Class | None = self.lookup_class_in(ms, tr.name)
             if c is None:
                 diag.error_full(unwrap_tok(tr.tok),
@@ -597,6 +617,15 @@ class Sema:
                                    "要素型を取るのは list と rc だけです",
                                    "型 '" + tr.name + "' は要素型を取りません")
             return t
+
+        # ★ 第41章：インタフェース名も型として書ける（list[Show] など）
+        ifc1: ast.Iface | None = self.lookup_iface(tr.name)
+        if ifc1 is not None:
+            if tr.lhs is not None:
+                diag.error_at_hint(unwrap_tok(tr.tok),
+                                   "インタフェースは型引数を取りません",
+                                   "型 '" + tr.name + "' は型引数を取りません")
+            return ast.type_iface(ifc1.name, ifc1)
 
         # ★ 第12章：組み込みの型名で無ければ、クラス名として引く
         c2: ast.Class | None = self.lookup_class(tr.name)
@@ -1708,6 +1737,60 @@ class Sema:
         if ot.kind == ast.TY_CLASS:
             return self.check_class_method(n, unwrap_class(ot.cls))
 
+        # ★ 第41章：インタフェース越しの呼び出し。
+        #   どの実装が呼ばれるかは **実行時に**決まる（vtable を引く）。
+        if ot.kind == ast.TY_IFACE:
+            ifc: ast.Iface = unwrap_iface(ot.iface)
+            found: bool = False
+            slot: int = 0
+            sig2: ast.Node = ast.new_node(ast.ND_FUNC, None)
+            for q in ifc.methods:
+                if q.name == n.name:
+                    found = True
+                    slot = q.slot
+                    sig2 = unwrap_node(q.sig)
+            if not found:
+                diag.error_full(unwrap_tok(n.tok),
+                                "インタフェース '" + ifc.name + "' に '" + n.name +
+                                "' はありません",
+                                "このメソッドは宣言されていません", ifc.tok,
+                                "インタフェースの定義はここです",
+                                "インタフェース越しに呼べるのは、" +
+                                "そこに宣言したものだけです")
+
+            want2: int = count_siblings(sig2.params) - 1   # self は数えない
+            na3: int = count_siblings(n.args)
+            if na3 != want2:
+                diag.error_at_hint(unwrap_tok(n.tok),
+                                   "'" + ifc.name + "." + n.name + "' は " +
+                                   str(want2) + " 個の引数を取ります",
+                                   "引数の個数が違います（" + str(na3) +
+                                   " 個渡されました）")
+
+            k2: int = 1
+            pm2: ast.Node | None = unwrap_node(sig2.params).next
+            a2: ast.Node | None = n.args
+            while a2 is not None:
+                an3: ast.Node = a2
+                pn3: ast.Node = unwrap_node(pm2)
+                wt2: ast.Type = self.resolve_type(unwrap_node(pn3.type_ref))
+                self.expected = wt2
+                at3: ast.Type = self.check_expr(an3)
+                self.expected = None
+                if not ast.type_assignable(at3, wt2):
+                    diag.error_at_hint(unwrap_tok(an3.tok),
+                                       "ここには '" + ast.type_name(wt2) +
+                                       "' が必要です",
+                                       str(k2) + " 番目の引数が '" +
+                                       ast.type_name(at3) + "' 型です")
+                k2 = k2 + 1
+                pm2 = pn3.next
+                a2 = an3.next
+
+            n.iface_slot = slot
+            n.is_iface_call = True
+            return self.resolve_type(unwrap_node(sig2.type_ref))
+
         # ★ 第37章：list のメソッド。C 版と同じ規則・同じ文言にすること。
         #   argk: "e"=要素型 / "i"=int / "l"=同じ list / "-"=引数なし
         #   retk: "e"=要素型 / "i"=int / "n"=None / "l"=同じ list
@@ -2219,9 +2302,17 @@ class Sema:
 
     # フィールドを並べて、オフセットとサイズを決める
     def layout_class(self, c: mut ast.Class) -> None:
+        # ★ 第41章：インタフェースを 1 つでも実装するなら、**先頭に隠しフィールド**
+        #   （vtable へのポインタ）を 1 つ置く。おかげでクラス → インタフェースの
+        #   変換が「何もしない」で済む。
+        #   ⚠️ codegen の gen_class_type と **並びを揃えること**。
         offset: int = 0
         max_align: int = 1
         index: int = 0
+        if len(c.impls) > 0:
+            offset = 8
+            max_align = 8
+            index = 1
         f: ast.Field | None = c.fields
         while f is not None:
             ft: ast.Type = unwrap_type(f.type)
@@ -2378,8 +2469,148 @@ class Sema:
             f = fld.next
 
     # 1b：フィールドとメソッドを解決する
-    def declare_class_members(self, n: mut ast.Node) -> None:
+    # ── 第41章：インタフェース ──────────────────────────────
+    #
+    # ★ 表現：**vtable へのポインタをオブジェクトの先頭に隠しフィールドとして
+    #   持たせる**方式。ファットポインタ（2 語）にすると「値はどれも 8 バイト」
+    #   という前提が全部崩れるため。おかげでクラス → インタフェースの変換が
+    #   **何もしないで済む**（同じポインタ）。
+    #
+    # ⚠️ メソッドのスロット番号は **プログラム全体で一意**。1 つのクラスが
+    #   複数のインタフェースを実装できるようにするため。
+    def declare_iface(mut self, n: mut ast.Node) -> None:
+        if self.lookup_iface(n.name) is not None or self.lookup_class(n.name) is not None:
+            diag.error_full(unwrap_tok(n.tok),
+                            "'" + n.name + "' は既に定義されています",
+                            "ここで再定義されています", None, "", "")
+
+        ifc: ast.Iface = ast.Iface(n.name, n.tok)
+        ifc.ir_name = self.mod_mangle(n.name)
+        ifc.owner_name = self.cur_mod().name
+
+        m: ast.Node | None = n.body
+        while m is not None:
+            mn: ast.Node = m
+            for q in ifc.methods:
+                if q.name == mn.name:
+                    diag.error_at_hint(unwrap_tok(mn.tok),
+                                       "同じ名前のメソッドを 2 度書くことはできません",
+                                       "メソッド '" + mn.name + "' が重複しています")
+            ifc.methods.append(ast.IMethod(mn.name, mn, self.next_slot))
+            self.next_slot = self.next_slot + 1
+            m = mn.next
+
+        cs: types.ModuleSyms = self.cur_syms()
+        ifc.next = cs.ifaces
+        cs.ifaces = ifc
+        n.type = ast.type_iface(n.name, ifc)
+
+    # 型注釈に書かれたインタフェース名を引く
+    def resolve_iface_ref(mut self, tr: ast.Node) -> ast.Iface:
+        if len(tr.mod_name) > 0:
+            ms: types.ModuleSyms | None = self.lookup_import(tr.mod_name)
+            if ms is None:
+                diag.error_at_hint(unwrap_tok(tr.tok),
+                                   "ファイルの先頭に 'import " + tr.mod_name +
+                                   "' を書いてください",
+                                   "モジュール '" + tr.mod_name +
+                                   "' を import していません")
+                return ast.Iface("", None)
+            mi: ast.Iface | None = self.lookup_iface_in(ms, tr.name)
+            if mi is None:
+                diag.error_at_hint(unwrap_tok(tr.tok),
+                                   "インタフェース名を確認してください",
+                                   "モジュール '" + tr.mod_name +
+                                   "' にインタフェース '" + tr.name + "' はありません")
+                return ast.Iface("", None)
+            return mi
+
+        i2: ast.Iface | None = self.lookup_iface(tr.name)
+        if i2 is None:
+            h: str = "interface で宣言してから使ってください"
+            if self.lookup_class(tr.name) is not None:
+                h = "'" + tr.name + "' はクラスです。継承はありません"
+            diag.error_full(unwrap_tok(tr.tok),
+                            "インタフェース '" + tr.name + "' が見つかりません",
+                            "ここに書けるのはインタフェース名だけです", None, "", h)
+            return ast.Iface("", None)
+        return i2
+
+    # クラスが宣言どおりのメソッドを持っているかを確かめる
+    def check_implements(mut self, c: ast.Class, ifc: ast.Iface,
+                         at: token.Token) -> None:
+        for im in ifc.methods:
+            f: types.FuncSig | None = self.lookup_func(c.name + "." + im.name)
+            if f is None:
+                diag.error_full(at,
+                                "クラス '" + c.name + "' に '" + im.name +
+                                "' がありません",
+                                "'" + ifc.name + "' を実装すると宣言しています",
+                                unwrap_node(im.sig).tok, "このメソッドが必要です", "")
+                # ⚠️ ここには来ません（error_full は戻りません）。
+                #   絞り込みを続けるために、型を合わせて返します。
+                return
+
+            fs: types.FuncSig = f
+            sig: ast.Node = unwrap_node(im.sig)
+
+            want: int = count_siblings(sig.params)
+            if len(fs.params) != want:
+                diag.error_full(unwrap_tok(fs.tok),
+                                "'" + c.name + "." + im.name +
+                                "' の引数の数が宣言と違います",
+                                str(len(fs.params)) + " 個です", sig.tok,
+                                "宣言では " + str(want) + " 個です", "")
+                return
+
+            k: int = 0
+            pm: ast.Node | None = sig.params
+            while pm is not None:
+                pn: ast.Node = pm
+                if k > 0:
+                    wt: ast.Type = self.resolve_type(unwrap_node(pn.type_ref))
+                    if not ast.type_equal(fs.params[k], wt):
+                        diag.error_full(unwrap_tok(fs.tok),
+                                        "'" + c.name + "." + im.name + "' の " +
+                                        str(k) + " 番目の引数の型が宣言と違います",
+                                        "'" + ast.type_name(fs.params[k]) + "' 型です",
+                                        pn.tok,
+                                        "宣言では '" + ast.type_name(wt) + "' 型です",
+                                        "")
+                k = k + 1
+                pm = pn.next
+
+            wr: ast.Type = self.resolve_type(unwrap_node(sig.type_ref))
+            if not ast.type_equal(unwrap_type(fs.ret), wr):
+                diag.error_full(unwrap_tok(fs.tok),
+                                "'" + c.name + "." + im.name +
+                                "' の戻り型が宣言と違います",
+                                "'" + ast.type_name(unwrap_type(fs.ret)) + "' を返します",
+                                sig.tok,
+                                "宣言では '" + ast.type_name(wr) + "' です", "")
+            if len(fs.raises_cls) > 0:
+                diag.error_at_hint(unwrap_tok(fs.tok),
+                                   "インタフェース越しには呼べません" +
+                                   "（エラーの受け渡しを表せないため）",
+                                   "'" + c.name + "." + im.name + "' は raises します")
+
+    def declare_class_members(mut self, n: mut ast.Node) -> None:
         c: ast.Class = unwrap_class(n.cls)
+
+        # ★ 第41章：実装するインタフェースを先に決める。
+        #   レイアウト（隠しフィールドの有無）がこれで変わるため。
+        #   ⚠️ メソッドの照合は、メソッドを登録した**後**に行う。
+        ir: ast.Node | None = n.ifaces
+        while ir is not None:
+            irn: ast.Node = ir
+            ifc0: ast.Iface = self.resolve_iface_ref(irn)
+            for prev in c.impls:
+                if prev == ifc0:
+                    diag.error_at_hint(unwrap_tok(irn.tok),
+                                       "同じインタフェースを 2 度書けません",
+                                       "'" + ifc0.name + "' は既に書かれています")
+            c.impls.append(ifc0)
+            ir = irn.next
 
         # ① フィールド（宣言順に末尾へ足す。並び順がレイアウトになる）
         head: ast.Field = ast.Field("", None)
@@ -2423,6 +2654,14 @@ class Sema:
 
         # ③ 第15章：クラス型のフィールドが None から始まらないか
         self.check_fields_initialized(c)
+
+        # ④ 第41章：宣言したインタフェースを本当に実装しているか
+        ir2: ast.Node | None = n.ifaces
+        while ir2 is not None:
+            irn2: ast.Node = ir2
+            self.check_implements(c, self.resolve_iface_ref(irn2),
+                                  unwrap_tok(irn2.tok))
+            ir2 = irn2.next
 
     # extern の引数と戻り値に使える型か（第14章）
     def check_extern_type(self, t: ast.Type, tok: token.Token | None,
@@ -2611,6 +2850,14 @@ class Sema:
 
     # モジュール 1 つぶんの宣言を登録する（パス 1a / 1b / 1c）
     def declare_module(mut self, root: mut ast.Node) -> None:
+        # ★ 第41章：インタフェースを最初に登録する（クラスが実装を宣言するため）
+        di: ast.Node | None = root.body
+        while di is not None:
+            ni: ast.Node = di
+            if ni.kind == ast.ND_IFACE:
+                self.declare_iface(ni)
+            di = ni.next
+
         d: ast.Node | None = root.body
         while d is not None:
             n: ast.Node = d
@@ -2676,6 +2923,13 @@ class Sema:
 
 # ── 入口 ───────────────────────────────────────────────────
 
+def unwrap_iface(i: ast.Iface | None) -> ast.Iface:
+    if i is None:
+        panic("sema: インタフェースがありません")
+        return ast.Iface("", None)
+    return i
+
+
 def unwrap_cls(c: ast.Class | None) -> ast.Class:
     if c is None:
         panic("sema: クラスがありません")
@@ -2739,6 +2993,9 @@ def sema_program(mods: module.Module | None, entry: module.Module | None) -> Non
                 mm3 = m3.next
             s.tbind = None
             k = k + 1
+
+    # ★ 第41章：vtable の長さを codegen に伝える
+    ast.set_iface_slots(s.next_slot)
 
     # main は入口モジュールにだけ要る
     if entry is not None:

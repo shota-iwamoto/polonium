@@ -412,6 +412,62 @@ def main() -> int:
 > **⚠️ 型制約はありません。** `T` に「比較できること」などを要求できないので、
 > `==` が使えるかどうかは実体化してみるまで分かりません。
 
+### 6.5 インタフェース
+
+**共通の振る舞い**をまとめます。継承ではありません。
+
+```python
+interface Show:
+    def show(self) -> str
+
+interface Sized:
+    def size(self) -> int
+
+class Point(Show, Sized):        # 2 つ実装できる
+    x: int
+    y: int
+    def init(self, x: int, y: int) -> None:
+        self.x = x
+        self.y = y
+    def show(self) -> str:
+        return f"({self.x}, {self.y})"
+    def size(self) -> int:
+        return 2
+
+class Label(Show):
+    text: str
+    def init(self, text: own str) -> None:
+        self.text = text
+    def show(self) -> str:
+        return "[" + self.text + "]"
+
+def print_all(xs: list[Show]) -> None:
+    for x in xs:
+        print(x.show())            # 実行時にどちらの実装かが決まる
+
+def main() -> int:
+    xs: list[Show] = []
+    xs.append(Point(1, 2))
+    xs.append(Label("hi"))
+    print_all(xs)                  # (1, 2) / [hi]
+    return 0
+```
+
+| | |
+|---|---|
+| 中身 | **メソッドの宣言だけ**。フィールドは持てません（持てると継承になります） |
+| 本体 | 書けません（`def show(self) -> str` で改行） |
+| 実装 | `class C(I1, I2):`。**宣言どおりのメソッドが無いとコンパイルエラー** |
+| 代入 | クラス → インタフェースは自動。**値の変換は起きません**（同じポインタ） |
+| 呼べるもの | インタフェースに**宣言したものだけ**。実装側の他のメソッドは呼べません |
+
+> **⚠️ 継承はありません。** `class D(C):` と書いても、`C` がクラスなら
+> 「インタフェースが見つかりません」になります。振る舞いの共有はインタフェース、
+> 実装の共有は合成（フィールドに持つ）で行います。
+>
+> **⚠️ `raises` するメソッドは宣言できません。** インタフェース越しの呼び出しは
+> エラーの受け渡しを表せないためです。
+
 ---
 
 ## 7. 標準ライブラリ
@@ -872,7 +928,7 @@ $ ./wc examples/sample.txt
 
 | 無いもの | 代わりに |
 |---|---|
-| **継承・インタフェース** | 合成（フィールドに持つ） |
+| **継承** | 合成（フィールドに持つ）。振る舞いの共有は**インタフェース**（§6.5） |
 | **クロージャ・`lambda`** | トップレベルの関数を渡す（関数型はあります。§5.1） |
 | **タプル・複数戻り値** | `list` かクラスを返す |
 | 集合 | `dict.Dict` を「値は使わない表」として使う |
@@ -881,7 +937,7 @@ $ ./wc examples/sample.txt
 | f-string の書式指定 `{x:>8}` | `strings.lpad` / `strings.rpad` |
 | 例外（アンワインド） | `raises` / `try` / `except`（§10。**設計上入れません**） |
 
-**上の 3 つが実用上いちばん効きます。**
+**上の 2 つが実用上いちばん効きます。**
 
 言語の現在地と今後は [roadmap.md](roadmap.md) と
 [design/future-features.md](design/future-features.md) にあります。

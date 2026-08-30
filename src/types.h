@@ -43,6 +43,7 @@ typedef enum {
     //    途中に足すと 2 つの実装で番号がずれます。
     TY_FLOAT, // float → double（IEEE 754 倍精度。第34章）
     TY_FN,    // fn(A, B) -> C → ptr（関数へのポインタ。第38章）
+    TY_IFACE, // interface → ptr（実体へのポインタ。第41章）
 
 } TypeKind;
 
@@ -68,6 +69,7 @@ struct Type {
     // ── class 用（第12章）──
     char *name;         // クラス名（エラーメッセージ用）
     struct Class *cls;  // 定義への参照。★ 型の同一性はこのポインタで判定する
+    struct Iface *iface;  // 第41章：TY_IFACE のときの定義への参照
 
     // ── 第15章 ──
     // この型の「T | None」版（1 個だけ作ってここに覚えておく）
@@ -85,6 +87,8 @@ struct Type {
 extern Type *ty_int;
 extern Type *ty_bool;
 extern Type *ty_float;
+
+
 extern Type *ty_none;
 extern Type *ty_str;
 extern Type *ty_null;  // None リテラルの型（第15章）
@@ -137,6 +141,11 @@ bool type_assignable(Type *from, Type *to);
 // ★ list[T] と違い、クラス定義ごとに 1 個だけ作ります
 //   （`Token` と書かれた型注釈は、すべて同じ Type * を指す）。
 Type *type_class(char *name, struct Class *cls);
+Type *type_iface(char *name, struct Iface *i);  // 第41章
+
+// 第41章：クラスがインタフェースを実装しているかを返す関数。
+// ⚠️ types.c は sema の表を知らないので、sema 側から差し込みます。
+extern bool (*class_implements_hook)(struct Class *c, struct Iface *i);
 
 // 値のバイト数とアラインメント（第12章。クラスのレイアウト計算に使う）。
 // docs/design/memory-model.md 5 節の表がそのまま実装になっています。

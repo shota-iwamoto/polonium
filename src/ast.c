@@ -2,6 +2,9 @@
 
 #include <stdio.h>
 
+// 第41章：インタフェース・メソッドの総数（sema が数え、codegen が読む）
+int pl_iface_slots = 0;
+
 Node *new_node(NodeKind kind, Token *tok) {
     Node *n = xmalloc(sizeof(Node));  // calloc なので他のフィールドは 0 / NULL
     n->kind = kind;
@@ -191,7 +194,10 @@ static void dump(Node *n, int depth) {
             printf(")\n");
             break;
         case ND_CLASS:
-            printf("(class %s\n", n->name);
+            printf("(class %s", n->name);
+            for (Node *i = n->ifaces; i; i = i->next)
+                printf(" :%s", i->name);
+            printf("\n");
             for (Node *m = n->body; m; m = m->next) dump(m, depth + 1);
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
@@ -330,6 +336,13 @@ static void dump(Node *n, int depth) {
             dump(n->lhs, depth + 1);
             dump(n->rhs, depth + 1);
             dump(n->els, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        // ★ 第41章：インタフェース（本体の無い def の並び）
+        case ND_IFACE:
+            printf("(interface %s\n", n->name);
+            for (Node *m = n->body; m; m = m->next) dump(m, depth + 1);
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;

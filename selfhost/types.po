@@ -74,6 +74,7 @@ class ModuleSyms:
     mod: module.Module | None
     funcs: FuncSig | None
     classes: ast.Class | None
+    ifaces: ast.Iface | None      # 第41章
     globals: Scope | None
     next: ModuleSyms | None
 
