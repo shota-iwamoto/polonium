@@ -78,6 +78,8 @@ def main() -> int:
 |---|---|
 | `char_count(s: str) -> int` | **文字数**（`len` はバイト数） |
 | `width(s: str) -> int` | **表示幅**（全角を 2 と数える） |
+| `chars(s: str) -> list[str]` | 1 文字ずつに切る。**`for c in s` はバイト単位です** |
+| `char_len_at(s: str, i: int) -> int` | 位置 `i` の文字が何バイトか |
 
 ```python
 len("あいう")                  # 9  ← バイト数
@@ -101,6 +103,14 @@ strings.width("あいう")        # 6  ← 表示幅
 > **⚠️ 探索や切り出しはバイト単位です。** `str` は UTF-8 のバイト列で、
 > `find` / `substr` / スライスの添字はバイト位置です
 > （多バイト文字の途中で切ると壊れます）。
+>
+> ```python
+> s: str = "あいう"
+> len(s)                     # 9   ← バイト数
+> s[0]                       # 壊れた 1 バイト
+> for c in s:                # 9 回まわる
+> for c in strings.chars(s): # 3 回まわる ← こちらを使う
+> ```
 
 ---
 

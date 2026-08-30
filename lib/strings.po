@@ -142,6 +142,40 @@ def char_count(s: str) -> int:
         i = i + 1
     return n
 
+# 1 文字ずつに切り分ける（第42章）
+#
+# ★ `for c in s` は **バイト単位**で回ります（"あいう" で 9 回）。
+#   文字単位で回りたいときはこれを使ってください:
+#
+#       for c in strings.chars("あいう"):    # 3 回
+#           print(c)
+#
+# ⚠️ 毎回新しいリストを作ります。長い文字列では byte_at で回るほうが速いです。
+def chars(s: str) -> list[str]:
+    out: list[str] = []
+    i: int = 0
+    while i < len(s):
+        n: int = char_len_at(s, i)
+        out.append(s[i:i + n])
+        i = i + n
+    return out
+
+# 位置 i から始まる文字が何バイトか
+#
+# ⚠️ 壊れたバイト列でも止まらないよう、1 を返して先へ進みます
+#   （不正なバイトで無限ループにしないため）。
+def char_len_at(s: str, i: int) -> int:
+    b: int = byte_at(s, i)
+    if b < 128:
+        return 1
+    if b >= 240:
+        return 4
+    if b >= 224:
+        return 3
+    if b >= 192:
+        return 2
+    return 1
+
 # 表示したときの桁数（全角を 2 と数える）
 #
 # ⚠️ **目安です。** 端末や字体によって幅は変わります。ここでは
@@ -157,12 +191,7 @@ def width(s: str) -> int:
             w = w + 1
             i = i + 1
             continue
-        # 何バイトの文字か
-        n: int = 2
-        if b >= 240:
-            n = 4
-        elif b >= 224:
-            n = 3
+        n: int = char_len_at(s, i)
         cp: int = code_point_at(s, i, n)
         if is_wide(cp):
             w = w + 2
