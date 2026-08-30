@@ -568,6 +568,41 @@ long long pl_list_index_str(PlList *l, const char *v) {
 
 void pl_list_push_i64(PlList *l, long long v);   // 下で定義
 
+// ── ハッシュ（第42章）────────────────────────────────────────
+//
+// ★ FNV-1a。短い鍵に強く、実装が数行で済みます。
+//   ⚠️ **暗号用ではありません。** 敵が鍵を選べる場面（外部入力を鍵にする
+//     サーバなど）では、衝突を狙われて線形探索に落とされます。
+//   ⚠️ 返す値は **非負**にします（剰余で添字にするため）。
+long long pl_hash_str(const char *s) {
+    unsigned long long h = 14695981039346656037ULL;
+    long long n = pl_str_len(s);
+    for (long long i = 0; i < n; i++) {
+        h ^= (unsigned char)s[i];
+        h *= 1099511628211ULL;
+    }
+    return (long long)(h & 0x7fffffffffffffffULL);
+}
+
+// 整数は「散らす」だけ（そのままだと下位ビットに偏りが出る）
+long long pl_hash_i64(long long v) {
+    unsigned long long h = (unsigned long long)v;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+    return (long long)(h & 0x7fffffffffffffffULL);
+}
+
+// float はビット列を整数として散らす
+// ⚠️ 0.0 と -0.0 はビットが違うので別の値になります。鍵にするときは注意。
+long long pl_hash_f64(double v) {
+    long long bits;
+    pl_memcpy(&bits, &v, 8);
+    return pl_hash_i64(bits);
+}
+
 // 組み込み関数（第39章）
 long long pl_iabs(long long v) { return v < 0 ? -v : v; }
 double pl_fabs(double v) { return v < 0.0 ? -v : v; }

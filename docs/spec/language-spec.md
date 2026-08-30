@@ -535,6 +535,7 @@ counter: int = 0
 | `abs` | `(int) -> int`<br>`(float) -> float` | 絶対値 | ch39 |
 | `min` / `max` | `(int, int) -> int`<br>`(float, float) -> float` | 2 つのうち小さい／大きいほう。⚠️ **2 引数のみ**（リストは `linalg.vmin`） | ch39 |
 | `sum` | `(list[int]) -> int` | 総和。⚠️ **int のみ**（`list[float]` は `linalg.vsum`） | ch39 |
+| `hash` | `(str\|int\|float\|bool) -> int` | ハッシュ値。**非負**。⚠️ FNV-1a で暗号用ではない | ch42 |
 | `ord` | `(str) -> int` | 先頭 1 バイトのコード | ch9 |
 | `chr` | `(int) -> str` | 1 バイト文字列を作る | ch9 |
 | `exit` | `(int) -> None` | プロセス終了 | ch9 |

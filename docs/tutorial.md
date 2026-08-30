@@ -166,6 +166,7 @@ print("答え: " + n)          # × 型 'str' と 'int' に演算子 '+' は適�
 | `abs(int)` / `abs(float)` | 絶対値 |
 | `min(a, b)` / `max(a, b)` | 2 つのうち小さい/大きいほう（`int` と `float`） |
 | `sum(list[int])` | 総和（`list[float]` は `linalg.vsum`） |
+| `hash(x)` | ハッシュ値（`int` / `float` / `str` / `bool`）。`dict` が使っています |
 | `copy(str)` | 文字列を複製する（§9.3） |
 
 ---

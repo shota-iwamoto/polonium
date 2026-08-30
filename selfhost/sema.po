@@ -56,12 +56,17 @@ class Instance:
     node: ast.Node | None
     owner: types.ModuleSyms | None
     binds: TBinds | None
+    # ★ 第42章：どこで要求されたか（エラーに添える）
+    site: token.Token | None
+    iname: str
 
     def init(self, node: ast.Node, owner: types.ModuleSyms,
-             binds: own TBinds) -> None:
+             binds: own TBinds, site: token.Token, iname: own str) -> None:
         self.node = node
         self.owner = owner
         self.binds = binds
+        self.site = site
+        self.iname = iname
 
 
 class Sema:
@@ -85,6 +90,11 @@ class Sema:
     next_slot: int                # 第41章：次に振る vtable のスロット番号
     tbind: TBinds | None          # 今有効な型引数の束縛
     pending: list[Instance]       # 本体をあとで検査する実体
+    # ★ 第42章：いま検査しているのが「どこで要求された実体か」。
+    #   ⚠️ テンプレートの中で出たエラーはライブラリの中の行を指すので、
+    #     使う側のどの行が発端かを添える。
+    inst_site: token.Token | None
+    inst_name: str
 
     def init(self) -> None:
         self.prims = ast.Prims()
@@ -96,6 +106,8 @@ class Sema:
         self.tbind = None
         self.pending = []
         self.next_slot = 0
+        self.inst_site = None
+        self.inst_name = ""
         self.builtins = [
             Builtin("print", ast.TY_INT, ast.TY_NONE, "pl_print_int"),
             Builtin("print", ast.TY_STR, ast.TY_NONE, "pl_print_str"),
@@ -121,6 +133,12 @@ class Sema:
             Builtin("abs", ast.TY_INT, ast.TY_INT, "pl_iabs"),
             Builtin("abs", ast.TY_FLOAT, ast.TY_FLOAT, "pl_fabs"),
             Builtin("sum", ast.TY_LIST, ast.TY_INT, "pl_list_sum"),
+            # ★ 第42章：ハッシュ。**単相化のおかげで**ジェネリックなコードの
+            #   中で hash(k) と書ける（K が確定してから型検査されるため）
+            Builtin("hash", ast.TY_STR, ast.TY_INT, "pl_hash_str"),
+            Builtin("hash", ast.TY_INT, ast.TY_INT, "pl_hash_i64"),
+            Builtin("hash", ast.TY_FLOAT, ast.TY_INT, "pl_hash_f64"),
+            Builtin("hash", ast.TY_BOOL, ast.TY_INT, "pl_hash_i64"),
             Builtin("copy", ast.TY_STR, ast.TY_STR, "pl_str_copy")]
 
     # ── プリミティブ型のシングルトン ────────────────────────
@@ -523,7 +541,7 @@ class Sema:
             nx = last.next
         last.next = inst
 
-        self.pending.append(Instance(inst, owner, binds))
+        self.pending.append(Instance(inst, owner, binds, at, copy(iname)))
 
         self.enter_module(saved_mod)
         self.scope = saved_scope
@@ -1485,9 +1503,14 @@ class Sema:
                 return self.prim(b.ret)
             i = i + 1
 
+        # ★ 第42章：実体化の中で出たエラーには、発端の行を添える
+        rtok: token.Token | None = self.inst_site
+        rlab: str = ""
+        if rtok is not None:
+            rlab = "この実体化（" + self.inst_name + "）で使われました"
         diag.error_full(unwrap_tok(arg.tok),
                         n.name + " は '" + ast.type_name(at) + "' 型を受け取れません",
-                        "これは '" + ast.type_name(at) + "' 型です", None, "",
+                        "これは '" + ast.type_name(at) + "' 型です", rtok, rlab,
                         n.name + " が受け取れるのは " +
                         self.builtin_arg_types(n.name) + " です")
         return self.ty_int()
@@ -2984,6 +3007,8 @@ def sema_program(mods: module.Module | None, entry: module.Module | None) -> Non
             if io2 is not None:
                 s.enter_module(io2)
             s.tbind = it.binds          # 型引数を戻してから本体を読む
+            s.inst_site = it.site       # ★ 第42章：発端を控える
+            s.inst_name = copy(it.iname)
             inode: ast.Node = unwrap_node(it.node)
             mm3: ast.Node | None = inode.body
             while mm3 is not None:
@@ -2992,6 +3017,7 @@ def sema_program(mods: module.Module | None, entry: module.Module | None) -> Non
                     s.check_func(m3)
                 mm3 = m3.next
             s.tbind = None
+            s.inst_site = None
             k = k + 1
 
     # ★ 第41章：vtable の長さを codegen に伝える

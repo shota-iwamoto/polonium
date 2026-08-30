@@ -141,6 +141,12 @@ typedef struct {
     // ★ 実体化したクラスの待ち行列。本体の検査は**あとでまとめて**行います。
     //   検査の途中で新しい実体が増えるので、その場でやると入れ子になります。
     struct Instance *pending;
+
+    // ★ 第42章：いま検査しているのが「どこで要求された実体か」。
+    //   ⚠️ テンプレートの中で出たエラーは、**ライブラリの中の行**を
+    //     指してしまいます。使う側のどの行が発端かを添えます。
+    Token *inst_site;
+    const char *inst_name;
 } Sema;
 
 // 型引数の束縛（K → str）
@@ -157,6 +163,8 @@ struct Instance {
     Node *node;          // 複製した ND_CLASS
     ModuleSyms *owner;   // テンプレートが定義されているモジュール
     TBind *binds;        // そのときの型引数の束縛
+    Token *site;         // ★ 第42章：どこで要求されたか（エラーに添える）
+    const char *iname;   // その実体の名前（Dict$Node$int）
     Instance *next;
 };
 
@@ -597,6 +605,8 @@ static Type *instantiate_class(Sema *s, Class *tmpl, Type **args, int nargs,
     q->node = inst;
     q->owner = tmpl->owner;
     q->binds = binds;
+    q->site = at;                 // ★ 第42章：どこで要求されたか
+    q->iname = iname;
     q->next = s->pending;
     s->pending = q;
 
@@ -1539,6 +1549,13 @@ const Builtin BUILTINS[] = {
     {"abs", TY_INT, TY_INT, "pl_iabs"},
     {"abs", TY_FLOAT, TY_FLOAT, "pl_fabs"},
     {"sum", TY_LIST, TY_INT, "pl_list_sum"},
+    // ★ 第42章：ハッシュ。**単相化のおかげで**、ジェネリックなコードの中で
+    //   hash(k) と書けます（K が確定してから型検査されるため）。
+    //   ⚠️ クラスを鍵にすると、ここで「使えません」と言われます。
+    {"hash", TY_STR, TY_INT, "pl_hash_str"},
+    {"hash", TY_INT, TY_INT, "pl_hash_i64"},
+    {"hash", TY_FLOAT, TY_INT, "pl_hash_f64"},
+    {"hash", TY_BOOL, TY_INT, "pl_hash_i64"},
     {"copy", TY_STR, TY_STR, "pl_str_copy"},
     {NULL, 0, 0, NULL},
 };
@@ -1593,6 +1610,10 @@ static Type *check_builtin_call(Sema *s, Node *n) {
     d.message = diag_fmt("%s は '%s' 型を受け取れません", n->name, type_name(at));
     d.primary.tok = n->args->tok;
     d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
+    if (s->inst_site)
+        d.related = (DiagLabel){s->inst_site,
+                                diag_fmt("この実体化（%s）で使われました",
+                                         s->inst_name)};
     d.hint = diag_fmt("%s が受け取れるのは %s です", n->name,
                       builtin_arg_types(n->name));
     diag_fail(&d);
@@ -3531,9 +3552,12 @@ void sema_program(Module *mods, Module *entry) {
         for (Instance *it = q; it; it = it->next) {
             enter_module(&s, it->owner);
             s.tbind = it->binds;          // 型引数を戻してから本体を読む
+            s.inst_site = it->site;       // ★ 第42章：発端を控える
+            s.inst_name = it->iname;
             for (Node *m = it->node->body; m; m = m->next)
                 if (m->kind == ND_FUNC) check_func(&s, m);
             s.tbind = NULL;
+            s.inst_site = NULL;
         }
     }
 

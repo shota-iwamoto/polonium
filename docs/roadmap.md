@@ -155,7 +155,7 @@ def store_and_return(h: mut Holder) -> rc[Node]:
 
 | 版 | 内容 |
 |---|---|
-| **0.4.0** | **ジェネリクス**（単相化。`dict` が `Dict[K, V]` に）・**インタフェース**（vtable） |
+| **0.4.0** | **ジェネリクス**（単相化。`dict` が `Dict[K, V]` に）・**インタフェース**（vtable）・`dict` を**ハッシュ表**に・`hash` 組み込み |
 | 0.3.0 | **言語機能**（f-string / スライス / 負の添字 / `in` / 三項演算子 / `assert` / `enumerate` / `list` のメソッド / 連結・繰り返し / `abs`・`min`・`max`・`sum` / **関数型**）・`numeric` ライブラリ |
 | 0.2.0 | `float`・標準入力・数値計算ライブラリ（`math` / `linalg` / `stats` / `random` / `physics`）・docs の再編 |
 | 0.1.0 | 最初の公開。セルフホスト・安全性検査・ベアメタル・3 OS 対応 |

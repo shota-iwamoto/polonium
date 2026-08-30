@@ -1,27 +1,60 @@
-# dict.po — 表（ハッシュではなく線形探索）
+# dict.po — ハッシュ表
 #
-# ★ **第40章でジェネリックになりました。** それまでは鍵が str、値が int に
-#   固定されていて、`str → クラス` の表が作れませんでした。
+# ★ **第42章でハッシュ表になりました。** それまでは線形探索（O(n)）で、
+#   4000 件の出し入れに 0.19 秒かかっていました。いまは測れないほどです。
 #
-#       d: dict.Dict[str, Symbol] = dict.Dict()
+# ★ 中身の持ち方（ここが設計の要）
 #
-# ⚠️ 鍵の比較には `==` を使います。int / float / str は**中身**で、
-#   クラスと list は**同一性**（同じものを指しているか）で比べます。
-#   クラスを鍵にするときはこの違いに注意してください。
+#     keys_ / vals_   … 入れた順に**一度置いたら動かさない**
+#     buckets         … ハッシュ値 → 「keys_ の添字」の並び
 #
-# ⚠️ 探索は線形です（O(n)）。まず正しく動かす方針のままです。
-#   要素数が増えるなら、鍵をハッシュして分ける形に直す必要があります。
+#   🤔 なぜ鍵そのものをバケツに入れないのか
+#     表を広げるとき（rehash）、鍵と値をバケツ間で移すことになります。
+#     所有権の検査から見ると、それは「借りたものを別の入れ物に保存する」
+#     動きで、警告になります（E-BORROW-3）。**添字は int なのでコピー型**、
+#     動かしても所有権が動きません。これで問題ごと消えます。
+#
+#   ★ 副産物として、keys() が**入れた順**に返せるようになりました。
+#     （鍵をバケツに置くと、順序はハッシュの散り方で決まってしまいます。）
+#
+# ⚠️ 鍵に使えるのは `hash` が定義された型（int / float / str / bool）だけです。
+#   クラスを鍵にすると、実体化したときに「hash が使えません」と言われます
+#   （型制約が無いので、テンプレートの時点では分かりません）。
+#
+# ⚠️ ハッシュは FNV-1a です。**暗号用ではありません。** 敵が鍵を選べる場面では
+#   衝突を狙われて線形探索に落とされます。
+#
+# ⚠️ 削除はまだありません（添字が動かせないので、印を付ける仕組みが要ります）。
 
 class Dict[K, V]:
     keys_: list[K]
     vals_: list[V]
+    buckets: list[list[int]]
 
-    def index_of(self, k: K) -> int:
+    def init(self) -> None:
+        self.keys_ = []
+        self.vals_ = []
+        self.buckets = []
+        self.reset_buckets(8)
+
+    # バケツを n 個の空リストに張り直す
+    def reset_buckets(mut self, n: int) -> None:
+        self.buckets = []
         i: int = 0
-        while i < len(self.keys_):
+        while i < n:
+            b: list[int] = []
+            self.buckets.append(b)
+            i = i + 1
+
+    def bucket_of(self, k: K) -> int:
+        return hash(k) % len(self.buckets)
+
+    # keys_ の中での位置。無ければ -1
+    def index_of(self, k: K) -> int:
+        idxs: list[int] = self.buckets[self.bucket_of(k)]
+        for i in idxs:
             if self.keys_[i] == k:
                 return i
-            i = i + 1
         return -1
 
     def has(self, k: K) -> bool:
@@ -35,8 +68,7 @@ class Dict[K, V]:
             panic("dict: key not found")
         return self.vals_[i]
 
-    # ⚠️ default は **所有権を受け取ります**（own）。返す可能性があるので、
-    #   借りたままでは呼び出しより長生きしてしまいます（E-BORROW-4）。
+    # ⚠️ default は **所有権を受け取ります**（返す可能性があるため）
     def get_or(self, k: K, default: own V) -> V:
         i: int = self.index_of(k)
         if i < 0:
@@ -46,15 +78,35 @@ class Dict[K, V]:
     # 既にあれば上書きする
     def set(mut self, k: own K, v: own V) -> None:
         i: int = self.index_of(k)
-        if i < 0:
-            self.keys_.append(k)
-            self.vals_.append(v)
-        else:
+        if i >= 0:
             self.vals_[i] = v
+            return
+
+        # ★ 先にバケツへ添字を入れてから、鍵を移します。
+        #   （k を移した後では、k を使って bucket_of を呼べません。）
+        b: int = self.bucket_of(k)
+        self.buckets[b].append(len(self.keys_))
+        self.keys_.append(k)
+        self.vals_.append(v)
+
+        # 詰まってきたら倍にして添字を振り直す
+        if len(self.keys_) > len(self.buckets):
+            self.rehash()
+
+    # バケツを倍にして、**添字だけ**を入れ直す
+    #
+    # ★ 鍵と値は一切動きません。動かすのは int の添字だけです。
+    def rehash(mut self) -> None:
+        self.reset_buckets(len(self.buckets) * 2)
+        i: int = 0
+        while i < len(self.keys_):
+            self.buckets[self.bucket_of(self.keys_[i])].append(i)
+            i = i + 1
 
     def len(self) -> int:
         return len(self.keys_)
 
+    # ★ **入れた順**に返します（ハッシュの散り方に依存しません）
     def keys(self) -> list[K]:
         return self.keys_
 
