@@ -31,6 +31,39 @@ class Builtin:
         self.impl = copy(impl)
 
 
+# ── 第40章：ジェネリクス（単相化）──────────────────────────
+#
+# 型引数の束縛（K → str）。⚠️ タプルが無いので 2 本の list を並べて持ちます。
+class TBinds:
+    names: list[str]
+    types_: list[ast.Type]
+
+    def init(self) -> None:
+        self.names = []
+        self.types_ = []
+
+    def find(self, name: str) -> ast.Type | None:
+        i: int = 0
+        while i < len(self.names):
+            if self.names[i] == name:
+                return self.types_[i]
+            i = i + 1
+        return None
+
+
+# 実体化したクラス 1 つぶん（本体の検査を後回しにするための記録）
+class Instance:
+    node: ast.Node | None
+    owner: types.ModuleSyms | None
+    binds: TBinds | None
+
+    def init(self, node: ast.Node, owner: types.ModuleSyms,
+             binds: own TBinds) -> None:
+        self.node = node
+        self.owner = owner
+        self.binds = binds
+
+
 class Sema:
     prims: ast.Prims | None
     scope: types.Scope | None
@@ -48,6 +81,10 @@ class Sema:
     err_classes: list[ast.Class]
     try_stack: list[ast.Node]
 
+    # ── 第40章：ジェネリクス ──
+    tbind: TBinds | None          # 今有効な型引数の束縛
+    pending: list[Instance]       # 本体をあとで検査する実体
+
     def init(self) -> None:
         self.prims = ast.Prims()
         self.loop_depth = 0
@@ -55,6 +92,8 @@ class Sema:
         self.mods = []
         self.err_classes = []
         self.try_stack = []
+        self.tbind = None
+        self.pending = []
         self.builtins = [
             Builtin("print", ast.TY_INT, ast.TY_NONE, "pl_print_int"),
             Builtin("print", ast.TY_STR, ast.TY_NONE, "pl_print_str"),
@@ -357,6 +396,127 @@ class Sema:
                             "（nullable にできるのは str / list[T] / class です）")
         return ast.type_opt(base)
 
+    # ── 第40章：ジェネリクス（単相化）──────────────────────
+    #
+    # ★ 方針は design/future-features.md §1 のとおり **単相化**。
+    #   Dict[str, int] と Dict[str, Symbol] は **別々のクラス**を作る。
+
+    # 型参照に書かれた型引数を並べる
+    def collect_targs(self, tr: ast.Node) -> list[ast.Type]:
+        out: list[ast.Type] = []
+        a: ast.Node | None = tr.targs
+        while a is not None:
+            an: ast.Node = a
+            out.append(self.resolve_type(unwrap_node(an.lhs)))
+            a = an.next
+        return out
+
+    # 実体の名前を作る（Dict$str$int）
+    #
+    # ⚠️ 型名をそのまま使うと '[' や ',' が混ざって IR の名前に使えない。
+    #   英数字と '.' 以外を '_' に潰す。
+    def mangle_inst(self, base: str, args: list[ast.Type]) -> str:
+        parts: list[str] = []
+        parts.append(base)
+        for a in args:
+            parts.append("$")
+            nm: str = ast.type_name(a)
+            i: int = 0
+            while i < len(nm):
+                ch: str = nm[i]
+                b: int = strings.byte_at(nm, i)
+                ok: bool = ((b >= 97 and b <= 122) or (b >= 65 and b <= 90) or
+                            (b >= 48 and b <= 57) or ch == "." or ch == "_")
+                if ok:
+                    parts.append(ch)
+                else:
+                    parts.append("_")
+                i = i + 1
+        return strings.join(parts, "")
+
+    # テンプレートから実体を 1 つ作る（既にあれば作らない）
+    def instantiate_class(mut self, tmpl: ast.Class, args: list[ast.Type],
+                          at: token.Token) -> ast.Type:
+        tnode: ast.Node = unwrap_node(tmpl.node)
+        want: int = 0
+        tp: ast.Node | None = tnode.targs
+        while tp is not None:
+            want = want + 1
+            tp = unwrap_node(tp).next
+        if len(args) != want:
+            diag.error_full(at,
+                            "'" + tmpl.name + "' は型引数を " + str(want) +
+                            " 個取りますが、" + str(len(args)) + " 個書かれました",
+                            "型引数の個数が違います", tmpl.tok,
+                            "このクラスの定義です", "")
+
+        iname: str = self.mangle_inst(tmpl.name, args)
+
+        owner: types.ModuleSyms = self.syms_by_name(tmpl.owner_name)
+
+        # 既に作ってあれば、それを返す（同じ組み合わせは 1 個だけ）
+        ex: ast.Class | None = self.lookup_class_in(owner, iname)
+        if ex is not None:
+            return unwrap_type(ex.type)
+
+        # ★ テンプレートが定義されているモジュールに実体を作る。
+        #   メソッドの本体はそのモジュールの名前しか参照しないため。
+        #   ⚠️ 型引数は **Type として**渡すので、名前解決は要らない。
+        saved_mod: types.ModuleSyms = self.cur_syms()
+        saved_scope: types.Scope | None = self.scope
+        saved_tbind: TBinds | None = self.tbind
+        saved_func: types.FuncSig | None = self.cur_func
+        saved_used: list[str] = self.used
+
+        self.enter_module(owner)
+
+        binds: TBinds = TBinds()
+        i2: int = 0
+        tp2: ast.Node | None = tnode.targs
+        while tp2 is not None:
+            tpn: ast.Node = tp2
+            binds.names.append(copy(tpn.name))
+            binds.types_.append(args[i2])
+            i2 = i2 + 1
+            tp2 = tpn.next
+        self.tbind = binds
+
+        # 木を複製して、名前を実体のものに差し替える
+        inst: ast.Node = unwrap_node(ast.ast_clone(tnode))
+        inst.name = copy(iname)
+        inst.targs = None            # ★ 実体はもうテンプレートではない
+        inst.next = None
+
+        self.declare_class(inst)
+        icls: ast.Class | None = inst.cls
+        if icls is not None:
+            icls.from_template = tmpl
+        self.declare_class_members(inst)
+        ty: ast.Type = unwrap_type(inst.type)
+
+        # ★ codegen が拾えるように、そのモジュールの AST に足す
+        omod: module.Module | None = owner.mod
+        root: ast.Node = ast.new_node(ast.ND_BLOCK, None)
+        if omod is None:
+            panic("sema: モジュールがありません")
+        else:
+            root = unwrap_node(omod.ast)
+        last: ast.Node = unwrap_node(root.body)
+        nx: ast.Node | None = last.next
+        while nx is not None:
+            last = nx
+            nx = last.next
+        last.next = inst
+
+        self.pending.append(Instance(inst, owner, binds))
+
+        self.enter_module(saved_mod)
+        self.scope = saved_scope
+        self.cur_func = saved_func
+        self.used = saved_used
+        self.tbind = saved_tbind
+        return ty
+
     def resolve_base_type(self, tr: ast.Node) -> ast.Type:
         # ★ 第13章：モジュール修飾された型注釈
         if len(tr.mod_name) > 0:
@@ -378,6 +538,10 @@ class Sema:
                                 "他のモジュールから使えるのはクラスだけです" +
                                 "（int や list はモジュール修飾なしで書きます）")
                 return self.ty_int()
+            # ★ 第40章：他のモジュールのジェネリッククラスも実体化できる
+            if c.node is not None and unwrap_node(c.node).targs is not None:
+                return self.instantiate_class(c, self.collect_targs(tr),
+                                              unwrap_tok(tr.tok))
             if tr.lhs is not None:
                 diag.error_at_hint(unwrap_tok(tr.tok),
                                    "要素型を取るのは list と rc だけです",
@@ -414,18 +578,37 @@ class Sema:
                                    "'" + ast.type_name(rel) + "' は rc に入れられません")
             return ast.type_rc(rel)
 
-        if tr.lhs is not None:
-            diag.error_at_hint(unwrap_tok(tr.tok),
-                               "要素型を取るのは list と rc だけです",
-                               "型 '" + tr.name + "' は要素型を取りません")
+        # ★ 第40章：型引数の名前（class Dict[K, V] の K）。
+        #   ⚠️ **クラス名より先に**引く。テンプレートを読む間だけ有効。
+        tb: TBinds | None = self.tbind
+        if tb is not None:
+            tv: ast.Type | None = tb.find(tr.name)
+            if tv is not None:
+                if tr.lhs is not None:
+                    diag.error_at_hint(unwrap_tok(tr.tok),
+                                       "型引数そのものは型引数を取りません",
+                                       "型 '" + tr.name + "' は型引数を取りません")
+                return tv
 
         t: ast.Type | None = self.type_from_name(tr.name)
         if t is not None:
+            if tr.lhs is not None:
+                diag.error_at_hint(unwrap_tok(tr.tok),
+                                   "要素型を取るのは list と rc だけです",
+                                   "型 '" + tr.name + "' は要素型を取りません")
             return t
 
         # ★ 第12章：組み込みの型名で無ければ、クラス名として引く
         c2: ast.Class | None = self.lookup_class(tr.name)
         if c2 is not None:
+            # ★ 第40章：ジェネリッククラスなら、ここで実体を作る
+            if c2.node is not None and unwrap_node(c2.node).targs is not None:
+                return self.instantiate_class(c2, self.collect_targs(tr),
+                                              unwrap_tok(tr.tok))
+            if tr.lhs is not None:
+                diag.error_at_hint(unwrap_tok(tr.tok),
+                                   "要素型を取るのは list と rc だけです",
+                                   "型 '" + tr.name + "' は要素型を取りません")
             return unwrap_type(c2.type)
 
         diag.error_full(unwrap_tok(tr.tok), "未知の型名 '" + tr.name + "' です",
@@ -1661,7 +1844,34 @@ class Sema:
         return self.check_call_sig(n, f, "関数")
 
     # インスタンス生成 Token(1, "x") の検査（第12章）
-    def check_new(mut self, n: mut ast.Node, c: ast.Class) -> ast.Type:
+    def check_new(mut self, n: mut ast.Node, c0: ast.Class) -> ast.Type:
+        c: ast.Class = c0
+
+        # ★ 第40章：ジェネリッククラスの生成。**どの実体を作るのかは
+        #   「代入される先の型」から決める**（設計 §1：推論は左辺からだけ）。
+        #
+        #     d: Dict[str, int] = Dict()
+        #                         ^^^^^^ ここには型引数を書かない
+        if c.node is not None and unwrap_node(c.node).targs is not None:
+            ok: bool = False
+            want: ast.Type | None = self.expected
+            if want is not None:
+                w: ast.Type = want
+                if w.kind == ast.TY_CLASS and w.cls is not None:
+                    wc0: ast.Class = unwrap_cls(w.cls)
+                    ft: ast.Class | None = wc0.from_template
+                    if ft is not None and same_class(ft, c):
+                        c = wc0
+                        ok = True
+            if not ok:
+                diag.error_full(unwrap_tok(n.tok),
+                                "'" + c.name + "' のどの実体を作るのか決められません",
+                                "型引数が決まりません", c.tok,
+                                "このクラスは型引数を取ります",
+                                "変数の型から決めます。'x: " + c.name +
+                                "[型, ...] = " + c.name +
+                                "(...)' の形で書いてください")
+
         n.cls = c    # ★ codegen はこれを見て「生成」だと分かる
 
         nargs: int = count_siblings(n.args)
@@ -2411,7 +2621,9 @@ class Sema:
         d2: ast.Node | None = root.body
         while d2 is not None:
             n2: ast.Node = d2
-            if n2.kind == ast.ND_CLASS:
+            # ⚠️ **ジェネリックなテンプレートはここでは並べない**（第40章）。
+            #   K や V が何なのかまだ決まっていないので、大きさが決められない。
+            if n2.kind == ast.ND_CLASS and n2.targs is None:
                 self.declare_class_members(n2)
             d2 = n2.next
 
@@ -2433,7 +2645,9 @@ class Sema:
                 # ⚠️ extern は本体を持たないので検査するものがない（第14章）
                 if n.body is not None:
                     self.check_func(n)
-            elif n.kind == ast.ND_CLASS:
+            # ⚠️ ジェネリックなテンプレートの本体は検査しない（第40章）。
+            #   実体ができてから、その実体の本体を検査する。
+            elif n.kind == ast.ND_CLASS and n.targs is None:
                 m: ast.Node | None = n.body
                 while m is not None:
                     mm: ast.Node = m
@@ -2462,6 +2676,19 @@ class Sema:
 
 # ── 入口 ───────────────────────────────────────────────────
 
+def unwrap_cls(c: ast.Class | None) -> ast.Class:
+    if c is None:
+        panic("sema: クラスがありません")
+        return ast.Class("", None)
+    return c
+
+
+# 2 つのクラスが同じ定義かを比べる（第40章）
+# ⚠️ 名前ではなく **定義そのもの**で比べます（第12章の判断）。
+def same_class(a: ast.Class, b: ast.Class) -> bool:
+    return a == b
+
+
 def sema_program(mods: module.Module | None, entry: module.Module | None) -> None:
     s: Sema = Sema()
 
@@ -2488,6 +2715,30 @@ def sema_program(mods: module.Module | None, entry: module.Module | None) -> Non
         s.enter_module(ms2)
         s.check_module(unwrap_node(mod_ast(ms2)))
         j = j + 1
+
+    # ★ パス 3：実体化したクラスの本体を検査する（第40章）
+    #
+    # ⚠️ 検査の途中で **さらに実体が増える**ことがある
+    #   （Dict[str, Box[int]] のように入れ子の場合）。増えなくなるまで繰り返す。
+    while len(s.pending) > 0:
+        batch: list[Instance] = s.pending
+        s.pending = []                  # ★ 先に外す（この回の分だけを処理する）
+        k: int = 0
+        while k < len(batch):
+            it: Instance = batch[k]
+            io2: types.ModuleSyms | None = it.owner
+            if io2 is not None:
+                s.enter_module(io2)
+            s.tbind = it.binds          # 型引数を戻してから本体を読む
+            inode: ast.Node = unwrap_node(it.node)
+            mm3: ast.Node | None = inode.body
+            while mm3 is not None:
+                m3: ast.Node = mm3
+                if m3.kind == ast.ND_FUNC:
+                    s.check_func(m3)
+                mm3 = m3.next
+            s.tbind = None
+            k = k + 1
 
     # main は入口モジュールにだけ要る
     if entry is not None:

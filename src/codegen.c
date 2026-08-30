@@ -1551,7 +1551,7 @@ static const char *gen_class_drop(Emitter *e, Class *c) {
         //    定義しているクラスに declare を出すと「再定義」で落ちます。
         bool local = false;
         for (Node *d = e->ast->body; d; d = d->next)
-            if (d->kind == ND_CLASS && d->cls == c) local = true;
+            if (d->kind == ND_CLASS && !d->targs && d->cls == c) local = true;
         if (!local) declare_extern(e, "void", dtor->ir_name, "ptr");
         sb_printf(&b, "  call void @%s(ptr %%p)\n", dtor->ir_name);
     }
@@ -2411,7 +2411,10 @@ char *codegen(Module *mod, const char *main_ir_name, bool drop,
 
     // ② クラスの型定義（★ 使う側より先に、モジュールの先頭に出す）
     for (Node *d = ast->body; d; d = d->next) {
-        if (d->kind == ND_CLASS) gen_class_type(&e, d->cls);
+        // ⚠️ 第40章：ジェネリックなテンプレートは出しません。
+        //   K や V が何なのか決まっていないので、構造体の形が作れません。
+        //   出すのは実体（Box$int など）だけです。
+        if (d->kind == ND_CLASS && !d->targs) gen_class_type(&e, d->cls);
     }
 
     // ⑤ グローバル変数と関数定義
@@ -2435,7 +2438,7 @@ char *codegen(Module *mod, const char *main_ir_name, bool drop,
         if (d->kind == ND_FUNC) gen_func(&e, d);
         // メソッドも、ふつうの関数とまったく同じ関数で出します。
         // 違うのは名前（@lexer.Token.show）と、第 1 引数が self であることだけ。
-        if (d->kind == ND_CLASS)
+        if (d->kind == ND_CLASS && !d->targs)
             for (Node *m = d->body; m; m = m->next)
                 if (m->kind == ND_FUNC) gen_func(&e, m);
     }

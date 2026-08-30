@@ -167,33 +167,37 @@ def main() -> int:
 
 ## dict
 
-**鍵は `str`、値は `int`** の固定です。ジェネリクスが無いためで、
-これは[将来入れる予定](../design/future-features.md#1-ジェネリクス)です。
+**ジェネリック**です（第40章）。鍵と値の型を書きます。
 
 | メソッド | 説明 |
 |---|---|
-| `Dict()` | 空の表を作る |
-| `has(k: str) -> bool` | 鍵があるか |
-| `get(k: str) -> int` | 値。**無ければ実行時エラー** |
-| `get_or(k: str, default: int) -> int` | 値。無ければ `default` |
-| `set(mut self, k: own str, v: int) -> None` | 入れる（あれば上書き）。**鍵の所有権を取ります** |
+| `Dict[K, V]()` | 空の表を作る |
+| `has(k: K) -> bool` | 鍵があるか |
+| `get(k: K) -> V` | 値。**無ければ実行時エラー** |
+| `get_or(k: K, default: own V) -> V` | 値。無ければ `default` |
+| `set(mut self, k: own K, v: own V) -> None` | 入れる（あれば上書き）。**鍵と値の所有権を取ります** |
 | `len() -> int` | 個数 |
-| `keys() -> list[str]` | 鍵の一覧 |
+| `keys() -> list[K]` / `values() -> list[V]` | 一覧 |
+
+⚠️ **鍵の比較は `==` です。** `int` / `float` / `str` は**中身**で、
+クラスと `list` は**同一性**（同じものを指しているか）で比べます。
+クラスを鍵にするときはこの違いに注意してください。
+
+⚠️ 探索は**線形**（O(n)）です。要素数が増えるなら、鍵をハッシュして
+分ける形に直す必要があります。
 
 ```python
 import dict
 
 def main() -> int:
-    d: dict.Dict = dict.Dict()
+    d: dict.Dict[str, int] = dict.Dict()
     d.set("apple", 3)
     print(str(d.get_or("apple", 0)))     # → 3
     print(str(d.get_or("none", -1)))     # → -1
     return 0
 ```
 
-### 値以外のものを入れたいとき
-
-値が `int` に固定されているので、**`list` の添字を値に入れる**のが定石です。
+### クラスを値にする
 
 ```python
 import dict
@@ -206,16 +210,15 @@ class Symbol:
         self.value = value
 
 def main() -> int:
-    table: list[Symbol] = []
-    syms: dict.Dict = dict.Dict()
-
-    table.append(Symbol("x", 10))
-    syms.set("x", len(table) - 1)        # 添字を覚えておく
-
-    i: int = syms.get_or("x", -1)
-    print(str(table[i].value))           # → 10
+    syms: dict.Dict[str, Symbol] = dict.Dict()
+    syms.set("x", Symbol("x", 10))
+    print(str(syms.get("x").value))      # → 10
     return 0
 ```
+
+> **第39章まではこれが書けませんでした。** 値が `int` に固定されていたので、
+> 「`list` に置いて、その添字を値に入れる」回り道が必要でした
+> （`tests/cases/lib_dict_handle.po` にその形が残っています）。
 
 ### 鍵の所有権に注意
 
@@ -224,7 +227,7 @@ def main() -> int:
 
 ```python
 def count(words: list[str]) -> None:
-    d: dict.Dict = dict.Dict()
+    d: dict.Dict[str, int] = dict.Dict()
     for w in words:                       # w は借用
         d.set(copy(w), d.get_or(w, 0) + 1)
 ```

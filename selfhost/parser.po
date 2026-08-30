@@ -1176,7 +1176,22 @@ class Parser:
 
         open_tok: token.Token = self.peek()
         if self.consume("[") is not None:
-            n.lhs = self.type_ref("要素型を書いてください（例: list[int]）")
+            # ★ 第40章：型引数は **複数**取れる（Dict[str, int]）。
+            #   ⚠️ 1 個目は今までどおり lhs にも入れる（list[T] を読む側を変えない）
+            ta_tail: ast.Node | None = None
+            while True:
+                a: ast.Node = self.type_ref("型引数を書いてください（例: list[int]）")
+                if n.lhs is None:
+                    n.lhs = a
+                slot2: ast.Node = ast.new_node(ast.ND_TYPEREF, a.tok)
+                slot2.lhs = a
+                if ta_tail is not None:
+                    ta_tail.next = slot2
+                else:
+                    n.targs = slot2
+                ta_tail = slot2
+                if self.consume(",") is None:
+                    break
             self.expect_close("]", open_tok)
 
         # ★ 第15章：T | None
@@ -1414,6 +1429,29 @@ class Parser:
 
         n: ast.Node = ast.new_node(ast.ND_CLASS, kw)
         n.name = name_tok.text
+
+        # ★ 第40章：型引数 class Dict[K, V]:
+        #   ⚠️ 名前だけを並べる（制約は書けない）
+        topen: token.Token = self.peek()
+        if self.consume("[") is not None:
+            ttail: ast.Node | None = None
+            while True:
+                tp: token.Token = self.peek()
+                if tp.kind != token.TK_IDENT:
+                    self.fail_hint(tp,
+                                   "型引数は名前で書きます（例: class Dict[K, V]:）",
+                                   "型引数の名前が必要です")
+                self.advance()
+                slot: ast.Node = ast.new_node(ast.ND_TYPEREF, tp)
+                slot.name = tp.text
+                if ttail is not None:
+                    ttail.next = slot
+                else:
+                    n.targs = slot
+                ttail = slot
+                if self.consume(",") is None:
+                    break
+            self.expect_close("]", topen)
 
         self.expect_colon("class の宣言")
         self.expect(token.TK_NEWLINE, "改行",

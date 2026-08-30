@@ -10,7 +10,7 @@ import dict
 import strings
 
 def main() -> int:
-    counts: dict.Dict = dict.Dict()
+    counts: dict.Dict[str, int] = dict.Dict()
     for word in strings.split("a b a", " "):
         counts.set(copy(word), counts.get_or(word, 0) + 1)
 

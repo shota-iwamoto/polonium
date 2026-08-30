@@ -173,6 +173,10 @@ struct Class {
     //   メソッドは「定義されたモジュールの関数表」にいるので、
     //   使う側のモジュールから引くにはここをたどります。
     struct ModuleSyms *owner;
+
+    // ★ 第40章：この実体の元になったテンプレート（実体でなければ NULL）
+    Class *from_template;
+
     Class *next;
 };
 
@@ -323,6 +327,12 @@ struct Node {
     // ★ 第39章：min / max（2 引数なので組み込みの表に載らない）
     bool is_minmax;
 
+    // ★ 第40章：ジェネリクス。
+    //   ND_TYPEREF … 型引数の並び（Dict[str, int] の str と int）を targs に
+    //   ND_CLASS   … 型引数の名前の並び（class Dict[K, V] の K と V）を targs に
+    //                （ND_TYPEREF を name だけ使って並べます）
+    Node *targs;
+
     // ND_WHILE の増分処理（第11章）。for の脱糖でだけ使います。
     // ★ C の for(init; cond; incr) の incr にあたるもの。
     //   ここに置くと continue の飛び先を「増分」にできます。
@@ -352,6 +362,9 @@ Node *new_str_node(Token *tok, char *bytes, int len);
 Node *new_binop_node(Token *tok, OpKind op, Node *lhs, Node *rhs);
 Node *new_logical_node(Token *tok, OpKind op, Node *lhs, Node *rhs);
 Node *new_unary_node(Token *tok, OpKind op, Node *operand);
+
+// 第40章：AST の深い複製（ジェネリクスの単相化）
+Node *ast_clone(Node *n);
 Node *new_var_node(Token *tok, char *name);
 
 // AST を S 式で標準出力に表示する（--dump-ast 用）。

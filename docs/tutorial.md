@@ -61,7 +61,7 @@ Python のつもりで書くと最初に必ず引っかかる場所です。
 | 6 | `-7 // 2` → `-4` | **`-3`**（0 方向に丸める） | — |
 
 そのほか **無いもの**：継承・例外（後述の `raises` が代わり）・クロージャ・`lambda`・
-ジェネリクス・タプル・集合・内包表記・変数のシャドーイング。
+タプル・集合・内包表記・変数のシャドーイング。
 
 ---
 
@@ -364,6 +364,54 @@ def main() -> int:
 
 これが **None 安全**です。`if p is not None:` の中では、コンパイラが `p` を `Node` として扱います。
 
+### 6.4 ジェネリクス
+
+クラスは**型引数**を取れます。
+
+```python
+class Box[T]:
+    v: T
+
+    def init(self, v: own T) -> None:
+        self.v = v
+
+    def get(self) -> T:
+        return self.v
+
+class Pair[A, B]:
+    first: A
+    second: B
+    def init(self, a: own A, b: own B) -> None:
+        self.first = a
+        self.second = b
+
+def main() -> int:
+    bi: Box[int] = Box(42)
+    bs: Box[str] = Box("hello")
+    p: Pair[str, int] = Pair("age", 30)
+    print(f"{bi.get()} {bs.get()} {p.first}={p.second}")
+    return 0
+```
+
+**`Box[int]` と `Box[str]` は別々のクラスになります**（単相化）。
+生成される IR を見ると、それぞれ別の構造体が出ています。
+
+```llvm
+%Box$int.type = type { i64 }
+%Box$str.type = type { ptr }
+```
+
+> **⚠️ 型引数は「代入される先の型」から決まります。**
+> `Box(1)` だけでは何の `Box` か決められないので、必ず変数の型を書いてください。
+>
+> ```python
+> b: Box[int] = Box(1)        # ○
+> print(f(Box(1)))            # × 'Box' のどの実体を作るのか決められません
+> ```
+
+> **⚠️ 型制約はありません。** `T` に「比較できること」などを要求できないので、
+> `==` が使えるかどうかは実体化してみるまで分かりません。
+
 ---
 
 ## 7. 標準ライブラリ
@@ -435,13 +483,13 @@ def main() -> int:
 
 ### dict
 
-**鍵は `str`、値は `int`** の固定です（ジェネリクスが無いため）。
+**ジェネリック**です（第40章）。鍵と値の型を書きます。
 
 ```python
 import dict
 
 def main() -> int:
-    d: dict.Dict = dict.Dict()
+    d: dict.Dict[str, int] = dict.Dict()
     d.set("apple", 3)
     print(str(d.get_or("apple", 0)))    # → 3
     print(str(d.get_or("none", -1)))    # → -1
@@ -450,7 +498,7 @@ def main() -> int:
     return 0
 ```
 
-値に**リストの添字**を入れるのが、ジェネリクスの無い言語での定石です。
+**クラスも値にできます**（第40章のジェネリクスが入るまでは書けませんでした）。
 
 ```python
 import dict
@@ -463,20 +511,18 @@ class Symbol:
         self.value = value
 
 def main() -> int:
-    table: list[Symbol] = []
-    syms: dict.Dict = dict.Dict()
-
-    table.append(Symbol("x", 10))
-    syms.set("x", len(table) - 1)       # 添字を覚えておく
-
-    i: int = syms.get_or("x", -1)
-    print(str(table[i].value))          # → 10
+    syms: dict.Dict[str, Symbol] = dict.Dict()
+    syms.set("x", Symbol("x", 10))
+    print(str(syms.get("x").value))     # → 10
     return 0
 ```
 
+⚠️ 鍵の比較は `==` です。`int` / `float` / `str` は**中身**で、
+クラスと `list` は**同一性**（同じものを指しているか）で比べます。
+
 ### 数値計算
 
-`math` / `linalg` / `stats` / `random` / `physics` があります。
+`math` / `linalg` / `stats` / `random` / `numeric` / `physics` があります。
 **どれも Polonium で書かれていて、`libm` を呼びません**（ベアメタルでも動きます）。
 
 ```python
@@ -826,7 +872,6 @@ $ ./wc examples/sample.txt
 
 | 無いもの | 代わりに |
 |---|---|
-| **ジェネリクス** | `dict.Dict` は `str → int` 固定。添字を値に入れる定石を使う（§7） |
 | **継承・インタフェース** | 合成（フィールドに持つ） |
 | **クロージャ・`lambda`** | トップレベルの関数を渡す（関数型はあります。§5.1） |
 | **タプル・複数戻り値** | `list` かクラスを返す |
@@ -836,8 +881,7 @@ $ ./wc examples/sample.txt
 | f-string の書式指定 `{x:>8}` | `strings.lpad` / `strings.rpad` |
 | 例外（アンワインド） | `raises` / `try` / `except`（§10。**設計上入れません**） |
 
-**上の 4 つが実用上いちばん効きます。** とくにジェネリクスが無いせいで、
-`str → クラス` の表を作れません。
+**上の 3 つが実用上いちばん効きます。**
 
 言語の現在地と今後は [roadmap.md](roadmap.md) と
 [design/future-features.md](design/future-features.md) にあります。

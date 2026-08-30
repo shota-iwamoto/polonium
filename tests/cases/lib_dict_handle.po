@@ -1,6 +1,9 @@
 # OUTPUT: 20
 # OUTPUT: -1
-# 値に「list の添字」を入れる使い方（ジェネリクスが無い言語での定石）
+# 値に「list の添字」を入れる使い方
+#   ⚠️ **第40章のジェネリクスで不要になりました**（dict.Dict[str, Symbol]
+#     が書けます。lib_dict_generic.po を参照）。この形も動き続けることを
+#     確かめるために残しています。
 import dict
 
 class Symbol:
@@ -13,7 +16,7 @@ class Symbol:
 
 def main() -> int:
     table: list[Symbol] = []
-    syms: dict.Dict = dict.Dict()
+    syms: dict.Dict[str, int] = dict.Dict()
 
     table.append(Symbol("x", 10))
     syms.set("x", len(table) - 1)

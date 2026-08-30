@@ -66,6 +66,8 @@ class Class:
     node: Node | None           # ND_CLASS（メソッドをたどるため）
     has_init: bool
     owner_name: str   # 定義されているモジュール名（第13章）
+    # ★ 第40章：この実体の元になったテンプレート（実体でなければ None）
+    from_template: Class | None
     next: Class | None
 
     def init(self, name: str, tok: token.Token | None) -> None:
@@ -443,6 +445,10 @@ class Node:
     is_indirect: bool
     # ★ 第39章：min / max（2 引数なので組み込みの表に載らない）
     is_minmax: bool
+    # ★ 第40章：ジェネリクス。
+    #   ND_TYPEREF … 型引数の並び（Dict[str, int] の str と int）
+    #   ND_CLASS   … 型引数の名前の並び（class Dict[K, V] の K と V）
+    targs: Node | None
     type_ref: Node | None   # 型注釈の木
 
     # ── 第27章：エラー処理 ──
@@ -471,6 +477,7 @@ class Node:
         self.is_func_ref = False    # 第38章
         self.is_indirect = False    # 第38章
         self.is_minmax = False      # 第39章
+        self.targs = None           # 第40章
         self.mode = PM_BORROW
         # ── 第27章 ──
         self.can_fail = False
@@ -720,3 +727,39 @@ def dump_siblings(first: Node | None, depth: int) -> None:
 
 def dump_ast(root: Node | None) -> None:
     dump(root, 0)
+
+
+# ── 第40章：AST の深い複製（ジェネリクスの単相化で使う）────────
+#
+# ★ 単相化は「テンプレートの木を丸ごと複製して、型引数を置き換える」だけ。
+#   置き換えは sema が「型引数の束縛」で行うので、ここでは**複製だけ**。
+#
+# ⚠️ **sema が埋める欄（type / ir_name / cls / builtin）は写しません。**
+#   写すとテンプレートを検査したときの結果が実体に混入します。
+def ast_clone(n: Node | None) -> Node | None:
+    if n is None:
+        return None
+    src: Node = n
+
+    c: Node = Node(src.kind, src.tok)
+    c.ival = src.ival
+    c.sval = copy(src.sval)
+    c.slen = src.slen
+    c.op = src.op
+    c.name = copy(src.name)
+    c.mod_name = copy(src.mod_name)
+    c.nullable = src.nullable
+    c.mode = src.mode
+    c.is_global = src.is_global
+
+    c.lhs = ast_clone(src.lhs)
+    c.rhs = ast_clone(src.rhs)
+    c.els = ast_clone(src.els)
+    c.body = ast_clone(src.body)
+    c.args = ast_clone(src.args)
+    c.params = ast_clone(src.params)
+    c.type_ref = ast_clone(src.type_ref)
+    c.targs = ast_clone(src.targs)
+    c.incr = ast_clone(src.incr)
+    c.next = ast_clone(src.next)
+    return c

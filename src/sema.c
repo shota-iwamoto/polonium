@@ -128,7 +128,34 @@ typedef struct {
 
     // ── 第30章：低レベル ──
     int unsafe_depth;   // unsafe: の中にいる深さ（0 なら外）
+
+    // ── 第40章：ジェネリクス（単相化）──
+    //
+    // ★ 型引数の束縛。K → str のような対応を、テンプレートを読む間だけ
+    //   有効にします（「入る前に積んで、抜けたら降ろす」。第15章の絞り込みと同じ手）。
+    struct TBind *tbind;
+
+    // ★ 実体化したクラスの待ち行列。本体の検査は**あとでまとめて**行います。
+    //   検査の途中で新しい実体が増えるので、その場でやると入れ子になります。
+    struct Instance *pending;
 } Sema;
+
+// 型引数の束縛（K → str）
+typedef struct TBind TBind;
+struct TBind {
+    const char *name;
+    Type *type;
+    TBind *next;
+};
+
+// 実体化したクラス 1 つぶん（本体の検査を後回しにするための記録）
+typedef struct Instance Instance;
+struct Instance {
+    Node *node;          // 複製した ND_CLASS
+    ModuleSyms *owner;   // テンプレートが定義されているモジュール
+    TBind *binds;        // そのときの型引数の束縛
+    Instance *next;
+};
 
 // 入れ子の try（内側で捕まらなければ外側が受け止める）
 typedef struct TryCtx TryCtx;
@@ -443,6 +470,139 @@ static Type *resolve_type(Sema *s, Node *tr) {
     return type_opt(base);
 }
 
+// ── 第40章：ジェネリクス（単相化）──────────────────────────
+//
+// ★ 方針は docs/design/future-features.md §1 のとおり **単相化**です。
+//   Dict[str, int] と Dict[str, Symbol] は、**別々のクラスを作ります**。
+//   型消去（1 つの実体で済ませる）を採らないのは、int と str で値の大きさと
+//   解放の要否が違い、箱詰めが要るためです（GC を持たない方針と噛み合わない）。
+
+// 型引数の束縛を引く（K → str）
+static Type *lookup_tbind(Sema *s, const char *name) {
+    for (TBind *b = s->tbind; b; b = b->next)
+        if (strcmp(b->name, name) == 0) return b->type;
+    return NULL;
+}
+
+// 実体の名前を作る（Dict$str$int）。
+//
+// ⚠️ 型名をそのまま使うと '[' や ',' が混ざって IR の名前に使えません。
+//   英数字と '.' 以外を '_' に潰します。
+static char *mangle_inst(const char *base, Type **args, int n) {
+    StrBuf sb;
+    sb_init(&sb);
+    sb_printf(&sb, "%s", base);
+    for (int i = 0; i < n; i++) {
+        sb_printf(&sb, "$");
+        for (const char *q = type_name(args[i]); *q; q++) {
+            char ch = *q;
+            bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                      (ch >= '0' && ch <= '9') || ch == '.' || ch == '_';
+            sb_printf(&sb, "%c", ok ? ch : '_');
+        }
+    }
+    return sb_str(&sb);
+}
+
+static void declare_class(Sema *s, Node *n);
+static void declare_class_members(Sema *s, Node *n);
+
+// テンプレートから実体を 1 つ作る（既にあれば作らない）
+static Type *instantiate_class(Sema *s, Class *tmpl, Type **args, int nargs,
+                               Token *at) {
+    int want = 0;
+    for (Node *tp = tmpl->node->targs; tp; tp = tp->next) want++;
+    if (nargs != want) {
+        Diag d = {0};
+        d.message = diag_fmt("'%s' は型引数を %d 個取りますが、%d 個書かれました",
+                             tmpl->name, want, nargs);
+        d.primary.tok = at;
+        d.primary.label = "型引数の個数が違います";
+        d.related.tok = tmpl->tok;
+        d.related.label = "このクラスの定義です";
+        diag_fail(&d);
+    }
+
+    char *iname = mangle_inst(tmpl->name, args, nargs);
+
+    // 既に作ってあれば、それを返す（同じ組み合わせは 1 個だけ）
+    for (Class *c = tmpl->owner->classes; c; c = c->next)
+        if (strcmp(c->name, iname) == 0) return c->type;
+
+    // ★ テンプレートが定義されているモジュールに実体を作ります。
+    //   メソッドの本体はそのモジュールの名前しか参照しないためです。
+    //   ⚠️ 型引数（Symbol など）は **Type として**渡すので、名前解決は要りません。
+    //
+    // ⚠️ モジュールの出入りは **enter_module に任せます**。
+    //   自前で s->funcs / s->classes を退避すると、enter_module が行う
+    //   「今のモジュールへの書き戻し」と二重になり、表が失われます
+    //   （実際にそれで main が見つからなくなりました）。
+    ModuleSyms *saved_mod = s->cur;
+    Scope *saved_scope = s->scope;
+    TBind *saved_tbind = s->tbind;
+    FuncSig *saved_cur_func = s->cur_func;
+    UsedName *saved_used = s->used;
+
+    enter_module(s, tmpl->owner);
+
+    // 型引数を束縛する
+    TBind *binds = NULL;
+    int i = 0;
+    for (Node *tp = tmpl->node->targs; tp; tp = tp->next, i++) {
+        TBind *b = xmalloc(sizeof(TBind));
+        b->name = tp->name;
+        b->type = args[i];
+        b->next = binds;
+        binds = b;
+    }
+    s->tbind = binds;
+
+    // 木を複製して、名前を実体のものに差し替える
+    Node *inst = ast_clone(tmpl->node);
+    inst->name = iname;
+    inst->targs = NULL;          // ★ 実体はもうテンプレートではありません
+    inst->next = NULL;
+
+    declare_class(s, inst);
+    inst->cls->from_template = tmpl;      // ★ 生成のときに実体を選ぶ手がかり
+    declare_class_members(s, inst);
+    Type *ty = inst->type;
+
+    // ★ codegen が拾えるように、テンプレートのモジュールの AST に足します。
+    Node *ast = tmpl->owner->mod->ast;
+    Node *last = ast->body;
+    while (last->next) last = last->next;
+    last->next = inst;
+
+    // 本体の検査は後回し（今は別のものを検査している最中かもしれない）
+    Instance *q = xmalloc(sizeof(Instance));
+    q->node = inst;
+    q->owner = tmpl->owner;
+    q->binds = binds;
+    q->next = s->pending;
+    s->pending = q;
+
+    enter_module(s, saved_mod);
+    s->scope = saved_scope;          // ★ 検査中の局所スコープに戻す
+    s->cur_func = saved_cur_func;
+    s->used = saved_used;
+    s->tbind = saved_tbind;
+    return ty;
+}
+
+// 型参照に書かれた型引数を並べる
+static int collect_targs(Sema *s, Node *tr, Type **out, int max) {
+    int n = 0;
+    for (Node *a = tr->targs; a; a = a->next) {
+        if (n >= max)
+            error_at(tr->tok, "型引数が多すぎます（最大 %d 個です）", max);
+        out[n++] = resolve_type(s, a->lhs);
+    }
+    return n;
+}
+
+#define MAX_TARGS 8
+
 static Type *resolve_base_type(Sema *s, Node *tr) {
     // ★ 第13章：lexer.Token のようにモジュール修飾された型注釈。
     //   引く表が「自分のモジュール」から「そのモジュール」に変わるだけです。
@@ -467,6 +627,12 @@ static Type *resolve_base_type(Sema *s, Node *tr) {
             d.hint = "他のモジュールから使えるのはクラスだけです"
                      "（int や list はモジュール修飾なしで書きます）";
             diag_fail(&d);
+        }
+        // ★ 第40章：他のモジュールのジェネリッククラスも実体化できます
+        if (c->node && c->node->targs) {
+            Type *args[MAX_TARGS];
+            int n = collect_targs(s, tr, args, MAX_TARGS);
+            return instantiate_class(s, c, args, n, tr->tok);
         }
         if (tr->lhs)
             error_at_hint(tr->tok, "要素型を取るのは list と rc だけです",
@@ -517,17 +683,39 @@ static Type *resolve_base_type(Sema *s, Node *tr) {
         return type_rc(elem);
     }
 
-    if (tr->lhs)
-        error_at_hint(tr->tok, "要素型を取るのは list と rc だけです",
-                      "型 '%s' は要素型を取りません", tr->name);
+    // ★ 第40章：型引数の名前（class Dict[K, V] の K）。
+    //   ⚠️ **クラス名より先に**引きます。テンプレートを読む間だけ有効です。
+    Type *tv = lookup_tbind(s, tr->name);
+    if (tv) {
+        if (tr->lhs)
+            error_at_hint(tr->tok, "型引数そのものは型引数を取りません",
+                          "型 '%s' は型引数を取りません", tr->name);
+        return tv;
+    }
 
     Type *t = type_from_name(tr->name);
-    if (t) return t;
+    if (t) {
+        if (tr->lhs)
+            error_at_hint(tr->tok, "要素型を取るのは list と rc だけです",
+                          "型 '%s' は要素型を取りません", tr->name);
+        return t;
+    }
 
     // ★ 第12章：組み込みの型名で無ければ、クラス名として引きます。
     //   「型の一覧がソースコードによって増える」のは、この章が初めてです。
     Class *c = lookup_class(s, tr->name);
-    if (c) return c->type;
+    if (c) {
+        // ★ 第40章：ジェネリッククラスなら、ここで実体を作ります。
+        if (c->node && c->node->targs) {
+            Type *args[MAX_TARGS];
+            int n = collect_targs(s, tr, args, MAX_TARGS);
+            return instantiate_class(s, c, args, n, tr->tok);
+        }
+        if (tr->lhs)
+            error_at_hint(tr->tok, "要素型を取るのは list と rc だけです",
+                          "型 '%s' は要素型を取りません", tr->name);
+        return c->type;
+    }
 
     Diag d = {0};
     d.message = diag_fmt("未知の型名 '%s' です", tr->name);
@@ -1807,6 +1995,32 @@ static Type *check_method(Sema *s, Node *n) {
 //   「どう扱うか」の判断をここで終わらせ、codegen には n->cls という
 //   記録を残すだけ。第9章の n->builtin とまったく同じ形です。
 static Type *check_new(Sema *s, Node *n, Class *c) {
+    // ★ 第40章：ジェネリッククラスの生成。**どの実体を作るのかは
+    //   「代入される先の型」から決めます**（設計 §1：推論は左辺からだけ）。
+    //
+    //     d: Dict[str, int] = Dict()
+    //                         ^^^^^^ ここには型引数を書きません
+    //
+    // ⚠️ 左辺が無い場所（式の途中など）では決められないので、その旨を伝えます。
+    if (c->node && c->node->targs) {
+        Type *want = s->expected;
+        if (!want || want->kind != TY_CLASS ||
+            !want->cls->from_template ||
+            want->cls->from_template != c) {
+            Diag d = {0};
+            d.message = diag_fmt("'%s' のどの実体を作るのか決められません", c->name);
+            d.primary.tok = n->tok;
+            d.primary.label = "型引数が決まりません";
+            d.related.tok = c->tok;
+            d.related.label = "このクラスは型引数を取ります";
+            d.hint = diag_fmt("変数の型から決めます。"
+                              "'x: %s[型, ...] = %s(...)' の形で書いてください",
+                              c->name, c->name);
+            diag_fail(&d);
+        }
+        c = want->cls;   // ★ 以降は実体を相手にします
+    }
+
     n->cls = c;  // ★ codegen はこれを見て「生成」だと分かる
 
     int nargs = 0;
@@ -2960,8 +3174,12 @@ static void declare_module(Sema *s, Node *ast) {
         if (d->kind == ND_CLASS) declare_class(s, d);
 
     // 1b：フィールドとメソッド（型注釈に他のクラスを書ける）
+    //
+    // ⚠️ **ジェネリックなテンプレートはここでは並べません。**
+    //   K や V が何なのかまだ決まっていないので、フィールドの大きさも
+    //   メソッドの型も決められません。実体ができたときに行います（第40章）。
     for (Node *d = ast->body; d; d = d->next)
-        if (d->kind == ND_CLASS) declare_class_members(s, d);
+        if (d->kind == ND_CLASS && !d->targs) declare_class_members(s, d);
 
     // 1c：トップレベルの関数とグローバル変数（引数の型にクラスを書ける）
     for (Node *d = ast->body; d; d = d->next) {
@@ -2981,7 +3199,9 @@ static void check_module(Sema *s, Node *ast) {
         if (d->kind == ND_FUNC) { if (d->body) check_func(s, d); }
         // メソッドの本体も、ふつうの関数とまったく同じ手順で検査します。
         // self はもう「型が入った引数」なので、特別扱いは 1 つも要りません。
-        else if (d->kind == ND_CLASS)
+        // ⚠️ ジェネリックなテンプレートの本体は検査しません（第40章）。
+        //   実体ができてから、その実体の本体を検査します。
+        else if (d->kind == ND_CLASS && !d->targs)
             for (Node *m = d->body; m; m = m->next)
                 if (m->kind == ND_FUNC) check_func(s, m);
     }
@@ -3022,6 +3242,23 @@ void sema_program(Module *mods, Module *entry) {
     for (ModuleSyms *ms = s.mods; ms; ms = ms->next) {
         enter_module(&s, ms);
         check_module(&s, ms->mod->ast);
+    }
+
+    // ★ パス 3：実体化したクラスの本体を検査する（第40章）
+    //
+    // ⚠️ 検査の途中で **さらに実体が増える**ことがあります
+    //   （Dict[str, Box[int]] のように入れ子になっている場合）。
+    //   増えなくなるまで繰り返します。
+    while (s.pending) {
+        Instance *q = s.pending;
+        s.pending = NULL;                 // ★ 先に外す（この回の分だけを処理する）
+        for (Instance *it = q; it; it = it->next) {
+            enter_module(&s, it->owner);
+            s.tbind = it->binds;          // 型引数を戻してから本体を読む
+            for (Node *m = it->node->body; m; m = m->next)
+                if (m->kind == ND_FUNC) check_func(&s, m);
+            s.tbind = NULL;
+        }
     }
 
     // main は入口モジュールにだけ要る（他のモジュールにあっても構わない）

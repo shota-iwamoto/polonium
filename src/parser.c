@@ -1514,7 +1514,19 @@ static Node *type_ref(Parser *p, const char *what) {
 
     Token *open = peek(p);
     if (consume(p, "[")) {
-        n->lhs = type_ref(p, "要素型を書いてください（例: list[int]）");
+        // ★ 第40章：型引数は **複数**取れるようになりました（Dict[str, int]）。
+        //   ⚠️ 1 個目は今までどおり lhs にも入れます。list[T] / rc[T] / ptr[T]
+        //     を読む側のコードを変えずに済ませるためです。
+        Node *ta_tail = NULL;
+        for (;;) {
+            Node *a = type_ref(p, "型引数を書いてください（例: list[int]）");
+            if (!n->lhs) n->lhs = a;
+            Node *slot = new_node(ND_TYPEREF, a->tok);
+            slot->lhs = a;
+            if (ta_tail) ta_tail->next = slot; else n->targs = slot;
+            ta_tail = slot;
+            if (!consume(p, ",")) break;
+        }
         expect_close(p, "]", open);
     }
 
@@ -1746,6 +1758,26 @@ static Node *class_def(Parser *p) {
 
     Node *n = new_node(ND_CLASS, kw);
     n->name = name_tok->text;
+
+    // ★ 第40章：型引数 class Dict[K, V]:
+    //   ⚠️ 名前だけを並べます（制約は書けません。design/future-features.md）。
+    Token *topen = peek(p);
+    if (consume(p, "[")) {
+        Node *tail = NULL;
+        for (;;) {
+            Token *tp = peek(p);
+            if (tp->kind != TK_IDENT)
+                error_at_hint(tp, "型引数は名前で書きます（例: class Dict[K, V]:）",
+                              "型引数の名前が必要です");
+            advance(p);
+            Node *slot = new_node(ND_TYPEREF, tp);
+            slot->name = tp->text;
+            if (tail) tail->next = slot; else n->targs = slot;
+            tail = slot;
+            if (!consume(p, ",")) break;
+        }
+        expect_close(p, "]", topen);
+    }
 
     expect_colon(p, "class の宣言");
     expect(p, TK_NEWLINE, "改行", "':' の後は改行してクラス本体を字下げしてください");

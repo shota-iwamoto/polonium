@@ -10,7 +10,7 @@
 import dict
 
 def main() -> int:
-    d: dict.Dict = dict.Dict()
+    d: dict.Dict[str, int] = dict.Dict()
     d.set("a", 1)
     d.set("b", 2)
     d.set("a", 9)

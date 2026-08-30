@@ -349,3 +349,40 @@ static void dump(Node *n, int depth) {
 }
 
 void dump_ast(Node *node) { dump(node, 0); }
+
+
+// ── 第40章：AST の深い複製（ジェネリクスの単相化で使う）────────
+//
+// ★ 単相化は「テンプレートの木を丸ごと複製して、型引数を置き換える」だけです。
+//   置き換え自体は sema が「型引数の束縛」で行うので、ここでは**複製だけ**を
+//   担当します。木を作り直すので、実体ごとに別の ir_name / type を持てます。
+//
+// ⚠️ **sema が埋める欄（type / ir_name / cls / builtin）は写しません。**
+//   写すと「テンプレートを検査したときの結果」が実体に混入します。
+//   複製した木は、まっさらな状態から検査し直します。
+Node *ast_clone(Node *n) {
+    if (!n) return NULL;
+
+    Node *c = new_node(n->kind, n->tok);
+    c->ival = n->ival;
+    c->sval = n->sval;
+    c->slen = n->slen;
+    c->op = n->op;
+    c->name = n->name;
+    c->mod_name = n->mod_name;
+    c->nullable = n->nullable;
+    c->mode = n->mode;
+    c->is_global = n->is_global;
+
+    c->lhs = ast_clone(n->lhs);
+    c->rhs = ast_clone(n->rhs);
+    c->els = ast_clone(n->els);
+    c->body = ast_clone(n->body);
+    c->args = ast_clone(n->args);
+    c->params = ast_clone(n->params);
+    c->type_ref = ast_clone(n->type_ref);
+    c->targs = ast_clone(n->targs);
+    c->incr = ast_clone(n->incr);
+    c->next = ast_clone(n->next);
+    return c;
+}

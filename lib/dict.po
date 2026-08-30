@@ -1,21 +1,22 @@
-# dict.po — 文字列キーの表（第14章）
+# dict.po — 表（ハッシュではなく線形探索）
 #
-# ★ 値は int だけです。利用者定義のジェネリクスが無いためです
-#   （docs/design/self-hosting.md 3.7）。
-#   オブジェクトを入れたいときは list[T] に置いて、その添字を値にします:
+# ★ **第40章でジェネリックになりました。** それまでは鍵が str、値が int に
+#   固定されていて、`str → クラス` の表が作れませんでした。
 #
-#       table: list[Symbol] = []
-#       syms: dict.Dict = dict.Dict()
-#       table.append(sym)
-#       syms.set(sym.name, len(table) - 1)
+#       d: dict.Dict[str, Symbol] = dict.Dict()
 #
-# ⚠️ 探索は線形です。まず正しく動かし、速度は第20章の後に測ってから直します。
+# ⚠️ 鍵の比較には `==` を使います。int / float / str は**中身**で、
+#   クラスと list は**同一性**（同じものを指しているか）で比べます。
+#   クラスを鍵にするときはこの違いに注意してください。
+#
+# ⚠️ 探索は線形です（O(n)）。まず正しく動かす方針のままです。
+#   要素数が増えるなら、鍵をハッシュして分ける形に直す必要があります。
 
-class Dict:
-    keys_: list[str]
-    vals_: list[int]
+class Dict[K, V]:
+    keys_: list[K]
+    vals_: list[V]
 
-    def index_of(self, k: str) -> int:
+    def index_of(self, k: K) -> int:
         i: int = 0
         while i < len(self.keys_):
             if self.keys_[i] == k:
@@ -23,24 +24,27 @@ class Dict:
             i = i + 1
         return -1
 
-    def has(self, k: str) -> bool:
+    def has(self, k: K) -> bool:
         return self.index_of(k) >= 0
 
-    # 無ければ実行時エラー（T | None が無いので None を返せない）
-    def get(self, k: str) -> int:
+    # 無ければ実行時エラー
+    # ⚠️ 鍵をメッセージに出しません。K が str とは限らないためです。
+    def get(self, k: K) -> V:
         i: int = self.index_of(k)
         if i < 0:
-            panic("dict: key not found: " + k)
+            panic("dict: key not found")
         return self.vals_[i]
 
-    def get_or(self, k: str, default: int) -> int:
+    # ⚠️ default は **所有権を受け取ります**（own）。返す可能性があるので、
+    #   借りたままでは呼び出しより長生きしてしまいます（E-BORROW-4）。
+    def get_or(self, k: K, default: own V) -> V:
         i: int = self.index_of(k)
         if i < 0:
             return default
         return self.vals_[i]
 
     # 既にあれば上書きする
-    def set(mut self, k: own str, v: int) -> None:
+    def set(mut self, k: own K, v: own V) -> None:
         i: int = self.index_of(k)
         if i < 0:
             self.keys_.append(k)
@@ -51,5 +55,8 @@ class Dict:
     def len(self) -> int:
         return len(self.keys_)
 
-    def keys(self) -> list[str]:
+    def keys(self) -> list[K]:
         return self.keys_
+
+    def values(self) -> list[V]:
+        return self.vals_

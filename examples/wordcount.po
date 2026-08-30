@@ -16,7 +16,7 @@ def main() -> int:
         return 1
 
     text: str = io.read_file(args[1])
-    counts: dict.Dict = dict.Dict()
+    counts: dict.Dict[str, int] = dict.Dict()
 
     for line in strings.split(text, "\n"):
         for word in strings.split(strings.strip(line), " "):

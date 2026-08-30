@@ -1751,7 +1751,10 @@ def codegen(mod: module.Module, main_ir_name: str, triple: str) -> str:
     d: ast.Node | None = root.body
     while d is not None:
         n: ast.Node = d
-        if n.kind == ast.ND_CLASS:
+        # ⚠️ 第40章：ジェネリックなテンプレートは出さない。
+        #   K や V が何なのか決まっていないので、構造体の形が作れない。
+        #   出すのは実体（Box$int など）だけ。
+        if n.kind == ast.ND_CLASS and n.targs is None:
             e.gen_class_type(class_of(n.cls))
         d = n.next
 
@@ -1784,7 +1787,7 @@ def codegen(mod: module.Module, main_ir_name: str, triple: str) -> str:
                                  strings.join(atypes, ""))
             else:
                 e.gen_func(n3)
-        elif n3.kind == ast.ND_CLASS:
+        elif n3.kind == ast.ND_CLASS and n3.targs is None:
             m: ast.Node | None = n3.body
             while m is not None:
                 mm: ast.Node = m
