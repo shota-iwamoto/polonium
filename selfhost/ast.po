@@ -21,18 +21,22 @@ TY_NULL: int = 7     # None リテラルの型（変数の型にはならない�
 TY_RC: int = 8       # rc[T]（共有所有。第28章）
 # ⚠️ 9 は TY_PTR（C 版だけが持つ低レベル型）。値をずらさないよう空けます。
 TY_FLOAT: int = 10   # float → double（第34章）
+TY_FN: int = 11      # fn(A, B) -> C → ptr（関数へのポインタ。第38章）
 
 
 class Type:
     kind: int
-    elem: Type | None     # list[T] の要素型 / T | None の中身
+    elem: Type | None     # list[T] の要素型 / T | None の中身 / fn の**戻り型**
     name: str             # クラス名（エラーメッセージ用）
     cls: Class | None     # 定義への参照。★ 型の同一性はこれで判定する
     opt: Type | None      # この型の「T | None」版（1 個だけ作る）
+    # ★ 第38章：関数型の引数の並び（fn 以外では空）
+    params: list[Type]
 
     def init(self, kind: int) -> None:
         self.kind = kind
         self.name = ""
+        self.params = []
 
 
 class Field:
@@ -148,6 +152,16 @@ def type_equal(a: Type, b: Type) -> bool:
         return False
     if a.kind == TY_LIST:
         return type_equal(elem_of(a), elem_of(b))
+    # ★ 第38章：関数型は引数の並びと戻り型が全部同じなら同じ型
+    if a.kind == TY_FN:
+        if len(a.params) != len(b.params):
+            return False
+        fi: int = 0
+        while fi < len(a.params):
+            if not type_equal(a.params[fi], b.params[fi]):
+                return False
+            fi = fi + 1
+        return type_equal(elem_of(a), elem_of(b))
     if a.kind == TY_RC:
         return type_equal(elem_of(a), elem_of(b))
     if a.kind == TY_CLASS:
@@ -188,6 +202,11 @@ def type_name(t: Type) -> str:
         return "str"
     if t.kind == TY_FLOAT:
         return "float"
+    if t.kind == TY_FN:
+        ps: list[str] = []
+        for pt in t.params:
+            ps.append(type_name(pt))
+        return "fn(" + strings.join(ps, ", ") + ") -> " + type_name(elem_of(t))
     if t.kind == TY_LIST:
         return "list[" + type_name(elem_of(t)) + "]"
     if t.kind == TY_CLASS:
@@ -210,7 +229,7 @@ def type_align(t: Type) -> int:
     return type_size(t)
 
 def type_name_list() -> str:
-    return "int, float, bool, str, None, list[T], T | None"
+    return "int, float, bool, str, None, list[T], T | None, fn(...) -> T"
 
 
 # ── ノードの種類（C 版 NodeKind と同じ順序・同じ値）──
@@ -417,7 +436,11 @@ class Node:
     els: Node | None        # ND_IF の else
     incr: Node | None       # ND_WHILE の増分（for の脱糖。第11章）
     params: Node | None     # ND_FUNC の仮引数
-    args: Node | None       # ND_CALL / ND_METHOD の実引数
+    args: Node | None
+    # ★ 第38章：この ND_VAR / ND_FIELD は「関数そのもの」を指す
+    is_func_ref: bool
+    # ★ 第38章：関数ポインタ越しの呼び出し
+    is_indirect: bool
     type_ref: Node | None   # 型注釈の木
 
     # ── 第27章：エラー処理 ──
@@ -443,6 +466,8 @@ class Node:
         self.builtin = ""
         self.is_extern = False
         self.is_global = False
+        self.is_func_ref = False    # 第38章
+        self.is_indirect = False    # 第38章
         self.mode = PM_BORROW
         # ── 第27章 ──
         self.can_fail = False

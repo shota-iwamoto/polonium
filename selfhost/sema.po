@@ -329,6 +329,17 @@ class Sema:
 
     # ★ 第15章：T | None を包む層
     def resolve_type(self, tr: ast.Node) -> ast.Type:
+        # ★ 第38章：関数型 fn(A, B) -> C
+        if tr.name == "fn" and len(tr.mod_name) == 0:
+            ft: ast.Type = ast.Type(ast.TY_FN)
+            a: ast.Node | None = tr.body
+            while a is not None:
+                an: ast.Node = a
+                ft.params.append(self.resolve_type(an))
+                a = an.next
+            ft.elem = self.resolve_type(unwrap_node(tr.rhs))
+            return ft
+
         base: ast.Type = self.resolve_base_type(tr)
         if not tr.nullable:
             return base
@@ -671,8 +682,33 @@ class Sema:
                           ast.op_symbol(n.op) + "' は適用できません")
         return t
 
+    # FuncSig から関数型を作る（第38章）
+    def fn_type_of(self, f: types.FuncSig) -> ast.Type:
+        t: ast.Type = ast.Type(ast.TY_FN)
+        for pt in f.params:
+            t.params.append(pt)
+        t.elem = f.ret
+        return t
+
     def check_var(self, n: mut ast.Node) -> ast.Type:
         v: types.VarEntry | None = self.lookup(n.name)
+
+        # ★ 第38章：変数に無ければ **関数を探す**（関数の名前を値にする）
+        #   ⚠️ 変数が先。同名の局所変数があればそちらが勝つ。
+        if v is None:
+            fs: types.FuncSig | None = self.lookup_func(n.name)
+            if fs is not None:
+                if len(fs.raises_cls) > 0:
+                    diag.error_full(unwrap_tok(n.tok),
+                                    "'" + n.name +
+                                    "' は raises する関数なので値にできません",
+                                    "ここでは値として使えません", None, "",
+                                    "関数型はエラーの受け渡しを表せません" +
+                                    "（raises しない関数で包んでください）")
+                n.ir_name = fs.ir_name
+                n.is_func_ref = True
+                return self.fn_type_of(fs)
+
         if v is None:
             # ★ 第13章：モジュール名そのものは値ではない
             if self.lookup_import(n.name) is not None:
@@ -1321,6 +1357,17 @@ class Sema:
                             ms: types.ModuleSyms) -> ast.Type:
         mod_name: str = mod_name_of(ms)
         v: types.VarEntry | None = self.lookup_global_in(ms, n.name)
+
+        # ★ 第38章：グローバル変数に無ければ **関数を探す**
+        #   （math.sin のように、他モジュールの関数も値として渡せる）
+        if v is None:
+            mf: types.FuncSig | None = self.lookup_func_in(ms, n.name)
+            if mf is not None and len(mf.raises_cls) == 0:
+                n.ir_name = mf.ir_name
+                n.is_func_ref = True
+                n.is_extern = True     # 他モジュールなので declare が要る
+                return self.fn_type_of(mf)
+
         if v is None:
             hint: str = ("モジュールから使えるのは、そのファイルのトップレベルの" +
                          "関数・クラス・グローバル変数です")
@@ -1654,6 +1701,41 @@ class Sema:
 
     # 関数呼び出しの検査（型システム 5.7 の順序）
     def check_call(mut self, n: mut ast.Node) -> ast.Type:
+        # ★ 第38章：名前が **関数型の変数**なら間接呼び出し
+        #   ⚠️ 変数を先に見る（同名の関数があっても変数が勝つ）
+        fv: types.VarEntry | None = self.lookup(n.name)
+        if fv is not None and unwrap_type(fv.type).kind == ast.TY_FN:
+            ftv: ast.Type = unwrap_type(fv.type)
+            na2: int = count_siblings(n.args)
+            if na2 != len(ftv.params):
+                diag.error_full(unwrap_tok(n.tok),
+                                "'" + n.name + "' は " + str(len(ftv.params)) +
+                                " 個の引数を取りますが、" + str(na2) +
+                                " 個渡されました",
+                                "引数の個数が違います", None, "",
+                                "この変数の型は '" + ast.type_name(ftv) + "' です")
+            ai: int = 0
+            arg: ast.Node | None = n.args
+            while arg is not None:
+                an2: ast.Node = arg
+                self.expected = ftv.params[ai]
+                at2: ast.Type = self.check_expr(an2)
+                self.expected = None
+                if not ast.type_assignable(at2, ftv.params[ai]):
+                    diag.error_full(unwrap_tok(an2.tok),
+                                    str(ai + 1) + " 番目の引数の型が合いません",
+                                    "これは '" + ast.type_name(at2) + "' 型です",
+                                    None, "",
+                                    "ここには '" +
+                                    ast.type_name(ftv.params[ai]) +
+                                    "' が必要です")
+                ai = ai + 1
+                arg = an2.next
+            n.ir_name = fv.ir_name
+            n.is_indirect = True
+            n.type = ast.elem_of(ftv)
+            return ast.elem_of(ftv)
+
         # ── 第28章：rc(x) — 共有所有にくるむ ──
         #
         # ★ 型が「引数の型から作られる」ので、組み込み関数の表では表せません

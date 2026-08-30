@@ -40,7 +40,7 @@ hello, polonium
 
 ```bash
 $ poloniumc --version
-poloniumc 0.2.0 (stage0)
+poloniumc 0.3.0 (stage0)
 target: x86_64-apple-macosx26.0.0
 ```
 
@@ -62,7 +62,7 @@ Python のつもりで書くと最初に必ず引っかかる場所です。
 | 7 | `-7 // 2` → `-4` | **`-3`**（0 方向に丸める） | — |
 
 そのほか **無いもの**：継承・例外（後述の `raises` が代わり）・クロージャ・`lambda`・
-ジェネリクス・タプル・集合・内包表記・スライス・変数のシャドーイング。
+ジェネリクス・タプル・集合・内包表記・変数のシャドーイング。
 
 ---
 
@@ -202,6 +202,48 @@ def main() -> int:
 `range` は `range(n)` / `range(a, b)` / `range(a, b, step)` の 3 通りです。
 インデントは**スペースのみ**（タブはエラー）。
 
+### 4.1 f-string・三項演算子・`in`・スライス・`assert`
+
+Python と同じように書けます。
+
+```python
+def main() -> int:
+    name: str = "polonium"
+    n: int = 42
+    xs: list[int] = [1, 2, 3]
+
+    print(f"{name} は {n} 文字目 {len(name)}")   # f-string（式も書ける）
+    print("正" if n > 0 else "負")               # 三項演算子
+    print(2 in xs)                                # in / not in
+    print(name[0:4])                              # スライス
+    print(len(xs[1:]))
+    assert n > 0, "n は正のはず"                  # assert
+    return 0
+```
+
+| | 備考 |
+|---|---|
+| f-string | `{{` `}}` で波括弧そのもの。**書式指定（`{x:>8}`）はありません** |
+| 三項演算子 | 右結合。選ばれなかった側は**評価されません** |
+| `in` | `list[T]` と `str` に使えます。`dict` は `d.has(k)` |
+| スライス | **新しい値を作ります**。範囲外でも落ちません（Python と同じ規則で丸めます） |
+| `assert` | 破れたら `panic`。**Python の `-O` のような無効化はありません** |
+
+### 4.2 `list` のメソッド
+
+```python
+xs: list[int] = [1, 2, 3]
+xs.append(4)
+xs.insert(0, 0)      # 位置を指定して差し込む
+print(xs.pop())      # 末尾を取り出す
+print(xs.remove(0))  # 位置で取り除いて、その値を返す
+print(xs.index(2))   # 見つからなければ -1
+xs.reverse()
+ys: list[int] = xs.copy()
+xs.extend(ys)
+xs.clear()
+```
+
 ---
 
 ## 5. 関数
@@ -216,6 +258,37 @@ def show(n: int) -> None:        # 値を返さないなら -> None
 
 **オーバーロードはできません**（`print` だけコンパイラが特別扱いしています）。
 デフォルト引数・キーワード引数・可変長引数もありません。
+
+### 5.1 関数を値として渡す
+
+型は `fn(引数の型, ...) -> 戻り型` です。**関数の名前をそのまま値として書けます。**
+
+```python
+import math
+
+def integrate(f: fn(float) -> float, a: float, b: float, n: int) -> float:
+    h: float = (b - a) / float(n)
+    s: float = 0.0
+    i: int = 0
+    while i < n:
+        s = s + f(a + (float(i) + 0.5) * h)
+        i = i + 1
+    return s * h
+
+def sq(x: float) -> float:
+    return x * x
+
+def main() -> int:
+    print(integrate(sq, 0.0, 1.0, 1000))         # 自分の関数
+    print(integrate(math.sin, 0.0, 3.0, 1000))   # 他モジュールの関数も渡せる
+    g: fn(float) -> float = math.cos             # 変数に入れられる
+    print(g(0.0))
+    return 0
+```
+
+**⚠️ クロージャはまだありません。** 渡せるのは「トップレベルの関数」だけで、
+外側の変数を捕まえることはできません。`raises` する関数も渡せません
+（関数型がエラーの受け渡しを表さないため）。
 
 ---
 

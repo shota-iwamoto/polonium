@@ -159,6 +159,7 @@ static const char *llvm_type(Type *t) {
     switch (t->kind) {
         case TY_INT: return "i64";
         case TY_FLOAT: return "double";  // IEEE 754 倍精度
+        case TY_FN: return "ptr";        // 関数へのポインタ（第38章）
         case TY_BOOL: return "i1";   // レジスタ上は 1 ビット
         case TY_NONE: return "void";  // 値がない（第8章）
         case TY_STR: return "ptr";    // 参照型（第9章）
@@ -181,6 +182,7 @@ static const char *llvm_mem_type(Type *t) {
     switch (t->kind) {
         case TY_INT: return "i64";
         case TY_FLOAT: return "double";
+        case TY_FN: return "ptr";   // 第38章
         case TY_BOOL: return "i8";  // メモリ上は 1 バイト
         case TY_STR: return "ptr";  // ポインタをそのまま置く（第9章）
         case TY_LIST: return "ptr"; // 第10章
@@ -580,6 +582,14 @@ static char *gen_expr(Emitter *e, Node *n) {
             return gen_field(e, n);
 
         case ND_VAR: {
+            // ★ 第38章：関数の名前を値として使う場合。
+            //   箱から読むのではなく、**関数のラベルそのもの**が値です。
+            if (n->is_func_ref) {
+                char *t = xmalloc(strlen(n->ir_name) + 2);
+                snprintf(t, strlen(n->ir_name) + 2, "@%s", n->ir_name);
+                return t;
+            }
+
             // 変数の読み出し（規約 R2）。bool なら i8 → i1 の変換も入る。
             // ★ n->name ではなく sema が割り当てた n->ir_name を使う（第7章）
             char *v = gen_load(e, n->type, n->ir_name);
@@ -1193,6 +1203,20 @@ static void declare_extern_global(Emitter *e, Node *n) {
 }
 
 static char *gen_field(Emitter *e, Node *n) {
+    // ★ 第38章：math.sin のように、他モジュールの関数を値として使う場合。
+    //   ⚠️ 呼ぶわけではないので **declare だけ**出して、ラベルを値にします。
+    if (n->is_func_ref) {
+        StrBuf types;
+        sb_init(&types);
+        Type *ft = n->type;
+        for (int i = 0; i < ft->nparams; i++)
+            sb_printf(&types, "%s%s", i ? ", " : "", llvm_type(ft->params[i]));
+        declare_extern(e, llvm_type(ft->elem), n->ir_name, sb_str(&types));
+        char *t = xmalloc(strlen(n->ir_name) + 2);
+        snprintf(t, strlen(n->ir_name) + 2, "@%s", n->ir_name);
+        return t;
+    }
+
     // ★ 第13章：'.' の左がモジュールなら、これはグローバル変数の読み出し。
     //   ND_FIELD のままだが、sema が ir_name を入れているので変数と同じ扱い。
     if (n->mod_name) {
@@ -1848,6 +1872,29 @@ static char *gen_call(Emitter *e, Node *n) {
 
     if (n->builtin) return gen_builtin_call(e, n);
     if (n->cls) return gen_new(e, n);  // ★ 第12章：インスタンス生成
+
+    // ★ 第38章：関数ポインタ越しの呼び出し。
+    //   ⚠️ LLVM では **呼び先がラベルでもレジスタでも同じ書き方**です
+    //     （call <戻り型> <呼び先>(引数)）。だから箱から読んだ値を
+    //     そのまま置くだけで間接呼び出しになります。declare も要りません。
+    if (n->is_indirect) {
+        // ⚠️ **ptr として読むこと。** ty_int を渡すと i64 で読んでしまい、
+        //    call の呼び先が整数になって LLVM に弾かれます。
+        char *fp = new_tmp(e);
+        sb_printf(&e->fn, "  %s = load ptr, ptr %s\n", fp, n->ir_name);
+        StrBuf a2, t2;
+        sb_init(&a2);
+        sb_init(&t2);
+        gen_args(e, n->args, &a2, &t2, true);
+        if (n->type->kind == TY_NONE) {
+            sb_printf(&e->fn, "  call void %s(%s)\n", fp, sb_str(&a2));
+            return NULL;
+        }
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call %s %s(%s)\n", t, llvm_type(n->type), fp,
+                  sb_str(&a2));
+        return t;
+    }
 
     // ★ 第28章：rc(x) — 数え札を付けてくるむ（sema が ir_name を付けない目印）
     if (!n->ir_name && strcmp(n->name, "rc") == 0) {

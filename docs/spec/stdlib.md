@@ -23,6 +23,7 @@ def main() -> int:
 | [`linalg`](#linalg) | **ベクトルと行列** — 線形代数 |
 | [`stats`](#stats) | **統計** — Python の `statistics` 相当 |
 | [`random`](#random) | **疑似乱数** — Python の `random` 相当 |
+| [`numeric`](#numeric) | **数値解析** — 積分・求根・微分・常微分方程式・最適化 |
 | [`physics`](#physics) | **物理定数と単位換算** |
 
 > **⚠️ 数値計算のモジュールも、すべて Polonium で書かれています。**
@@ -409,6 +410,7 @@ def main() -> int:
 | その他 | |
 |---|---|
 | `sorted(a)` | 昇順の**複製**を返す（元は壊しません）。マージソート |
+| `sorted_by(a, less)` | 比較関数つき。`less(a, b)` が真なら `a` が先。**安定** |
 | `quantile(a, q)` | 分位点（線形補間） |
 | `covariance(x, y)` / `correlation(x, y)` | 2 変数 |
 | `linear_regression(x, y)` | 最小二乗法。`[傾き, 切片]` を返す |
@@ -484,3 +486,49 @@ def main() -> int:
 ```
 
 **単位はすべて SI です。** 混ざると事故になるので、換算は必ず関数を通してください。
+
+---
+
+## numeric
+
+**関数を受け取る数値計算。** 関数型（`fn(...) -> T`）が入って初めて書けるようになった
+ものです。
+
+| 積分 | |
+|---|---|
+| `trapezoid(f, a, b, n)` | 台形則。誤差は h² |
+| `simpson(f, a, b, n)` | シンプソン則。誤差は h⁴。⚠️ `n` は偶数 |
+| `integrate(f, a, b, tol)` | 分割を自動で増やす。⚠️ **収束は保証しません** |
+
+| 求根 | |
+|---|---|
+| `bisect(f, a, b)` | 二分法。遅いが**必ず収束**。⚠️ 両端で符号が違うこと |
+| `newton(f, df, x0, tol)` | ニュートン法。速いが収束しないことがある |
+| `secant(f, a, b, tol)` | 割線法（導関数を渡さない版） |
+
+| 微分 | |
+|---|---|
+| `derivative(f, x)` | 中心差分。**刻み幅は小さすぎると桁落ちします**（自動で選びます） |
+| `derivative2(f, x)` | 2 階微分 |
+
+| その他 | |
+|---|---|
+| `solve_ode(f, t0, y0, t1, n)` | `dy/dt = f(t, y)` を 4 次ルンゲ＝クッタ法で。各段の `y` を返す |
+| `minimize(f, a, b, tol)` | 黄金分割探索。⚠️ 区間内の極小が 1 つだけであること |
+| `map` / `filter` / `reduce` / `all` / `any` | 関数を渡す列の操作 |
+
+```python
+import numeric
+import math
+
+def sq(x: float) -> float:
+    return x * x
+
+def main() -> int:
+    print(numeric.simpson(sq, 0.0, 1.0, 100))          # 0.333333
+    print(numeric.bisect(math.cos, 0.0, 3.0))          # 1.570796（π/2）
+    print(numeric.derivative(math.sin, 1.0))           # 0.540302（cos 1）
+    return 0
+```
+
+⚠️ 渡す関数は **`raises` しないもの**に限ります（関数型はエラーの受け渡しを表しません）。

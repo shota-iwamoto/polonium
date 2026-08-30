@@ -414,6 +414,20 @@ static Type *resolve_base_type(Sema *s, Node *tr);
 // ★ 第15章：T | None を包む層。
 //   nullable にできるのは参照型（str / list / class）だけです。
 static Type *resolve_type(Sema *s, Node *tr) {
+    // ★ 第38章：関数型 fn(A, B) -> C
+    if (tr->name && strcmp(tr->name, "fn") == 0 && !tr->mod_name) {
+        Type *t = xmalloc(sizeof(Type));
+        t->kind = TY_FN;
+        int n = 0;
+        for (Node *a = tr->body; a; a = a->next) n++;
+        t->nparams = n;
+        t->params = n ? xmalloc(sizeof(Type *) * (size_t)n) : NULL;
+        int k = 0;
+        for (Node *a = tr->body; a; a = a->next) t->params[k++] = resolve_type(s, a);
+        t->elem = resolve_type(s, tr->rhs);
+        return t;
+    }
+
     Type *base = resolve_base_type(s, tr);
     if (!tr->nullable) return base;
 
@@ -859,8 +873,41 @@ static Type *check_unary(Sema *s, Node *n) {
     return t;
 }
 
+// FuncSig から関数型を作る（第38章）
+static Type *fn_type_of(FuncSig *f) {
+    Type *t = xmalloc(sizeof(Type));
+    t->kind = TY_FN;
+    t->nparams = f->nparams;
+    t->params = f->params;
+    t->elem = f->ret;
+    return t;
+}
+
 static Type *check_var(Sema *s, Node *n) {
     VarEntry *v = lookup(s, n->name);
+
+    // ★ 第38章：変数に無ければ **関数を探します**。関数の名前を
+    //   そのまま値として書けるようにするためです（f を渡す）。
+    //   ⚠️ 変数が先です。同名の局所変数があればそちらが勝ちます。
+    if (!v) {
+        FuncSig *f = lookup_func(s, n->name);
+        if (f) {
+            if (f->nraises > 0) {
+                Diag d = {0};
+                d.message = diag_fmt("'%s' は raises する関数なので値にできません",
+                                     n->name);
+                d.primary.tok = n->tok;
+                d.primary.label = "ここでは値として使えません";
+                d.hint = "関数型はエラーの受け渡しを表せません"
+                         "（raises しない関数で包んでください）";
+                diag_fail(&d);
+            }
+            n->ir_name = f->ir_name;
+            n->is_func_ref = true;
+            return fn_type_of(f);
+        }
+    }
+
     if (!v) {
         // ★ 第13章：モジュール名そのものは値ではありません。
         if (lookup_import(s, n->name)) {
@@ -1402,6 +1449,19 @@ static ModuleSyms *dot_module(Sema *s, Node *n) {
 // lexer.MAX_KIND — 他のモジュールのグローバル変数
 static Type *check_module_global(Sema *s, Node *n, ModuleSyms *ms) {
     VarEntry *v = lookup_global_in(ms, n->name);
+
+    // ★ 第38章：グローバル変数に無ければ **関数を探します**。
+    //   math.sin のように、他のモジュールの関数も値として渡せます。
+    if (!v) {
+        FuncSig *f = lookup_func_in(ms, n->name);
+        if (f && f->nraises == 0) {
+            n->ir_name = f->ir_name;
+            n->is_func_ref = true;
+            n->is_extern = true;    // 他モジュールなので declare が要る
+            return fn_type_of(f);
+        }
+    }
+
     if (!v) {
         Diag d = {0};
         d.message = diag_fmt("モジュール '%s' に '%s' はありません", ms->mod->name,
@@ -1880,6 +1940,43 @@ static Type *check_lowlevel_call(Sema *s, Node *n, const LowLevel *ll) {
 }
 
 static Type *check_call(Sema *s, Node *n) {
+    // ★ 第38章：名前が **関数型の変数**なら間接呼び出しです。
+    //   ⚠️ 変数を先に見ます。同名の関数があっても変数が勝ちます。
+    VarEntry *fv = lookup(s, n->name);
+    if (fv && fv->type && fv->type->kind == TY_FN) {
+        Type *ft = fv->type;
+        int nargs = 0;
+        for (Node *a = n->args; a; a = a->next) nargs++;
+        if (nargs != ft->nparams) {
+            Diag d = {0};
+            d.message = diag_fmt("'%s' は %d 個の引数を取りますが、%d 個渡されました",
+                                 n->name, ft->nparams, nargs);
+            d.primary.tok = n->tok;
+            d.primary.label = "引数の個数が違います";
+            d.hint = diag_fmt("この変数の型は '%s' です", type_name(ft));
+            diag_fail(&d);
+        }
+        int i = 0;
+        for (Node *a = n->args; a; a = a->next, i++) {
+            s->expected = ft->params[i];
+            Type *at = check_expr(s, a);
+            s->expected = NULL;
+            if (!type_assignable(at, ft->params[i])) {
+                Diag d = {0};
+                d.message = diag_fmt("%d 番目の引数の型が合いません", i + 1);
+                d.primary.tok = a->tok;
+                d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
+                d.hint = diag_fmt("ここには '%s' が必要です",
+                                  type_name(ft->params[i]));
+                diag_fail(&d);
+            }
+        }
+        n->ir_name = fv->ir_name;
+        n->is_indirect = true;
+        n->type = ft->elem;
+        return ft->elem;
+    }
+
     // ── 第30章：低レベルの組み込み ──
     const LowLevel *ll = lowlevel_of(n->name);
     if (ll && !lookup_func(s, n->name)) return check_lowlevel_call(s, n, ll);

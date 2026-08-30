@@ -116,6 +116,8 @@ class Emitter:
             return "i64"
         if t.kind == ast.TY_FLOAT:
             return "double"
+        if t.kind == ast.TY_FN:
+            return "ptr"          # 関数へのポインタ（第38章）
         if t.kind == ast.TY_BOOL:
             return "i1"
         if t.kind == ast.TY_NONE:
@@ -142,6 +144,8 @@ class Emitter:
             return "i64"
         if t.kind == ast.TY_FLOAT:
             return "double"
+        if t.kind == ast.TY_FN:
+            return "ptr"          # 第38章
         if t.kind == ast.TY_BOOL:
             return "i8"
         if t.kind == ast.TY_STR:
@@ -401,6 +405,10 @@ class Emitter:
             return self.gen_field(n)
 
         if n.kind == ast.ND_VAR:
+            # ★ 第38章：関数の名前を値として使う場合。箱から読むのではなく、
+            #   **関数のラベルそのもの**が値です。
+            if n.is_func_ref:
+                return "@" + n.ir_name
             # 変数の読み出し（規約 R2）。sema が割り当てた ir_name を使う
             return self.gen_load(type_of(n), n.ir_name)
 
@@ -997,6 +1005,17 @@ class Emitter:
         self.decled.append(sig)
 
     def gen_field(mut self, n: ast.Node) -> str:
+        # ★ 第38章：math.sin のように他モジュールの関数を値として使う場合。
+        #   ⚠️ 呼ぶわけではないので **declare だけ**出して、ラベルを値にする。
+        if n.is_func_ref:
+            ftt: ast.Type = type_of(n)
+            ps: list[str] = []
+            for pt in ftt.params:
+                ps.append(self.llvm_type(pt))
+            self.declare_extern(self.llvm_type(ast.elem_of(ftt)), n.ir_name,
+                                strings.join(ps, ", "))
+            return "@" + n.ir_name
+
         # ★ 第13章：'.' の左がモジュールなら、グローバル変数の読み出し
         if len(n.mod_name) > 0:
             if n.is_extern:
@@ -1279,6 +1298,27 @@ class Emitter:
             return self.gen_builtin_call(n)
         if n.cls is not None:
             return self.gen_new(n)     # ★ 第12章：インスタンス生成
+
+        # ★ 第38章：関数ポインタ越しの呼び出し。
+        #   ⚠️ LLVM では呼び先がラベルでもレジスタでも書き方が同じなので、
+        #     箱から読んだ値をそのまま置くだけ。declare も要らない。
+        #   ⚠️ **ptr として読むこと**（i64 で読むと呼び先が整数になる）。
+        if n.is_indirect:
+            fp: str = self.new_tmp()
+            self.emit("  " + fp + " = load ptr, ptr " + n.ir_name + "\n")
+            iargs: list[str] = []
+            itypes: list[str] = []
+            self.gen_args(n.args, iargs, itypes, True)
+            # ⚠️ gen_args は **区切りを要素に埋め込む**ので、
+            #    ここは "" で連結すること（", " だと二重になる）
+            ia: str = strings.join(iargs, "")
+            if type_of(n).kind == ast.TY_NONE:
+                self.emit("  call void " + fp + "(" + ia + ")\n")
+                return ""
+            it: str = self.new_tmp()
+            self.emit("  " + it + " = call " + self.llvm_type(type_of(n)) + " " +
+                      fp + "(" + ia + ")\n")
+            return it
 
         # ★ 第28章：rc(x) — 数え札を付けてくるむ（sema が ir_name を付けない目印）
         if len(n.ir_name) == 0 and n.name == "rc":

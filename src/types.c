@@ -101,6 +101,7 @@ int type_size(Type *t) {
     switch (t->kind) {
         case TY_BOOL: return 1;  // メモリ上は i8（規約 R5）
         case TY_INT:
+        case TY_FN:     // 関数へのポインタ
         case TY_FLOAT:  // double も 8 バイト
         case TY_STR:
         case TY_LIST:
@@ -124,6 +125,15 @@ bool type_equal(Type *a, Type *b) {
     //   ここが無いと「同じ型」と判定されてしまいます
     //   （第5章のコメントで予告していた穴）。
     if (a->kind == TY_LIST) return type_equal(a->elem, b->elem);
+
+    // ★ 第38章：関数型は「引数の並びと戻り型が全部同じ」なら同じ型です。
+    //   ⚠️ 引数名は見ません（型だけが同一性を決めます）。
+    if (a->kind == TY_FN) {
+        if (a->nparams != b->nparams) return false;
+        for (int i = 0; i < a->nparams; i++)
+            if (!type_equal(a->params[i], b->params[i])) return false;
+        return type_equal(a->elem, b->elem);
+    }
 
     // ★ 第28章：rc[T] も中身まで見る（rc[Node] と rc[Token] は別の型）
     if (a->kind == TY_RC) return type_equal(a->elem, b->elem);
@@ -176,6 +186,15 @@ const char *type_name(Type *t) {
             sb_printf(&sb, "%s | None", type_name(t->elem));
             return sb_str(&sb);
         }
+        case TY_FN: {  // 第38章
+            StrBuf sb;
+            sb_init(&sb);
+            sb_printf(&sb, "fn(");
+            for (int i = 0; i < t->nparams; i++)
+                sb_printf(&sb, "%s%s", i ? ", " : "", type_name(t->params[i]));
+            sb_printf(&sb, ") -> %s", type_name(t->elem));
+            return sb_str(&sb);
+        }
         case TY_NULL: return "None";
         default: UNREACHABLE();
     }
@@ -202,5 +221,5 @@ Type *type_from_kind(int kind) {
 }
 
 const char *type_name_list(void) {
-    return "int, float, bool, str, None, list[T], T | None";
+    return "int, float, bool, str, None, list[T], T | None, fn(...) -> T";
 }

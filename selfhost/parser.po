@@ -1010,6 +1010,39 @@ class Parser:
 
     # type_ref ::= [ IDENT "." ] IDENT [ "[" type_ref "]" ] [ "|" None ]
     def type_ref(mut self, what: str) -> ast.Node:
+        # ★ 第38章：関数型 fn(A, B) -> C
+        #
+        # ⚠️ 'fn' は **予約語にしていません。** 型の位置でだけ、識別子 "fn" の
+        #    直後に '(' が来たときに関数型として読みます（既存のコードで
+        #    fn という名前が使えなくなるのを避けるため）。
+        ft: token.Token = self.peek()
+        if ft.kind == token.TK_IDENT and ft.text == "fn" and self.peek_at(1).is_punct("("):
+            self.advance()
+            fopen: token.Token = self.advance()
+
+            fnode: ast.Node = ast.new_node(ast.ND_TYPEREF, ft)
+            fnode.name = "fn"
+
+            tail: ast.Node | None = None
+            if not self.peek().is_punct(")"):
+                while True:
+                    a: ast.Node = self.type_ref("引数の型を書いてください")
+                    if tail is not None:
+                        tail.next = a
+                    else:
+                        fnode.body = a
+                    tail = a
+                    if self.consume(",") is None:
+                        break
+            self.expect_close(")", fopen)
+
+            if self.consume("->") is None:
+                self.fail_full(self.peek(), "関数型には戻り型が必要です",
+                               "ここに '->' と戻り型を書いてください",
+                               "書き方は fn(int, str) -> bool です")
+            fnode.rhs = self.type_ref("戻り型を書いてください")
+            return fnode
+
         t: token.Token = self.type_name_token(what)
 
         n: ast.Node = ast.new_node(ast.ND_TYPEREF, t)

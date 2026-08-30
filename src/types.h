@@ -42,6 +42,7 @@ typedef enum {
     // ⚠️ 追加は**末尾に**。selfhost/ast.po が値を明示しているので、
     //    途中に足すと 2 つの実装で番号がずれます。
     TY_FLOAT, // float → double（IEEE 754 倍精度。第34章）
+    TY_FN,    // fn(A, B) -> C → ptr（関数へのポインタ。第38章）
 
 } TypeKind;
 
@@ -53,7 +54,14 @@ typedef struct Type Type;
 struct Type {
     TypeKind kind;
 
-    // list[T] の要素型（第10章）。
+    // ── 第38章：関数型 fn(A, B) -> C ──
+    // ★ 引数の型は個数が可変なので配列で持ちます。戻り型は elem に入れます
+    //   （list[T] の要素型と同じ場所を使い回します）。
+    Type **params;
+    int nparams;
+
+    // list[T] の要素型（第10章）。fn では **戻り型**です。
+
     // ★ ここが埋まる型はシングルトンにできません（T ごとに違うため）。
     Type *elem;
 

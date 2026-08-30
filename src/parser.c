@@ -1326,6 +1326,44 @@ static Token *type_name_token(Parser *p, const char *what) {
 //   文字列 1 個では表せません。再帰下降なら再帰 1 行で読めます。
 // ★ 第13章：モジュール修飾（lexer.Token）が書けるようになりました。
 static Node *type_ref(Parser *p, const char *what) {
+    // ★ 第38章：関数型 fn(A, B) -> C
+    //
+    // ⚠️ 'fn' は **予約語にしていません。** 型の位置でだけ、識別子 "fn" の
+    //    直後に '(' が来たときに関数型として読みます。予約語にすると
+    //    既存のコードで fn という名前が使えなくなるためです
+    //    （型を読む関数と式を読む関数が別なので、ここで迷いません）。
+    Token *ft = peek(p);
+    if (ft->kind == TK_IDENT && strcmp(ft->text, "fn") == 0 &&
+        tok_is(peek_at(p, 1), "(")) {
+        advance(p);                     // fn
+        Token *open = advance(p);       // (
+
+        Node *n = new_node(ND_TYPEREF, ft);
+        n->name = "fn";
+
+        Node *tail = NULL;
+        if (!tok_is(peek(p), ")")) {
+            for (;;) {
+                Node *a = type_ref(p, "引数の型を書いてください");
+                if (tail) tail->next = a; else n->body = a;
+                tail = a;
+                if (!consume(p, ",")) break;
+            }
+        }
+        expect_close(p, ")", open);
+
+        if (!consume(p, "->")) {
+            Diag d = {0};
+            d.message = "関数型には戻り型が必要です";
+            d.primary.tok = peek(p);
+            d.primary.label = "ここに '->' と戻り型を書いてください";
+            d.hint = "書き方は fn(int, str) -> bool です";
+            diag_fail(&d);
+        }
+        n->rhs = type_ref(p, "戻り型を書いてください");
+        return n;
+    }
+
     Token *t = type_name_token(p, what);
 
     Node *n = new_node(ND_TYPEREF, t);
