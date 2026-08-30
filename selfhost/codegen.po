@@ -1881,7 +1881,8 @@ def codegen(mod: module.Module, main_ir_name: str, triple: str) -> str:
                     pm = p.next
                 e.declare_extern(e.llvm_type(type_of(n3)), n3.name,
                                  strings.join(atypes, ""))
-            else:
+            elif n3.targs is None:
+                # ⚠️ ジェネリックなテンプレートは出さない（第43章）
                 e.gen_func(n3)
         elif n3.kind == ast.ND_CLASS and n3.targs is None:
             m: ast.Node | None = n3.body

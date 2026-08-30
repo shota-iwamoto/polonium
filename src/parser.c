@@ -1652,6 +1652,27 @@ static Node *func_def_x(Parser *p, bool in_class, bool in_iface) {
     Node *n = new_node(ND_FUNC, kw);
     n->name = name_tok->text;
 
+    // ★ 第43章：型引数 def first[T](xs: list[T]) -> T | None:
+    //   ⚠️ クラスと同じ形です（名前だけを並べる。制約は書けません）。
+    Token *topen = peek(p);
+    if (tok_is(topen, "[")) {
+        advance(p);
+        Node *tail = NULL;
+        for (;;) {
+            Token *tp = peek(p);
+            if (tp->kind != TK_IDENT)
+                error_at_hint(tp, "型引数は名前で書きます（例: def f[T](x: T) -> T:）",
+                              "型引数の名前が必要です");
+            advance(p);
+            Node *slot = new_node(ND_TYPEREF, tp);
+            slot->name = tp->text;
+            if (tail) tail->next = slot; else n->targs = slot;
+            tail = slot;
+            if (!consume(p, ",")) break;
+        }
+        expect_close(p, "]", topen);
+    }
+
     Token *open = peek(p);
     if (!consume(p, "("))
         error_at_hint(open, "関数名の後には引数リストが必要です（例: f() や f(n: int)）",

@@ -29,6 +29,9 @@ class FuncSig:
     owner: ModuleSyms | None
     next: FuncSig | None
 
+    # ★ 第43章：ジェネリック関数のテンプレート（実体なら None）
+    tmpl: ast.Node | None
+
     # ── 第27章：raises 節（宣言されたエラーのクラス）──
     raises_cls: list[ast.Class]
 

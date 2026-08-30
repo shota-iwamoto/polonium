@@ -1296,6 +1296,30 @@ class Parser:
         n: ast.Node = ast.new_node(ast.ND_FUNC, kw)
         n.name = name_tok.text
 
+        # ★ 第43章：型引数 def first[T](xs: list[T]) -> T:
+        #   ⚠️ クラスと同じ形（名前だけを並べる。制約は書けない）
+        ftopen: token.Token = self.peek()
+        if ftopen.is_punct("["):
+            self.advance()
+            fttail: ast.Node | None = None
+            while True:
+                ftp: token.Token = self.peek()
+                if ftp.kind != token.TK_IDENT:
+                    self.fail_hint(ftp,
+                                   "型引数は名前で書きます（例: def f[T](x: T) -> T:）",
+                                   "型引数の名前が必要です")
+                self.advance()
+                fslot: ast.Node = ast.new_node(ast.ND_TYPEREF, ftp)
+                fslot.name = ftp.text
+                if fttail is not None:
+                    fttail.next = fslot
+                else:
+                    n.targs = fslot
+                fttail = fslot
+                if self.consume(",") is None:
+                    break
+            self.expect_close("]", ftopen)
+
         open_tok: token.Token = self.peek()
         if self.consume("(") is None:
             self.fail_hint(open_tok,

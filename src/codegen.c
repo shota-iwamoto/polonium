@@ -2534,7 +2534,8 @@ char *codegen(Module *mod, const char *main_ir_name, bool drop,
             declare_extern(&e, llvm_type(d->type), d->name, sb_str(&types));
             continue;
         }
-        if (d->kind == ND_FUNC) gen_func(&e, d);
+        // ⚠️ ジェネリックなテンプレートは出しません（第43章）
+        if (d->kind == ND_FUNC && !d->targs) gen_func(&e, d);
         // メソッドも、ふつうの関数とまったく同じ関数で出します。
         // 違うのは名前（@lexer.Token.show）と、第 1 引数が self であることだけ。
         if (d->kind == ND_CLASS && !d->targs)

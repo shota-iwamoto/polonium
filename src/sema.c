@@ -71,6 +71,10 @@ struct FuncSig {
     int nparams;
     Token *tok;     // 定義位置（「この関数はここで定義されています」用）
     ModuleSyms *owner;  // どのモジュールのものか（第13章）
+
+    // ★ 第43章：ジェネリック関数のテンプレート（実体化前）
+    Node *tmpl;         // ND_FUNC（targs を持つ）。実体なら NULL
+
     FuncSig *next;
 };
 
@@ -165,6 +169,7 @@ struct Instance {
     TBind *binds;        // そのときの型引数の束縛
     Token *site;         // ★ 第42章：どこで要求されたか（エラーに添える）
     const char *iname;   // その実体の名前（Dict$Node$int）
+    bool is_func;        // ★ 第43章：関数の実体か（クラスでなく）
     Instance *next;
 };
 
@@ -617,6 +622,34 @@ static Type *instantiate_class(Sema *s, Class *tmpl, Type **args, int nargs,
     s->tbind = saved_tbind;
     return ty;
 }
+
+// ── 第43章：ジェネリック関数 ────────────────────────────────
+//
+// ★ クラスと違い、**呼び出し側の実引数から型引数を決めます**。
+//   左辺の型からは決められないためです（f(xs) の左辺は戻り値の型しかない）。
+//
+//   def first[T](xs: list[T]) -> T:
+//       first([1, 2])        → T = int
+//
+// ⚠️ 「引数の型に型引数がそのまま現れる」場合だけ推論します
+//   （list[T] の T、T そのもの）。fn(T) -> U のような入れ子は見ません。
+//   決められなければ、その旨をエラーにします（黙って通しません）。
+static bool unify_tparam(const char *name, Node *decl_tr, Type *actual,
+                         Type **out) {
+    if (!decl_tr) return false;
+
+    // T そのもの
+    if (decl_tr->name && !decl_tr->lhs && strcmp(decl_tr->name, name) == 0) {
+        *out = actual;
+        return true;
+    }
+    // list[T] / rc[T] / ptr[T] → 中身を見る
+    if (decl_tr->lhs && actual->elem)
+        return unify_tparam(name, decl_tr->lhs, actual->elem, out);
+    return false;
+}
+
+static FuncSig *instantiate_func(Sema *s, FuncSig *tmpl, Node *call);
 
 // 型参照に書かれた型引数を並べる
 static int collect_targs(Sema *s, Node *tr, Type **out, int max) {
@@ -2393,6 +2426,10 @@ static Type *check_call(Sema *s, Node *n) {
 
     // ① 定義されているか
     FuncSig *f = lookup_func(s, n->name);
+
+    // ★ 第43章：ジェネリック関数なら、実引数から型引数を決めて実体を作る
+    if (f && f->tmpl) f = instantiate_func(s, f, n);
+
     if (!f) {
         Diag d = {0};
         d.message = diag_fmt("未定義の関数 '%s' です", n->name);
@@ -3302,6 +3339,21 @@ static void declare_func(Sema *s, Node *n) {
         diag_fail(&d);
     }
 
+    // ★ 第43章：ジェネリックなテンプレートは **型を解決しません**。
+    //   T が何なのかまだ決まっていないためです。名前だけ登録して、
+    //   呼ばれたときに実引数から決めて実体を作ります。
+    if (n->targs) {
+        FuncSig *t = xmalloc(sizeof(FuncSig));
+        t->name = n->name;
+        t->ir_name = n->name;
+        t->tok = n->tok;
+        t->owner = s->cur;
+        t->tmpl = n;
+        t->next = s->funcs;
+        s->funcs = t;
+        return;
+    }
+
     Type *ret = resolve_type(s, n->type_ref);
 
     int nparams = 0;
@@ -3347,6 +3399,112 @@ static void declare_func(Sema *s, Node *n) {
     s->funcs = f;
     n->ir_name = f->ir_name;
     n->type = ret;
+}
+
+// ── 第43章：ジェネリック関数の実体化 ──────────────────────
+//
+// ★ **実引数の型から型引数を決めます。** クラスと違い、左辺の型からは
+//   決められないためです（f(xs) の左辺には戻り値の型しかない）。
+static FuncSig *instantiate_func(Sema *s, FuncSig *tmpl, Node *call) {
+    Node *tn = tmpl->tmpl;
+
+    int nt = 0;
+    for (Node *tp = tn->targs; tp; tp = tp->next) nt++;
+
+    int nargs = 0;
+    for (Node *a = call->args; a; a = a->next) nargs++;
+    int want = 0;
+    for (Node *pm = tn->params; pm; pm = pm->next) want++;
+    if (nargs != want)
+        error_at_hint(call->tok,
+                      diag_fmt("'%s' は %d 個の引数を取ります", tmpl->name, want),
+                      "引数の個数が違います（%d 個渡されました）", nargs);
+
+    // ── 実引数の型を先に求める ──
+    Type *atypes[MAX_TARGS * 4];
+    if (nargs > (int)(sizeof(atypes) / sizeof(atypes[0])))
+        error_at(call->tok, "引数が多すぎます");
+    int k = 0;
+    for (Node *a = call->args; a; a = a->next, k++) atypes[k] = check_expr(s, a);
+
+    // ── 型引数を決める ──
+    Type *args[MAX_TARGS];
+    int ti = 0;
+    for (Node *tp = tn->targs; tp; tp = tp->next, ti++) {
+        Type *got = NULL;
+        int pi = 0;
+        for (Node *pm = tn->params; pm && !got; pm = pm->next, pi++)
+            unify_tparam(tp->name, pm->type_ref, atypes[pi], &got);
+        if (!got) {
+            Diag d = {0};
+            d.message = diag_fmt("型引数 '%s' を決められません", tp->name);
+            d.primary.tok = call->tok;
+            d.primary.label = "実引数から決まりません";
+            d.related.tok = tn->tok;
+            d.related.label = "この関数の定義です";
+            d.hint = "型引数は **引数の型から**決まります"
+                     "（戻り型にしか現れない型引数は書けません）";
+            diag_fail(&d);
+        }
+        args[ti] = got;
+    }
+
+    char *iname = mangle_inst(tmpl->name, args, nt);
+
+    // 既に作ってあれば、それを返す
+    for (FuncSig *f = tmpl->owner->funcs; f; f = f->next)
+        if (!f->tmpl && strcmp(f->name, iname) == 0) return f;
+
+    ModuleSyms *saved_mod = s->cur;
+    Scope *saved_scope = s->scope;
+    TBind *saved_tbind = s->tbind;
+    FuncSig *saved_cur_func = s->cur_func;
+    UsedName *saved_used = s->used;
+
+    enter_module(s, tmpl->owner);
+
+    TBind *binds = NULL;
+    ti = 0;
+    for (Node *tp = tn->targs; tp; tp = tp->next, ti++) {
+        TBind *b = xmalloc(sizeof(TBind));
+        b->name = tp->name;
+        b->type = args[ti];
+        b->next = binds;
+        binds = b;
+    }
+    s->tbind = binds;
+
+    Node *inst = ast_clone(tn);
+    inst->name = iname;
+    inst->targs = NULL;
+    inst->next = NULL;
+
+    declare_func(s, inst);
+
+    // codegen が拾えるように、そのモジュールの AST に足す
+    Node *ast = tmpl->owner->mod->ast;
+    Node *last = ast->body;
+    while (last->next) last = last->next;
+    last->next = inst;
+
+    Instance *q = xmalloc(sizeof(Instance));
+    q->node = inst;
+    q->owner = tmpl->owner;
+    q->binds = binds;
+    q->site = call->tok;
+    q->iname = iname;
+    q->is_func = true;          // ★ クラスではなく関数の実体
+    q->next = s->pending;
+    s->pending = q;
+
+    FuncSig *made = lookup_func(s, iname);
+
+    enter_module(s, saved_mod);
+    s->scope = saved_scope;
+    s->cur_func = saved_cur_func;
+    s->used = saved_used;
+    s->tbind = saved_tbind;
+    return made;
 }
 
 // グローバル変数の登録（言語仕様 6.2）
@@ -3512,7 +3670,8 @@ static void declare_module(Sema *s, Node *ast) {
 static void check_module(Sema *s, Node *ast) {
     for (Node *d = ast->body; d; d = d->next) {
         // ⚠️ extern は本体を持たないので検査するものがありません（第14章）
-        if (d->kind == ND_FUNC) { if (d->body) check_func(s, d); }
+        // ⚠️ ジェネリックなテンプレートの本体は検査しません（第43章）
+        if (d->kind == ND_FUNC) { if (d->body && !d->targs) check_func(s, d); }
         // メソッドの本体も、ふつうの関数とまったく同じ手順で検査します。
         // self はもう「型が入った引数」なので、特別扱いは 1 つも要りません。
         // ⚠️ ジェネリックなテンプレートの本体は検査しません（第40章）。
@@ -3576,8 +3735,12 @@ void sema_program(Module *mods, Module *entry) {
             s.tbind = it->binds;          // 型引数を戻してから本体を読む
             s.inst_site = it->site;       // ★ 第42章：発端を控える
             s.inst_name = it->iname;
-            for (Node *m = it->node->body; m; m = m->next)
-                if (m->kind == ND_FUNC) check_func(&s, m);
+            if (it->is_func) {
+                check_func(&s, it->node);      // 第43章：関数の実体
+            } else {
+                for (Node *m = it->node->body; m; m = m->next)
+                    if (m->kind == ND_FUNC) check_func(&s, m);
+            }
             s.tbind = NULL;
             s.inst_site = NULL;
         }

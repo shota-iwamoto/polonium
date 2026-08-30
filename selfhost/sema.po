@@ -59,14 +59,18 @@ class Instance:
     # ★ 第42章：どこで要求されたか（エラーに添える）
     site: token.Token | None
     iname: str
+    # ★ 第43章：関数の実体か（クラスでなく）
+    is_func: bool
 
     def init(self, node: ast.Node, owner: types.ModuleSyms,
-             binds: own TBinds, site: token.Token, iname: own str) -> None:
+             binds: own TBinds, site: token.Token, iname: own str,
+             is_func: bool) -> None:
         self.node = node
         self.owner = owner
         self.binds = binds
         self.site = site
         self.iname = iname
+        self.is_func = is_func
 
 
 class Sema:
@@ -434,6 +438,27 @@ class Sema:
     # ★ 方針は design/future-features.md §1 のとおり **単相化**。
     #   Dict[str, int] と Dict[str, Symbol] は **別々のクラス**を作る。
 
+    # ── 第43章：ジェネリック関数 ──────────────────────────
+    #
+    # ★ クラスと違い、**呼び出し側の実引数から型引数を決める**。
+    #   左辺の型からは決められないため（f(xs) の左辺は戻り値の型しかない）。
+    #
+    # ⚠️ 「引数の型に型引数がそのまま現れる」場合だけ推論する
+    #   （list[T] の T、T そのもの）。決められなければエラーにする。
+    def unify_tparam(self, name: str, decl_tr: ast.Node | None,
+                     actual: ast.Type) -> ast.Type | None:
+        if decl_tr is None:
+            return None
+        tr: ast.Node = decl_tr
+
+        # T そのもの
+        if tr.name == name and tr.lhs is None:
+            return actual
+        # list[T] / rc[T] → 中身を見る
+        if tr.lhs is not None and actual.elem is not None:
+            return self.unify_tparam(name, tr.lhs, ast.elem_of(actual))
+        return None
+
     # 型参照に書かれた型引数を並べる
     def collect_targs(self, tr: ast.Node) -> list[ast.Type]:
         out: list[ast.Type] = []
@@ -541,7 +566,7 @@ class Sema:
             nx = last.next
         last.next = inst
 
-        self.pending.append(Instance(inst, owner, binds, at, copy(iname)))
+        self.pending.append(Instance(inst, owner, binds, at, copy(iname), False))
 
         self.enter_module(saved_mod)
         self.scope = saved_scope
@@ -2144,6 +2169,11 @@ class Sema:
 
         # ① 定義されているか
         f: types.FuncSig | None = self.lookup_func(n.name)
+
+        # ★ 第43章：ジェネリック関数なら、実引数から型引数を決めて実体を作る
+        if f is not None and f.tmpl is not None:
+            f = self.instantiate_func(f, n)
+
         if f is None:
             diag.error_full(unwrap_tok(n.tok),
                             "未定義の関数 '" + n.name + "' です",
@@ -2721,7 +2751,120 @@ class Sema:
                         "この型は C との境界を越えられません", None, "",
                         "int で受け取り、Polonium 側で 'n == 1' と書いてください")
 
-    def declare_func(self, n: mut ast.Node) -> None:
+    # ── 第43章：ジェネリック関数の実体化 ──────────────────
+    #
+    # ★ **実引数の型から型引数を決める。** クラスと違い、左辺の型からは
+    #   決められない（f(xs) の左辺には戻り値の型しかない）。
+    def instantiate_func(mut self, tmpl: types.FuncSig,
+                         call: mut ast.Node) -> types.FuncSig:
+        tn: ast.Node = unwrap_node(tmpl.tmpl)
+
+        nargs: int = count_siblings(call.args)
+        want: int = count_siblings(tn.params)
+        if nargs != want:
+            diag.error_at_hint(unwrap_tok(call.tok),
+                               "'" + tmpl.name + "' は " + str(want) +
+                               " 個の引数を取ります",
+                               "引数の個数が違います（" + str(nargs) +
+                               " 個渡されました）")
+
+        # ── 実引数の型を先に求める ──
+        atypes: list[ast.Type] = []
+        a: ast.Node | None = call.args
+        while a is not None:
+            an: ast.Node = a
+            atypes.append(self.check_expr(an))
+            a = an.next
+
+        # ── 型引数を決める ──
+        args: list[ast.Type] = []
+        tp: ast.Node | None = tn.targs
+        while tp is not None:
+            tpn: ast.Node = tp
+            got: ast.Type | None = None
+            pi: int = 0
+            pm: ast.Node | None = tn.params
+            while pm is not None and got is None:
+                pmn: ast.Node = pm
+                got = self.unify_tparam(tpn.name, pmn.type_ref, atypes[pi])
+                pi = pi + 1
+                pm = pmn.next
+            if got is None:
+                diag.error_full(unwrap_tok(call.tok),
+                                "型引数 '" + tpn.name + "' を決められません",
+                                "実引数から決まりません", tn.tok,
+                                "この関数の定義です",
+                                "型引数は **引数の型から**決まります" +
+                                "（戻り型にしか現れない型引数は書けません）")
+            else:
+                args.append(got)
+            tp = tpn.next
+
+        iname: str = self.mangle_inst(tmpl.name, args)
+
+        ow0: types.ModuleSyms | None = tmpl.owner
+        owner: types.ModuleSyms = self.cur_syms()
+        if ow0 is not None:
+            owner = ow0
+        ex: types.FuncSig | None = self.lookup_func_in(owner, iname)
+        if ex is not None:
+            return ex
+
+        saved_mod: types.ModuleSyms = self.cur_syms()
+        saved_scope: types.Scope | None = self.scope
+        saved_tbind: TBinds | None = self.tbind
+        saved_func: types.FuncSig | None = self.cur_func
+        saved_used: list[str] = self.used
+
+        self.enter_module(owner)
+
+        binds: TBinds = TBinds()
+        ti: int = 0
+        tp2: ast.Node | None = tn.targs
+        while tp2 is not None:
+            tpn2: ast.Node = tp2
+            binds.names.append(copy(tpn2.name))
+            binds.types_.append(args[ti])
+            ti = ti + 1
+            tp2 = tpn2.next
+        self.tbind = binds
+
+        inst: ast.Node = unwrap_node(ast.ast_clone(tn))
+        inst.name = copy(iname)
+        inst.targs = None
+        inst.next = None
+
+        self.declare_func(inst)
+
+        omod: module.Module | None = owner.mod
+        root: ast.Node = ast.new_node(ast.ND_BLOCK, None)
+        if omod is None:
+            panic("sema: モジュールがありません")
+        else:
+            root = unwrap_node(omod.ast)
+        last: ast.Node = unwrap_node(root.body)
+        nx: ast.Node | None = last.next
+        while nx is not None:
+            last = nx
+            nx = last.next
+        last.next = inst
+
+        self.pending.append(Instance(inst, owner, binds, unwrap_tok(call.tok),
+                                     copy(iname), True))
+
+        made: types.FuncSig | None = self.lookup_func(iname)
+
+        self.enter_module(saved_mod)
+        self.scope = saved_scope
+        self.cur_func = saved_func
+        self.used = saved_used
+        self.tbind = saved_tbind
+        if made is None:
+            panic("sema: 実体化した関数が見つかりません")
+            return tmpl
+        return made
+
+    def declare_func(mut self, n: mut ast.Node) -> None:
         self.reject_module_name(n.name, n.tok, "関数")
         clash: ast.Class | None = self.lookup_class(n.name)
         if clash is not None:
@@ -2743,6 +2886,19 @@ class Sema:
                             "関数 '" + n.name + "' は既に定義されています",
                             "ここで再定義されています",
                             prev.tok, "最初の定義はここです", "")
+
+        # ★ 第43章：ジェネリックなテンプレートは **型を解決しない**。
+        #   T が何なのかまだ決まっていない。名前だけ登録して、呼ばれたときに
+        #   実引数から決めて実体を作る。
+        if n.targs is not None:
+            t0: types.FuncSig = types.FuncSig(n.name, n.tok)
+            t0.ir_name = copy(n.name)
+            t0.owner = self.cur_syms()
+            t0.tmpl = n
+            cs0: types.ModuleSyms = self.cur_syms()
+            t0.next = cs0.funcs
+            cs0.funcs = t0
+            return
 
         ret: ast.Type = self.resolve_type(unwrap_node(n.type_ref))
 
@@ -2937,8 +3093,9 @@ class Sema:
         while d is not None:
             n: ast.Node = d
             if n.kind == ast.ND_FUNC:
-                # ⚠️ extern は本体を持たないので検査するものがない（第14章）
-                if n.body is not None:
+                # ⚠️ extern は本体を持たない（第14章）。
+                #   ジェネリックなテンプレートも検査しない（第43章）。
+                if n.body is not None and n.targs is None:
                     self.check_func(n)
             # ⚠️ ジェネリックなテンプレートの本体は検査しない（第40章）。
             #   実体ができてから、その実体の本体を検査する。
@@ -3035,12 +3192,15 @@ def sema_program(mods: module.Module | None, entry: module.Module | None) -> Non
             s.inst_site = it.site       # ★ 第42章：発端を控える
             s.inst_name = copy(it.iname)
             inode: ast.Node = unwrap_node(it.node)
-            mm3: ast.Node | None = inode.body
-            while mm3 is not None:
-                m3: ast.Node = mm3
-                if m3.kind == ast.ND_FUNC:
-                    s.check_func(m3)
-                mm3 = m3.next
+            if it.is_func:
+                s.check_func(inode)          # 第43章：関数の実体
+            else:
+                mm3: ast.Node | None = inode.body
+                while mm3 is not None:
+                    m3: ast.Node = mm3
+                    if m3.kind == ast.ND_FUNC:
+                        s.check_func(m3)
+                    mm3 = m3.next
             s.tbind = None
             s.inst_site = None
             k = k + 1
