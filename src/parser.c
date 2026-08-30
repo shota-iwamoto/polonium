@@ -1058,6 +1058,70 @@ static Node *hidden_decl(Token *tok, char *name, Node *init) {
 //
 // ⚠️ 脱糖で作るノードにはソース上の位置がないので、
 //    for のトークンを流用します（全ノードが tok を持つ約束。第1章）。
+// list をまわる for の脱糖（第11章。第39章で enumerate と共用にしました）
+//
+//   for x in xs:            → idx_tok == NULL
+//   for i, x in enumerate(xs):  → idx_tok が添字の変数
+//
+// ★ 違いは「隠しの添字変数を、利用者の名前でも束縛するか」だけです。
+//   enumerate のために新しい仕組みを足していません。
+static Node *for_over_list(Parser *p, Token *t, Node *iter, Token *var_tok,
+                           Token *idx_tok, Node *body) {
+    Node head = {0};
+    Node *cur = &head;
+
+    char *ix = hidden_name(p, "for.ix");
+
+    // for.it.N = <対象>（★ 1 回だけ評価する）
+    char *it = hidden_name(p, "for.it");
+    cur->next = hidden_decl(t, it, iter);
+    cur = cur->next;
+
+    // for.ix.N: int = 0
+    cur->next = hidden_decl(t, ix, new_int_node(t, 0));
+    cur = cur->next;
+
+    // for.ix.N < len(for.it.N)
+    Node *lencall = new_node(ND_CALL, t);
+    lencall->name = "len";
+    lencall->args = new_var_node(t, it);
+    Node *cond = new_binop_node(t, OP_LT, new_var_node(t, ix), lencall);
+
+    // x = for.it.N[for.ix.N]
+    Node *idx = new_node(ND_INDEX, t);
+    idx->lhs = new_var_node(t, it);
+    idx->rhs = new_var_node(t, ix);
+    Node *bind = hidden_decl(t, var_tok->text, idx);
+
+    // ★ enumerate なら、添字も利用者の名前で束縛します（i = for.ix.N）
+    if (idx_tok) {
+        Node *ibind = hidden_decl(t, idx_tok->text, new_var_node(t, ix));
+        ibind->next = bind;
+        bind = ibind;
+    }
+
+    // 本体の先頭にループ変数の束縛を差し込む
+    Node *last = bind;
+    while (last->next) last = last->next;
+    last->next = body->body;
+    body->body = bind;
+
+    Node *inc = new_node(ND_ASSIGN, t);
+    inc->lhs = new_var_node(t, ix);
+    inc->rhs = new_binop_node(t, OP_ADD, new_var_node(t, ix), new_int_node(t, 1));
+
+    Node *wh = new_node(ND_WHILE, t);
+    wh->lhs = cond;
+    wh->body = body;
+    wh->incr = inc;
+
+    cur->next = wh;
+
+    Node *blk = new_node(ND_BLOCK, t);
+    blk->body = head.next;
+    return blk;
+}
+
 static Node *for_stmt(Parser *p) {
     Token *t = advance(p);  // "for"
 
@@ -1067,16 +1131,66 @@ static Node *for_stmt(Parser *p) {
                       "ループ変数の名前が必要です");
     advance(p);
 
+    // ★ 第39章：for i, x in enumerate(xs)
+    //
+    // ⚠️ タプルはありません。**この形だけ**を特別に認めます
+    //   （2 つ目の変数は「添字」に固定。一般の分解代入ではありません）。
+    Token *idx_tok = NULL;
+    if (tok_is(peek(p), ",")) {
+        advance(p);
+        idx_tok = var_tok;          // 1 つ目が添字
+        var_tok = peek(p);          // 2 つ目が要素
+        if (var_tok->kind != TK_IDENT)
+            error_at_hint(var_tok,
+                          "書き方は 'for i, x in enumerate(xs):' です",
+                          "2 つ目のループ変数の名前が必要です");
+        advance(p);
+    }
+
     if (!consume_kw(p, "in"))
         error_at_hint(peek(p), "for は「for 変数 in 対象:」の形で書きます",
                       "'in' が必要です");
+
+    Node *iter = NULL;
 
     // range(...) は特別扱い（言語仕様 5.5：イテレータプロトコルは作らない）
     bool is_range = peek(p)->kind == TK_IDENT &&
                     strcmp(peek(p)->text, "range") == 0 &&
                     tok_is(peek_at(p, 1), "(");
 
-    Node *iter = NULL, *start = NULL, *stop = NULL;
+    // ★ 第39章：enumerate(xs) も同じく特別扱いです。
+    //   ⚠️ **中身を剥がすだけ**：enumerate(xs) → xs として読み、
+    //     隠しの添字変数を 2 つ目のループ変数に束縛します。
+    if (peek(p)->kind == TK_IDENT && strcmp(peek(p)->text, "enumerate") == 0 &&
+        tok_is(peek_at(p, 1), "(")) {
+        if (!idx_tok) {
+            Diag d = {0};
+            d.message = "enumerate には 2 つのループ変数が必要です";
+            d.primary.tok = peek(p);
+            d.primary.label = "添字と要素の 2 つを受け取ります";
+            d.hint = "書き方は 'for i, x in enumerate(xs):' です";
+            diag_fail(&d);
+        }
+        advance(p);                     // enumerate
+        Token *eopen = advance(p);      // (
+        iter = expr(p);
+        expect_close(p, ")", eopen);
+
+        expect_colon(p, "for の対象");
+        Node *ebody = block(p);
+        return for_over_list(p, t, iter, var_tok, idx_tok, ebody);
+    }
+
+    if (idx_tok) {
+        Diag d = {0};
+        d.message = "ループ変数を 2 つ書けるのは enumerate だけです";
+        d.primary.tok = peek(p);
+        d.primary.label = "ここには enumerate(...) が必要です";
+        d.hint = "タプルはありません。'for i, x in enumerate(xs):' の形だけです";
+        diag_fail(&d);
+    }
+
+    Node *start = NULL, *stop = NULL;
     long long step = 1;
 
     if (is_range) {

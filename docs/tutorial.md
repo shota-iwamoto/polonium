@@ -191,6 +191,9 @@ def main() -> int:
     for s in xs:                      # リストを直接まわす
         print(s)
 
+    for i, x in enumerate(xs):        # 添字も一緒に受け取る
+        print(f"{i}: {x}")
+
     i: int = 0
     while True:
         i = i + 1
@@ -203,6 +206,9 @@ def main() -> int:
 
 `range` は `range(n)` / `range(a, b)` / `range(a, b, step)` の 3 通りです。
 インデントは**スペースのみ**（タブはエラー）。
+
+> **⚠️ ループ変数を 2 つ書けるのは `enumerate` のときだけ**です。
+> タプルが無いので、一般の分解代入（`for a, b in pairs:`）はできません。
 
 ### 4.1 f-string・三項演算子・`in`・スライス・`assert`
 

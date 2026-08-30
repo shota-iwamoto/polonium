@@ -823,6 +823,70 @@ class Parser:
     # for_stmt ::= "for" IDENT "in" expr ":" block
     #
     # ★ for は while への脱糖（第11章）。隠し変数の連番まで C 版に揃える。
+    # list をまわる for の脱糖（第11章。第39章で enumerate と共用にした）
+    #
+    #   for x in xs:                → idx_tok は None
+    #   for i, x in enumerate(xs):  → idx_tok が添字の変数
+    #
+    # ★ 違いは「隠しの添字変数を、利用者の名前でも束縛するか」だけ。
+    def for_over_list(mut self, t: token.Token, iter_: ast.Node,
+                      var_tok: token.Token, idx_tok: token.Token | None,
+                      body: ast.Node) -> ast.Node:
+        head: ast.Node = ast.new_node(ast.ND_BLOCK, t)
+        cur: ast.Node = head
+
+        ix: str = self.hidden_name("for.ix")
+
+        it: str = self.hidden_name("for.it")
+        d2: ast.Node = self.hidden_decl(t, it, iter_)
+        cur.next = d2
+        cur = d2
+
+        d3: ast.Node = self.hidden_decl(t, ix, ast.new_int_node(t, 0))
+        cur.next = d3
+        cur = d3
+
+        lencall: ast.Node = ast.new_node(ast.ND_CALL, t)
+        lencall.name = "len"
+        lencall.args = ast.new_var_node(t, it)
+        cond: ast.Node = ast.new_binop_node(t, ast.OP_LT,
+                                            ast.new_var_node(t, ix), lencall)
+
+        idxn: ast.Node = ast.new_node(ast.ND_INDEX, t)
+        idxn.lhs = ast.new_var_node(t, it)
+        idxn.rhs = ast.new_var_node(t, ix)
+        bind: ast.Node = self.hidden_decl(t, var_tok.text, idxn)
+
+        # ★ enumerate なら、添字も利用者の名前で束縛する（i = for.ix.N）
+        if idx_tok is not None:
+            ibind: ast.Node = self.hidden_decl(t, idx_tok.text,
+                                               ast.new_var_node(t, ix))
+            ibind.next = bind
+            bind = ibind
+
+        last: ast.Node = bind
+        nxt: ast.Node | None = last.next
+        while nxt is not None:
+            last = nxt
+            nxt = last.next
+        last.next = body.body
+        body.body = bind
+
+        inc: ast.Node = ast.new_node(ast.ND_ASSIGN, t)
+        inc.lhs = ast.new_var_node(t, ix)
+        inc.rhs = ast.new_binop_node(t, ast.OP_ADD, ast.new_var_node(t, ix),
+                                     ast.new_int_node(t, 1))
+
+        wh: ast.Node = ast.new_node(ast.ND_WHILE, t)
+        wh.lhs = cond
+        wh.body = body
+        wh.incr = inc
+        cur.next = wh
+
+        blk: ast.Node = ast.new_node(ast.ND_BLOCK, t)
+        blk.body = head.next
+        return blk
+
     def for_stmt(mut self) -> ast.Node:
         t: token.Token = self.advance()   # "for"
 
@@ -833,6 +897,21 @@ class Parser:
                            "ループ変数の名前が必要です")
         self.advance()
 
+        # ★ 第39章：for i, x in enumerate(xs)
+        #
+        # ⚠️ タプルはありません。**この形だけ**を特別に認めます
+        #   （2 つ目の変数は「添字」に固定。一般の分解代入ではない）。
+        idx_tok: token.Token | None = None
+        if self.peek().is_punct(","):
+            self.advance()
+            idx_tok = var_tok           # 1 つ目が添字
+            var_tok = self.peek()       # 2 つ目が要素
+            if var_tok.kind != token.TK_IDENT:
+                self.fail_hint(var_tok,
+                               "書き方は 'for i, x in enumerate(xs):' です",
+                               "2 つ目のループ変数の名前が必要です")
+            self.advance()
+
         if self.consume_kw("in") is None:
             self.fail_hint(self.peek(), "for は「for 変数 in 対象:」の形で書きます",
                            "'in' が必要です")
@@ -841,6 +920,28 @@ class Parser:
         is_range: bool = (self.peek().kind == token.TK_IDENT and
                           self.peek().text == "range" and
                           self.peek_at(1).is_punct("("))
+
+        # ★ 第39章：enumerate(xs) も特別扱い。**中身を剥がすだけ**。
+        if (self.peek().kind == token.TK_IDENT and
+                self.peek().text == "enumerate" and self.peek_at(1).is_punct("(")):
+            if idx_tok is None:
+                self.fail_full(self.peek(),
+                               "enumerate には 2 つのループ変数が必要です",
+                               "添字と要素の 2 つを受け取ります",
+                               "書き方は 'for i, x in enumerate(xs):' です")
+            self.advance()
+            eopen: token.Token = self.advance()
+            eiter: ast.Node = self.expr()
+            self.expect_close(")", eopen)
+            self.expect_colon("for の対象")
+            ebody: ast.Node = self.block()
+            return self.for_over_list(t, eiter, var_tok, idx_tok, ebody)
+
+        if idx_tok is not None:
+            self.fail_full(self.peek(),
+                           "ループ変数を 2 つ書けるのは enumerate だけです",
+                           "ここには enumerate(...) が必要です",
+                           "タプルはありません。'for i, x in enumerate(xs):' の形だけです")
 
         iter_: ast.Node | None = None
         start: ast.Node | None = None

@@ -14,7 +14,7 @@ Polonium が**いまどこまで来ていて、次に何を入れるか**です�
 |---|---|
 | 型 | `int` / `float` / `bool` / `str` / `None` / `list[T]` / `class` / `T \| None` / `rc[T]` / `ptr[T]` / **`fn(...) -> T`** |
 | 式 | 算術・比較・論理（短絡）・ビット演算・添字・**スライス**・フィールド・メソッド・呼び出し・**三項演算子**・**`in` / `not in`**・**f-string** |
-| 文 | 宣言・代入・累算代入・`if`/`elif`/`else`・`while`・`for`・`break`/`continue`・`return`・`pass`・**`assert`** |
+| 文 | 宣言・代入・累算代入・`if`/`elif`/`else`・`while`・`for`（`range` / `enumerate`）・`break`/`continue`・`return`・`pass`・**`assert`** |
 | 定義 | 関数・クラス（`init` / メソッド / `drop`）・グローバル変数・`extern`・`import` |
 | 安全性 | 所有権（`own`）・借用・可変性（`mut`）・解放（`drop`）・共有（`rc[T]`） |
 | エラー処理 | `raises` / `try` / `except` / `raise`（アンワインドなし。戻り値検査） |
@@ -69,7 +69,7 @@ Polonium が**いまどこまで来ていて、次に何を入れるか**です�
 
 | 機能 | 内容 |
 |---|---|
-| タプル・複数戻り値 | `def divmod(a, b) -> (int, int)` |
+| タプル・複数戻り値 | `def divmod(a, b) -> (int, int)`。**`for a, b in pairs:` もこれ待ち** |
 | 列挙型（`enum`） | いまはグローバル定数で代用している |
 | モジュールの名前空間 | `from x import y` / パッケージ |
 | 内包表記 | `[f(x) for x in xs]` |
@@ -103,6 +103,6 @@ Polonium が**いまどこまで来ていて、次に何を入れるか**です�
 
 | 版 | 内容 |
 |---|---|
-| **0.3.0**（予定） | **言語機能**（f-string / スライス / `in` / 三項演算子 / `assert` / `list` のメソッド / **関数型**）・`numeric` ライブラリ |
+| **0.3.0**（予定） | **言語機能**（f-string / スライス / 負の添字 / `in` / 三項演算子 / `assert` / `enumerate` / `list` のメソッド / 連結・繰り返し / `abs`・`min`・`max`・`sum` / **関数型**）・`numeric` ライブラリ |
 | 0.2.0 | `float`・標準入力・数値計算ライブラリ（`math` / `linalg` / `stats` / `random` / `physics`）・docs の再編 |
 | 0.1.0 | 最初の公開。セルフホスト・安全性検査・ベアメタル・3 OS 対応 |
