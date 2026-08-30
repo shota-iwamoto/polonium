@@ -266,7 +266,12 @@ static const char *icmp_pred(OpKind op, Type *operand_type) {
 static const char *fcmp_pred(OpKind op) {
     switch (op) {
         case OP_EQ: return "oeq";
-        case OP_NE: return "one";
+        // ⚠️ '!=' だけ **unordered**（une）です。
+        //    a != b は「a == b ではない」と定義されるので、NaN が絡むと
+        //    == が False → != は True でなければなりません。
+        //    ここを one（ordered）にすると nan != nan が False になり、
+        //    NaN の判定（x != x）が使えなくなります。
+        case OP_NE: return "une";
         case OP_LT: return "olt";
         case OP_LE: return "ole";
         case OP_GT: return "ogt";

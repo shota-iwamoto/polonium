@@ -391,6 +391,31 @@ def main() -> int:
     return 0
 ```
 
+### 数値計算
+
+`math` / `linalg` / `stats` / `random` / `physics` があります。
+**どれも Polonium で書かれていて、`libm` を呼びません**（ベアメタルでも動きます）。
+
+```python
+import math
+import linalg
+import physics
+
+def main() -> int:
+    print(math.sqrt(2.0))                          # 1.414214
+    print(math.degrees(math.atan2(1.0, 1.0)))      # 45.0
+
+    m: linalg.Matrix = linalg.from_rows([[1.0, 2.0], [3.0, 4.0]])
+    print(str(linalg.det(m)))                      # -2.0
+    linalg.vprint(linalg.solve(m, [5.0, 11.0]))    # [1.0, 2.0]
+
+    print(physics.escape_velocity(5.972e24, 6.371e6))   # 11185.977892
+    return 0
+```
+
+ベクトルは専用の型ではなく **`list[float]` をそのまま**使います。
+一覧は [spec/stdlib.md](spec/stdlib.md) を見てください。
+
 ---
 
 ## 8. モジュール

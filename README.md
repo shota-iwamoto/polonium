@@ -71,7 +71,7 @@ printf 'def main() -> int:\n    print("hello")\n    return 0\n' > hello.po
 ```
 bin/poloniumc
 lib/polonium/runtime.a
-lib/polonium/lib/*.po        ← 標準ライブラリ（io / strings / dict / sys）
+lib/polonium/lib/*.po        ← 標準ライブラリ（文字列・入出力・数学・線形代数ほか）
 ```
 
 ### B. ソースからビルドする
@@ -162,7 +162,7 @@ def read_config(path: str) -> Config raises IOError:   # 失敗は型で宣言�
 src/        C 版コンパイラ（stage0）
 selfhost/   Polonium 版コンパイラ（stage1 以降）
 runtime/    C 製ランタイム（core = libc 非依存／hosted = PC 用）
-lib/        Polonium 製の標準ライブラリ
+lib/        Polonium 製の標準ライブラリ（数値計算を含む。libm は使わない）
 kernel/     ベアメタル（RISC-V）のカーネル（第32〜33章）
 tests/      テストケースとテストランナー
 docs/       言語仕様・処理系の設計・入門

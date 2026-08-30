@@ -176,8 +176,10 @@ class Emitter:
     def fcmp_pred(self, op: int) -> str:
         if op == ast.OP_EQ:
             return "oeq"
+        # ⚠️ '!=' だけ unordered（une）。a != b は「a == b ではない」なので、
+        #    NaN が絡むと True でなければならない（x != x が NaN の判定）
         if op == ast.OP_NE:
-            return "one"
+            return "une"
         if op == ast.OP_LT:
             return "olt"
         if op == ast.OP_LE:

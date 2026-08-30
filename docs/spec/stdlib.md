@@ -19,6 +19,16 @@ def main() -> int:
 | [`io`](#io) | ファイル・標準出力・標準エラー・標準入力 |
 | [`sys`](#sys) | コマンドライン引数・環境変数・外部コマンド |
 | [`dict`](#dict) | 文字列を鍵とするハッシュ表 |
+| [`math`](#math) | **数学関数** — Python の `math` 相当 |
+| [`linalg`](#linalg) | **ベクトルと行列** — 線形代数 |
+| [`stats`](#stats) | **統計** — Python の `statistics` 相当 |
+| [`random`](#random) | **疑似乱数** — Python の `random` 相当 |
+| [`physics`](#physics) | **物理定数と単位換算** |
+
+> **⚠️ 数値計算のモジュールも、すべて Polonium で書かれています。**
+> `libm` を呼びません。ランタイムが libc に依存しない約束（ベアメタルで動く）
+> を守るためで、`math.sqrt` はニュートン法、`math.exp` は引数を縮小してから
+> テイラー展開、というように中身まで `lib/math.po` にあります。
 
 ---
 
@@ -220,3 +230,257 @@ def count(words: list[str]) -> None:
 
 `copy` を書かないと `E-BORROW-1` の警告が出ます。詳しくは
 [safety-spec.md](safety-spec.md) を参照してください。
+
+---
+
+## math
+
+**Python の `math` に相当します。** すべて `float` を受け取り `float` を返します。
+
+> **⚠️ `libm` は呼びません。** ランタイムは libc に依存しない約束なので
+> （ベアメタルで動かすため）、`lib/math.po` にアルゴリズムごと書いてあります。
+> 精度の目標は**倍精度の有効桁のうち下位 1〜2 桁を除いて合う**ことです。
+> libm のような最終ビットまでの正確さは目指していません
+> （`tests/cases/lib_math_libm.po` が libm の値 580 件と突き合わせています）。
+
+### 定数
+
+`pi()` / `tau()` / `e()` / `ln2()` / `ln10()` / `inf()` / `nan()`
+
+⚠️ **関数です。** グローバル変数の初期化式はリテラルしか書けないためです。
+
+### 判定・符号
+
+| 関数 | 説明 |
+|---|---|
+| `isnan(x)` / `isinf(x)` / `isfinite(x)` | 種別の判定 |
+| `fabs(x)` | 絶対値 |
+| `copysign(x, y)` | `y` の符号を `x` の大きさに付ける |
+| `sign(x)` | `-1.0` / `0.0` / `1.0` |
+| `isclose(a, b, rel, abs_tol)` | ほぼ等しいか（**`==` で比べる代わりに使う**） |
+
+### 丸め
+
+`trunc(x)` / `floor(x)` / `ceil(x)` / `round(x)` / `fmod(x, y)`
+
+⚠️ `round` は **0 から遠いほうへ**丸めます（C の `round` と同じ。
+Python の偶数丸めではありません）。
+
+### 冪根・指数・対数
+
+| 関数 | 備考 |
+|---|---|
+| `sqrt(x)` / `cbrt(x)` | 負の入力で `sqrt` は `NaN`、`cbrt` は符号を保つ |
+| `exp(x)` / `log(x)` / `log2(x)` / `log10(x)` / `log1p(x)` | `log(0)` は `-inf`、`log(負)` は `NaN` |
+| `pow(x, y)` | 指数が整数なら繰り返し二乗法。負の底の非整数乗は `NaN` |
+| `hypot(x, y)` | `√(x²+y²)`。途中で溢れない |
+| `ldexp(x, n)` | `x · 2ⁿ` |
+
+⚠️ **`float ** float` は演算子としては使えません**（`**` は `int` 専用）。
+`math.pow` を使ってください。
+
+### 三角関数・双曲線関数
+
+`sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2(y, x)`
+`sinh` / `cosh` / `tanh` / `asinh` / `acosh` / `atanh`
+`degrees(rad)` / `radians(deg)`
+
+### 整数の関数
+
+`iabs` / `gcd` / `lcm` / `factorial`（20 まで）/ `imin` / `imax` / `fmin` / `fmax`
+
+```python
+import math
+
+def main() -> int:
+    print(math.sqrt(2.0))                 # 1.414214
+    print(math.degrees(math.pi()))        # 180.0
+    print(math.atan2(1.0, 1.0))           # 0.785398
+    print(str(math.gcd(48, 18)))          # 6
+    return 0
+```
+
+---
+
+## linalg
+
+**ベクトルと行列。** ベクトルは専用の型を作らず `list[float]` をそのまま使います。
+
+### ベクトルを作る
+
+`zeros(n)` / `ones(n)` / `full(n, x)` / `linspace(a, b, n)` / `arange(a, b, step)` / `vcopy(a)`
+
+### 要素ごと
+
+`add` / `sub` / `mul`（アダマール積）/ `div` / `scale(a, k)` / `offset(a, k)` / `neg` / `vabs`
+
+### まとめる
+
+`vsum` / `vprod` / `vmin` / `vmax` / `argmin` / `argmax`
+
+### 内積・ノルム
+
+| 関数 | 説明 |
+|---|---|
+| `dot(a, b)` | 内積 |
+| `norm(a)` | ユークリッドノルム。**途中で溢れません** |
+| `norm1(a)` / `norm_inf(a)` | L1 / L∞ |
+| `dist(a, b)` | 距離 |
+| `normalize(a)` | 長さ 1 に揃える |
+| `cross(a, b)` | 外積（3 次元のみ） |
+| `angle(a, b)` | なす角（ラジアン） |
+
+### 行列
+
+`Matrix` クラス。中身は 1 本の `list[float]`（**行優先**）です。
+
+| 作る | |
+|---|---|
+| `mzeros(r, c)` / `mfull(r, c, x)` | 埋める |
+| `identity(n)` | 単位行列 |
+| `from_rows([[...], [...]])` | 行の並びから |
+| `diag([...])` | 対角行列 |
+| `mcopy(a)` | 複製 |
+
+| 使う | |
+|---|---|
+| `a.get(i, j)` / `a.set(i, j, v)` | 要素 |
+| `a.row(i)` / `a.col(j)` | 行・列を取り出す（複製） |
+| `a.rows` / `a.cols` / `a.size()` / `a.is_square()` | 形 |
+
+| 計算する | |
+|---|---|
+| `madd` / `msub` / `mmul`（要素ごと）/ `mscale` / `mneg` | 要素ごと |
+| `matmul(a, b)` | **行列の積** |
+| `matvec(a, v)` | 行列 × ベクトル |
+| `transpose(a)` / `trace(a)` / `mpow(a, n)` | |
+| `det(a)` | 行列式 |
+| `solve(a, b)` | **`A·x = b` を解く** |
+| `inverse(a)` | 逆行列 |
+| `rank(a)` | 階数 |
+
+`det` / `solve` / `inverse` / `rank` は**部分ピボット選択つきのガウス消去法**です。
+各段で「その列で絶対値が最大の行」を選ぶので、素朴な消去法よりずっと安定します
+（条件数の悪い 5×5 ヒルベルト行列でも `solve` が誤差 10⁻⁹ 以内で解けることを
+テストで確かめています）。
+
+> **⚠️ 連立方程式を解くだけなら `solve` を使ってください。**
+> `inverse` を作ってから掛けるのは、遅いうえに誤差も大きくなります。
+
+| 表示 | |
+|---|---|
+| `vec_str(v)` / `mat_str(a)` | 文字列にする |
+| `vprint(v)` / `mprint(a)` | そのまま表示 |
+
+```python
+import linalg
+
+def main() -> int:
+    m: linalg.Matrix = linalg.from_rows([[1.0, 2.0], [3.0, 4.0]])
+    print(str(linalg.det(m)))              # -2.0
+    linalg.vprint(linalg.solve(m, [5.0, 11.0]))   # [1.0, 2.0]
+    linalg.mprint(linalg.inverse(m))
+    return 0
+```
+
+**形が合わなければ `panic` します。** 行列の積で列数と行数が食い違うのは
+書いた人の間違いであって、実行時に回復できる状況ではないためです。
+
+---
+
+## stats
+
+**Python の `statistics` に相当します。**
+
+| 代表値 | |
+|---|---|
+| `mean` / `median` / `mode` | |
+| `geometric_mean` / `harmonic_mean` | 正の数のみ |
+
+| ばらつき | |
+|---|---|
+| `variance` / `stdev` | **標本**（`n-1` で割る） |
+| `pvariance` / `pstdev` | **母集団**（`n` で割る） |
+
+⚠️ **標本と母集団のどちらを使うかは、データの性質で決まります。**
+手元のデータが「全体からの抜き取り」なら `variance`、「全体そのもの」なら
+`pvariance` です。既定はありません。
+
+| その他 | |
+|---|---|
+| `sorted(a)` | 昇順の**複製**を返す（元は壊しません）。マージソート |
+| `quantile(a, q)` | 分位点（線形補間） |
+| `covariance(x, y)` / `correlation(x, y)` | 2 変数 |
+| `linear_regression(x, y)` | 最小二乗法。`[傾き, 切片]` を返す |
+
+---
+
+## random
+
+**Python の `random` に相当します。** 自前の線形合同法です。
+
+> **⚠️ 暗号には使えません。** 状態が見えれば次の値が完全に予測できます。
+> シミュレーション・サンプリング・テストデータ用です。
+
+| 関数 | 説明 |
+|---|---|
+| `seed(n)` | 種を決める。**同じ種なら同じ系列** |
+| `random()` | `[0.0, 1.0)` の一様乱数 |
+| `uniform(a, b)` | `[a, b)` の一様乱数 |
+| `randint(a, b)` | `[a, b]` の一様な整数（**両端を含む**） |
+| `chance(p)` | 確率 `p` で `True` |
+| `gauss(mu, sigma)` | 正規分布（ボックス＝ミュラー法） |
+| `expovariate(rate)` | 指数分布 |
+| `shuffle(a)` | その場で並べ替え（フィッシャー＝イェーツ法） |
+| `choice(a)` | 1 つ選ぶ |
+| `sample_with_replacement(a, n)` | 復元ありで `n` 個 |
+
+`randint` は**剰余による偏りを取り除いてあります**（範囲外に当たったら引き直す）。
+
+---
+
+## physics
+
+**物理定数と単位換算。** 値は **CODATA 2018** の推奨値です。
+
+⚠️ 2019 年の SI 改定で、光速・プランク定数・電気素量・ボルツマン定数・
+アボガドロ定数は**定義値**になりました。
+
+| 基礎定数 | |
+|---|---|
+| `c()` | 光速 [m/s]（厳密） |
+| `h()` / `hbar()` | プランク定数 [J·s] |
+| `elementary_charge()` | 電気素量 [C]（厳密） |
+| `k_B()` / `N_A()` / `R()` | ボルツマン・アボガドロ・気体定数 |
+| `G()` | 万有引力定数。⚠️ **測定値**で不確かさが大きい（2.2×10⁻⁵） |
+| `mu_0()` / `epsilon_0()` / `coulomb()` | 電磁気 |
+| `g_0()` / `atm()` | 標準重力加速度・標準大気圧（どちらも定義値） |
+| `sigma_SB()` / `alpha()` / `rydberg()` | シュテファン＝ボルツマン・微細構造・リュードベリ |
+| `electron_mass()` / `proton_mass()` / `neutron_mass()` / `atomic_mass()` | 質量 [kg] |
+
+| 換算 | |
+|---|---|
+| `celsius_to_kelvin` / `kelvin_to_celsius` | 温度 |
+| `fahrenheit_to_celsius` / `celsius_to_fahrenheit` | |
+| `ev_to_joule` / `joule_to_ev` | エネルギー |
+| `mass_to_energy` / `energy_to_mass` | `E = mc²` |
+| `light_year()` / `au()` / `parsec()` | 長さ [m] |
+
+| 関係式 | |
+|---|---|
+| `lorentz_factor(v)` / `relativistic_ke(m, v)` | 相対論 |
+| `de_broglie(p)` / `photon_energy(wavelength)` | 量子 |
+| `blackbody_flux(t)` | 黒体放射 `σT⁴` |
+| `gravity(m1, m2, r)` / `orbital_velocity(m, r)` / `escape_velocity(m, r)` | 重力 |
+| `schwarzschild_radius(m)` | |
+
+```python
+import physics
+
+def main() -> int:
+    print(physics.escape_velocity(5.972e24, 6.371e6))   # 11186.0（地球）
+    print(physics.joule_to_ev(physics.photon_energy(550.0e-9)))  # 2.254（緑の光）
+    return 0
+```
+
+**単位はすべて SI です。** 混ざると事故になるので、換算は必ず関数を通してください。
