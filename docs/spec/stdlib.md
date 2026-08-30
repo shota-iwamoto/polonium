@@ -67,10 +67,29 @@ def main() -> int:
 | 関数 | 説明 |
 |---|---|
 | `strip(s: str) -> str` | 前後の空白を落とす |
-| `lpad(s: str, width: int) -> str` | 左に空白を詰めて `width` にする |
-| `rpad(s: str, width: int) -> str` | 右に空白を詰める |
+| `lpad(s: str, w: int) -> str` | 左に空白を詰めて表示幅 `w` にする |
+| `rpad(s: str, w: int) -> str` | 右に空白を詰める |
 | `repeat(s: str, times: int) -> str` | `times` 回くり返す |
 | `replace(s: own str, old: str, new: str) -> str` | 全て置換。**`s` の所有権を取ります**（`own`） |
+
+### 数える
+
+| 関数 | 説明 |
+|---|---|
+| `char_count(s: str) -> int` | **文字数**（`len` はバイト数） |
+| `width(s: str) -> int` | **表示幅**（全角を 2 と数える） |
+
+```python
+len("あいう")                  # 9  ← バイト数
+strings.char_count("あいう")   # 3  ← 文字数
+strings.width("あいう")        # 6  ← 表示幅
+```
+
+⚠️ `width` は**目安**です。端末や字体によって幅は変わります。
+「よく全角で表示される範囲」を 2 桁として数えています。
+
+> **⚠️ 桁を揃えるときは `len` ではなく `lpad` / `rpad` を使ってください。**
+> `lpad` / `rpad` は表示幅で数えるので、日本語が混ざっても崩れません。
 
 ### 判定
 
@@ -79,8 +98,9 @@ def main() -> int:
 | `is_space(c: str) -> bool` | 空白文字か（先頭 1 バイトを見る） |
 | `is_space_byte(b: int) -> bool` | バイト値が空白か |
 
-> **⚠️ すべてバイト単位です。** `str` は UTF-8 のバイト列で、
-> 文字（コードポイント）単位の操作はありません。`len("あ")` は 3 です。
+> **⚠️ 探索や切り出しはバイト単位です。** `str` は UTF-8 のバイト列で、
+> `find` / `substr` / スライスの添字はバイト位置です
+> （多バイト文字の途中で切ると壊れます）。
 
 ---
 

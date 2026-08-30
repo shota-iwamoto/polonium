@@ -123,17 +123,83 @@ def strip(s: str) -> str:
 #
 # ★ 言語に書式指定を足すのではなく、ライブラリの関数で済ませます
 #   （第14章 14.1 節の境界線）。
-def lpad(s: str, width: int) -> str:
-    out: str = s
-    while len(out) < width:
-        out = " " + out
-    return out
+# ── 文字数（第42章）────────────────────────────────────────
+#
+# ⚠️ `len(s)` は **バイト数**です。UTF-8 では「あ」が 3 バイトなので、
+#   桁を揃えるのに len を使うと日本語で崩れます。
+#
+# ★ UTF-8 の続きバイトは上位 2 ビットが 10 です。それを飛ばして数えます。
+#   ⚠️ 「文字数」であって「見た目の幅」ではありません。全角は 2 桁ぶんの
+#     幅を取りますが、ここでは 1 と数えます（幅は下の width を使ってください）。
+def char_count(s: str) -> int:
+    n: int = 0
+    i: int = 0
+    while i < len(s):
+        b: int = byte_at(s, i)
+        # 0b10xxxxxx（128〜191）は続きのバイト
+        if b < 128 or b >= 192:
+            n = n + 1
+        i = i + 1
+    return n
 
-def rpad(s: str, width: int) -> str:
-    out: str = s
-    while len(out) < width:
-        out = out + " "
-    return out
+# 表示したときの桁数（全角を 2 と数える）
+#
+# ⚠️ **目安です。** 端末や字体によって幅は変わります。ここでは
+#   「よく全角で表示される範囲」を 2 桁として数えます:
+#     U+1100〜115F、U+2E80〜A4CF、U+AC00〜D7A3、U+F900〜FAFF、
+#     U+FE30〜FE6F、U+FF00〜FF60、U+FFE0〜FFE6
+def width(s: str) -> int:
+    w: int = 0
+    i: int = 0
+    while i < len(s):
+        b: int = byte_at(s, i)
+        if b < 128:
+            w = w + 1
+            i = i + 1
+            continue
+        # 何バイトの文字か
+        n: int = 2
+        if b >= 240:
+            n = 4
+        elif b >= 224:
+            n = 3
+        cp: int = code_point_at(s, i, n)
+        if is_wide(cp):
+            w = w + 2
+        else:
+            w = w + 1
+        i = i + n
+    return w
+
+# i から n バイトの UTF-8 をコードポイントに戻す
+def code_point_at(s: str, i: int, n: int) -> int:
+    b0: int = byte_at(s, i)
+    if n == 2:
+        return (b0 % 32) * 64 + byte_at(s, i + 1) % 64
+    if n == 3:
+        return ((b0 % 16) * 4096 + (byte_at(s, i + 1) % 64) * 64 +
+                byte_at(s, i + 2) % 64)
+    return ((b0 % 8) * 262144 + (byte_at(s, i + 1) % 64) * 4096 +
+            (byte_at(s, i + 2) % 64) * 64 + byte_at(s, i + 3) % 64)
+
+def is_wide(cp: int) -> bool:
+    return ((cp >= 0x1100 and cp <= 0x115F) or
+            (cp >= 0x2E80 and cp <= 0xA4CF) or
+            (cp >= 0xAC00 and cp <= 0xD7A3) or
+            (cp >= 0xF900 and cp <= 0xFAFF) or
+            (cp >= 0xFE30 and cp <= 0xFE6F) or
+            (cp >= 0xFF00 and cp <= 0xFF60) or
+            (cp >= 0xFFE0 and cp <= 0xFFE6))
+
+# ── 桁を揃える ──────────────────────────────────────────────
+#
+# ★ **表示幅**で数えます（全角は 2 桁）。バイト数で数えると日本語で崩れます。
+# ⚠️ 既に width を超えているときは、そのまま返します（切りません）。
+def lpad(s: str, w: int) -> str:
+    return repeat(" ", w - width(s)) + s
+
+def rpad(s: str, w: int) -> str:
+    return s + repeat(" ", w - width(s))
 
 def repeat(s: str, times: int) -> str:
     out: str = ""
