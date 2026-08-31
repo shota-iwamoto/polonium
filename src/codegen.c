@@ -954,46 +954,134 @@ static char *gen_list_lit(Emitter *e, Node *n) {
     return l;
 }
 
+// None の検査を IR に展開する（第45章）。
+//
+// ⚠️ クラス型のフィールドは NULL から始まります（12.6 節）。
+//   NULL 参照を segfault ではなく親切なメッセージに変えるための検査です。
+//
+// ★ もとは pl_check_not_none への**呼び出し 1 回**でした。
+//   フィールド参照はこの言語で最も回数の多い操作で、
+//   linalg.Matrix.get のような小さなメソッドでは 1 回の呼び出しに
+//   つき 2 回払っていました。ランタイムは別リンクなのでインライン化
+//   されません。検査ごと IR に出して呼び出しを無くします。
+//
+// ★ 検査は消えません。null なら pl_none_fail へ飛びます。
+static char *gen_not_none(Emitter *e, char *obj) {
+    declare_rt(e, "void @pl_none_fail() noreturn");
+
+    int id = e->label_counter++;  // ★ 番号は最初に 1 回だけ確保する
+    char ok_l[32], bad_l[32];
+    snprintf(ok_l, sizeof(ok_l), "none.ok.%d", id);
+    snprintf(bad_l, sizeof(bad_l), "none.bad.%d", id);
+
+    char *isn = new_tmp(e);
+    sb_printf(&e->fn, "  %s = icmp eq ptr %s, null\n", isn, obj);
+    emit_cond_br(e, isn, bad_l, ok_l);
+
+    emit_label(e, bad_l);
+    sb_printf(&e->fn, "  call void @pl_none_fail()\n");
+    sb_printf(&e->fn, "  unreachable\n");
+    e->terminated = true;
+
+    emit_label(e, ok_l);
+    return obj;
+}
+
+// ── 添字を IR に展開する（第45章）───────────────────
+//
+// ⚠️ ここがこの言語の最大のボトルネックでした。
+//   xs[i] はもともと pl_list_len / pl_norm_index / pl_list_get_* の
+//   **関数呼び出し 3 回**でした。ランタイムは runtime.a として
+//   別にリンクされ、LTO を使っていないので -O2 でもインライン化
+//   されません。行列積の内側ループが呼び出し 5 回になり、
+//   C の 61 倍遅くなっていました。
+//
+// ★ **検査は外しません**（方針 §0-②）。遅いのは検査ではなく
+//   呼び出しなので、検査ごと IR に出します。こうすると LLVM が
+//   ループの外へ持ち上げたり、範囲が自明なときに消したりできます。
+//
+// PlList の並びは { ptr data; i64 len; i64 cap }（runtime/core.c）。
+// data がオフセット 0、len が 8 です。
+//
+// ★ 範囲検査は **符号なしの比較 1 回**で済みます。
+//   len >= 0 なので、i を符号なしとして見れば負の i は巨大な値に
+//   なり、i < 0 も i >= len も icmp ult ひとつで捕まります。
+//
+// normalize が true なら負の添字を末尾から数え直します（第39章）。
+// 戻り値は要素へのポインタ。
+static char *gen_index_addr(Emitter *e, char *obj, char *idx, const char *sty,
+                            bool normalize) {
+    declare_rt(e, "void @pl_index_fail(i64, i64) noreturn");
+
+    char *lenp = new_tmp(e);
+    sb_printf(&e->fn, "  %s = getelementptr i8, ptr %s, i64 8\n", lenp, obj);
+    char *len = new_tmp(e);
+    sb_printf(&e->fn, "  %s = load i64, ptr %s\n", len, lenp);
+
+    if (normalize) {
+        char *isneg = new_tmp(e);
+        sb_printf(&e->fn, "  %s = icmp slt i64 %s, 0\n", isneg, idx);
+        char *plus = new_tmp(e);
+        sb_printf(&e->fn, "  %s = add i64 %s, %s\n", plus, idx, len);
+        char *ni = new_tmp(e);
+        sb_printf(&e->fn, "  %s = select i1 %s, i64 %s, i64 %s\n", ni, isneg, plus,
+                  idx);
+        idx = ni;
+    }
+
+    int id = e->label_counter++;  // ★ 番号は最初に 1 回だけ確保する
+    char ok_l[32], bad_l[32];
+    snprintf(ok_l, sizeof(ok_l), "idx.ok.%d", id);
+    snprintf(bad_l, sizeof(bad_l), "idx.bad.%d", id);
+
+    char *inb = new_tmp(e);
+    sb_printf(&e->fn, "  %s = icmp ult i64 %s, %s\n", inb, idx, len);
+    emit_cond_br(e, inb, ok_l, bad_l);
+
+    emit_label(e, bad_l);
+    sb_printf(&e->fn, "  call void @pl_index_fail(i64 %s, i64 %s)\n", idx, len);
+    // ⚠️ pl_index_fail は戻ってきません。unreachable を置かないと
+    //   LLVM は「戻るかも」と見て、検査をループ外へ出せなくなります。
+    sb_printf(&e->fn, "  unreachable\n");
+    e->terminated = true;
+
+    emit_label(e, ok_l);
+    char *data = new_tmp(e);
+    sb_printf(&e->fn, "  %s = load ptr, ptr %s\n", data, obj);
+    char *ep = new_tmp(e);
+    sb_printf(&e->fn, "  %s = getelementptr %s, ptr %s, i64 %s\n", ep, sty, data,
+              idx);
+    return ep;
+}
+
 static char *gen_index(Emitter *e, Node *n) {
     Type *ot = n->lhs->type;
     char *obj = gen_expr(e, n->lhs);
     char *idx = gen_expr(e, n->rhs);
 
-    // ★ 第39章：負の添字は **末尾から**数えます（xs[-1] が最後。Python と同じ）。
-    //   ⚠️ 正規化だけをランタイムに任せ、範囲の検査は今までどおり
-    //     pl_list_check / pl_str_index が行います（規約 R10）。
-    {
-        declare_rt(e, ot->kind == TY_STR ? "i64 @pl_str_len(ptr)"
-                                         : "i64 @pl_list_len(ptr)");
+    // str の添字は 1 文字の str を返す（型システム 5.8）。
+    // ★ こちらは 1 文字の str を**新しく作る**ので、どのみち確保が
+    //   入ります。展開しても利かないので従来どおり呼び出します。
+    if (ot->kind == TY_STR) {
+        declare_rt(e, "i64 @pl_str_len(ptr)");
         declare_rt(e, "i64 @pl_norm_index(i64, i64)");
         char *ln = new_tmp(e);
-        sb_printf(&e->fn, "  %s = call i64 @%s(ptr %s)\n", ln,
-                  ot->kind == TY_STR ? "pl_str_len" : "pl_list_len", obj);
+        sb_printf(&e->fn, "  %s = call i64 @pl_str_len(ptr %s)\n", ln, obj);
         char *ni = new_tmp(e);
-        sb_printf(&e->fn, "  %s = call i64 @pl_norm_index(i64 %s, i64 %s)\n",
-                  ni, idx, ln);
-        idx = ni;
-    }
-
-    // str の添字は 1 文字の str を返す（型システム 5.8）
-    if (ot->kind == TY_STR) {
+        sb_printf(&e->fn, "  %s = call i64 @pl_norm_index(i64 %s, i64 %s)\n", ni,
+                  idx, ln);
         declare_rt(e, "ptr @pl_str_index(ptr, i64)");
         char *t = new_tmp(e);
         sb_printf(&e->fn, "  %s = call ptr @pl_str_index(ptr %s, i64 %s)\n", t, obj,
-                  idx);
+                  ni);
         return t;
     }
 
     Type *elem = ot->elem;
     const char *sty = slot_ty(elem);
-    const char *get = elem_is_ptr(elem) ? "pl_list_get_ptr" : "pl_list_get_i64";
-    StrBuf sig;
-    sb_init(&sig);
-    sb_printf(&sig, "%s @%s(ptr, i64)", sty, get);
-    declare_rt(e, sb_str(&sig));
-
+    char *ep = gen_index_addr(e, obj, idx, sty, true);
     char *t = new_tmp(e);
-    sb_printf(&e->fn, "  %s = call %s @%s(ptr %s, i64 %s)\n", t, sty, get, obj, idx);
+    sb_printf(&e->fn, "  %s = load %s, ptr %s\n", t, sty, ep);
     return slot_to_elem(e, elem, t);
 }
 
@@ -1003,15 +1091,12 @@ static void gen_index_store(Emitter *e, Node *target, char *val) {
     char *idx = gen_expr(e, target->rhs);
 
     const char *sty = slot_ty(elem);
-    const char *set = elem_is_ptr(elem) ? "pl_list_set_ptr" : "pl_list_set_i64";
-    StrBuf sig;
-    sb_init(&sig);
-    sb_printf(&sig, "void @%s(ptr, i64, %s)", set, sty);
-    declare_rt(e, sb_str(&sig));
-
+    // ⚠️ 代入側は負の添字を正規化しません。
+    //   pl_list_set_* を呼んでいたころからそうでした（xs[-1] = v は panic）。
+    //   ここで変えると意味が変わるので、振る舞いはそのままにします。
+    char *ep = gen_index_addr(e, obj, idx, sty, false);
     char *v = elem_to_slot(e, elem, val);
-    sb_printf(&e->fn, "  call void @%s(ptr %s, i64 %s, %s %s)\n", set, obj, idx, sty,
-              v);
+    sb_printf(&e->fn, "  store %s %s, ptr %s\n", sty, v, ep);
 }
 
 static char *gen_new(Emitter *e, Node *n);
@@ -1113,9 +1198,7 @@ static char *gen_method(Emitter *e, Node *n) {
     //   ⚠️ 呼び先はコンパイル時には決まりません（実行時の型で決まります）。
     if (n->is_iface_call) {
         char *obj = gen_expr(e, n->lhs);
-        declare_rt(e, "ptr @pl_check_not_none(ptr)");
-        char *ok = new_tmp(e);
-        sb_printf(&e->fn, "  %s = call ptr @pl_check_not_none(ptr %s)\n", ok, obj);
+        char *ok = gen_not_none(e, obj);
 
         char *vt = new_tmp(e);
         sb_printf(&e->fn, "  %s = load ptr, ptr %s\n", vt, ok);
@@ -1304,11 +1387,9 @@ static char *gen_field_ptr(Emitter *e, Node *n) {
     char *obj = deref_rc(e, ot, gen_expr(e, n->lhs));
 
     // ⚠️ クラス型のフィールドは NULL から始まります（12.6 節）。
-    //    NULL 参照を segfault ではなく親切なメッセージに変えるため、
-    //    ランタイムに 1 回問い合わせます（規約 R10：分岐は IR に出さない）。
-    declare_rt(e, "ptr @pl_check_not_none(ptr)");
-    char *ok = new_tmp(e);
-    sb_printf(&e->fn, "  %s = call ptr @pl_check_not_none(ptr %s)\n", ok, obj);
+    //    NULL 参照を segfault ではなく親切なメッセージに変えます。
+    // ★ 第45章：検査を IR に展開します（規約 R10 の例外。理由は gen_not_none）。
+    char *ok = gen_not_none(e, obj);
 
     // ⚠️ 第 1 インデックスは常に 0（「Token の配列の何個目か」）。
     //    ここを 1 にすると隣のオブジェクトがある場所を読みます。
@@ -1944,9 +2025,23 @@ static char *gen_builtin_call(Emitter *e, Node *n) {
     const char *argty = at->kind == TY_BOOL ? "i64" : llvm_type(at);
 
     // declare を 1 回だけ出す
+    //
+    // ★ 第45章：**戻らない**組み込み（panic / exit）には noreturn を付けます。
+    //   付けないと LLVM は「戻ってくるかもしれない」と見なし、
+    //     ① panic の後ろの経路を生かしたままにする
+    //     ② panic までに並ぶ文字列連結を「メモリを書くかもしれない呼び出し」
+    //        として扱い、**ループ内の load を外に持ち上げられなくなる**
+    //   の 2 つが起きます。linalg.Matrix.check がまさにこれで、
+    //   行列積の内側ループから self.rows / self.cols / self.data の
+    //   読み出しが外に出せませんでした。
+    //   ⚠️ sema の never_returns_call と対になっています。片方だけ変えないこと。
+    const char *nr = (strcmp(b->impl, "pl_panic") == 0 ||
+                      strcmp(b->impl, "pl_exit") == 0)
+                         ? " noreturn"
+                         : "";
     StrBuf sig;
     sb_init(&sig);
-    sb_printf(&sig, "%s @%s(%s)", llvm_type(rt), b->impl, argty);
+    sb_printf(&sig, "%s @%s(%s)%s", llvm_type(rt), b->impl, argty, nr);
     declare_rt(e, sb_str(&sig));
 
     char *v = gen_expr(e, n->args);

@@ -1,0 +1,45 @@
+# OUTPUT: 16302.58788
+# EXIT: 0
+# 第45章：添字が「関数呼び出し」に戻っていないこと
+#   ⚠️ xs[i] が pl_list_get_* の呼び出しだったころは、この 256³ の
+#     行列積に **0.53 秒**かかっていました（IR に展開して 0.16 秒）。
+#     -O2 なら 0.49 秒 → 0.04 秒です。
+#   ★ このテストは「遅くなったら気づく」ための番人です。
+#     添字やフィールド参照を呼び出しに戻すと、ここで目に見えて時間が
+#     かかります（`gen_index_addr` / `gen_not_none` を参照）。
+
+N: int = 256
+
+def make(seed: int) -> list[list[float]]:
+    m: list[list[float]] = []
+    s: int = seed
+    for i in range(N):
+        row: list[float] = []
+        for j in range(N):
+            s = (s * 1103515 + 12345) % 2147483648
+            row.append(float(s % 1000) / 1000.0)
+        m.append(row)
+    return m
+
+def main() -> int:
+    a: list[list[float]] = make(1)
+    b: list[list[float]] = make(7)
+
+    c: list[list[float]] = []
+    for i in range(N):
+        row: list[float] = []
+        for j in range(N):
+            row.append(0.0)
+        c.append(row)
+
+    for i in range(N):
+        for k in range(N):
+            aik: float = a[i][k]
+            for j in range(N):
+                c[i][j] = c[i][j] + aik * b[k][j]
+
+    t: float = 0.0
+    for i in range(N):
+        t = t + c[i][i]
+    print(str(t))
+    return 0

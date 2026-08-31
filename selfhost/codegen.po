@@ -821,45 +821,132 @@ class Emitter:
             el = e.next
         return l
 
+    # None の検査を IR に展開する（第45章）。
+    #
+    # ⚠️ クラス型のフィールドは NULL から始まる（12.6 節）。
+    #   NULL 参照を segfault ではなく親切なメッセージに変えるための検査。
+    #
+    # ★ もとは pl_check_not_none への**呼び出し 1 回**だった。
+    #   フィールド参照はこの言語で最も回数の多い操作で、
+    #   linalg.Matrix.get のような小さなメソッドでは 1 回の呼び出しに
+    #   つき 2 回払っていた。ランタイムは別リンクなのでインライン化
+    #   されない。検査ごと IR に出して呼び出しを無くす。
+    #
+    # ★ 検査は消えない。null なら pl_none_fail へ飛ぶ。
+    def gen_not_none(mut self, obj: str) -> str:
+        self.declare_rt("void @pl_none_fail() noreturn")
+
+        id_: int = self.label_counter    # ★ 番号は最初に 1 回だけ確保する
+        self.label_counter = self.label_counter + 1
+        ok_l: str = "none.ok." + str(id_)
+        bad_l: str = "none.bad." + str(id_)
+
+        isn: str = self.new_tmp()
+        self.emit("  " + isn + " = icmp eq ptr " + obj + ", null\n")
+        self.emit_cond_br(isn, bad_l, ok_l)
+
+        self.emit_label(bad_l)
+        self.emit("  call void @pl_none_fail()\n")
+        self.emit("  unreachable\n")
+        self.terminated = True
+
+        self.emit_label(ok_l)
+        return obj
+
+    # ── 添字を IR に展開する（第45章）──────────────────
+    #
+    # ⚠️ ここがこの言語の最大のボトルネックだった。
+    #   xs[i] はもともと pl_list_len / pl_norm_index / pl_list_get_* の
+    #   **関数呼び出し 3 回**だった。ランタイムは runtime.a として
+    #   別にリンクされ、LTO を使っていないので -O2 でも
+    #   インライン化されない。行列積の内側ループが呼び出し 5 回に
+    #   なり、C の 61 倍遅くなっていた。
+    #
+    # ★ **検査は外さない**（方針 §0-②）。遅いのは検査ではなく
+    #   呼び出しなので、検査ごと IR に出す。こうすると LLVM が
+    #   ループの外へ持ち上げたり、範囲が自明なときに消したりできる。
+    #
+    # PlList の並びは { ptr data; i64 len; i64 cap }（runtime/core.c）。
+    # data がオフセット 0、len が 8。
+    #
+    # ★ 範囲検査は **符号なしの比較 1 回**で済む。
+    #   len >= 0 なので、i を符号なしとして見れば負の i は巨大な値に
+    #   なり、i < 0 も i >= len も icmp ult ひとつで捕まる。
+    #
+    # normalize が True なら負の添字を末尾から数え直す（第39章）。
+    # 戻り値は要素へのポインタ。
+    def gen_index_addr(mut self, obj: str, idx0: str, sty: str,
+                       normalize: bool) -> str:
+        self.declare_rt("void @pl_index_fail(i64, i64) noreturn")
+
+        lenp: str = self.new_tmp()
+        self.emit("  " + lenp + " = getelementptr i8, ptr " + obj + ", i64 8\n")
+        ln: str = self.new_tmp()
+        self.emit("  " + ln + " = load i64, ptr " + lenp + "\n")
+
+        idx: str = idx0
+        if normalize:
+            isneg: str = self.new_tmp()
+            self.emit("  " + isneg + " = icmp slt i64 " + idx + ", 0\n")
+            plus: str = self.new_tmp()
+            self.emit("  " + plus + " = add i64 " + idx + ", " + ln + "\n")
+            ni: str = self.new_tmp()
+            self.emit("  " + ni + " = select i1 " + isneg + ", i64 " + plus +
+                      ", i64 " + idx + "\n")
+            idx = ni
+
+        id_: int = self.label_counter    # ★ 番号は最初に 1 回だけ確保する
+        self.label_counter = self.label_counter + 1
+        ok_l: str = "idx.ok." + str(id_)
+        bad_l: str = "idx.bad." + str(id_)
+
+        inb: str = self.new_tmp()
+        self.emit("  " + inb + " = icmp ult i64 " + idx + ", " + ln + "\n")
+        self.emit_cond_br(inb, ok_l, bad_l)
+
+        self.emit_label(bad_l)
+        self.emit("  call void @pl_index_fail(i64 " + idx + ", i64 " + ln + ")\n")
+        # ⚠️ pl_index_fail は戻ってこない。unreachable を置かないと
+        #   LLVM は「戻るかも」と見て、検査をループ外へ出せなくなる。
+        self.emit("  unreachable\n")
+        self.terminated = True
+
+        self.emit_label(ok_l)
+        data: str = self.new_tmp()
+        self.emit("  " + data + " = load ptr, ptr " + obj + "\n")
+        ep: str = self.new_tmp()
+        self.emit("  " + ep + " = getelementptr " + sty + ", ptr " + data +
+                  ", i64 " + idx + "\n")
+        return ep
+
     def gen_index(mut self, n: ast.Node) -> str:
         obj_node: ast.Node = node_of(n.lhs)
         ot: ast.Type = type_of(obj_node)
         obj: str = self.gen_expr(obj_node)
         idx0: str = self.gen_expr(node_of(n.rhs))
 
-        # ★ 第39章：負の添字は **末尾から**数える（Python と同じ）。
-        #   ⚠️ 正規化だけをランタイムに任せ、範囲の検査は今までどおり
-        #     pl_list_check / pl_str_index が行う（規約 R10）。
-        lenfn0: str = "pl_list_len"
+        # str の添字は 1 文字の str を返す。
+        # ★ こちらは 1 文字の str を**新しく作る**ので、どのみち確保が
+        #   入る。展開しても利かないので従来どおり呼び出す。
         if ot.kind == ast.TY_STR:
-            lenfn0 = "pl_str_len"
-        self.declare_rt("i64 @" + lenfn0 + "(ptr)")
-        self.declare_rt("i64 @pl_norm_index(i64, i64)")
-        ln0: str = self.new_tmp()
-        self.emit("  " + ln0 + " = call i64 @" + lenfn0 + "(ptr " + obj + ")\n")
-        ni0: str = self.new_tmp()
-        self.emit("  " + ni0 + " = call i64 @pl_norm_index(i64 " + idx0 +
-                  ", i64 " + ln0 + ")\n")
-        idx: str = ni0
-
-        # str の添字は 1 文字の str を返す
-        if ot.kind == ast.TY_STR:
+            self.declare_rt("i64 @pl_str_len(ptr)")
+            self.declare_rt("i64 @pl_norm_index(i64, i64)")
+            ln0: str = self.new_tmp()
+            self.emit("  " + ln0 + " = call i64 @pl_str_len(ptr " + obj + ")\n")
+            ni0: str = self.new_tmp()
+            self.emit("  " + ni0 + " = call i64 @pl_norm_index(i64 " + idx0 +
+                      ", i64 " + ln0 + ")\n")
             self.declare_rt("ptr @pl_str_index(ptr, i64)")
             t0: str = self.new_tmp()
             self.emit("  " + t0 + " = call ptr @pl_str_index(ptr " + obj +
-                      ", i64 " + idx + ")\n")
+                      ", i64 " + ni0 + ")\n")
             return t0
 
         elem: ast.Type = ast.elem_of(ot)
         sty: str = self.slot_ty(elem)
-        get: str = "pl_list_get_i64"
-        if self.elem_is_ptr(elem):
-            get = "pl_list_get_ptr"
-        self.declare_rt(sty + " @" + get + "(ptr, i64)")
-
+        ep: str = self.gen_index_addr(obj, idx0, sty, True)
         t: str = self.new_tmp()
-        self.emit("  " + t + " = call " + sty + " @" + get + "(ptr " + obj +
-                  ", i64 " + idx + ")\n")
+        self.emit("  " + t + " = load " + sty + ", ptr " + ep + "\n")
         return self.slot_to_elem(elem, t)
 
     def gen_index_store(mut self, target: ast.Node, val: str) -> None:
@@ -869,14 +956,12 @@ class Emitter:
         idx: str = self.gen_expr(node_of(target.rhs))
 
         sty: str = self.slot_ty(elem)
-        set_: str = "pl_list_set_i64"
-        if self.elem_is_ptr(elem):
-            set_ = "pl_list_set_ptr"
-        self.declare_rt("void @" + set_ + "(ptr, i64, " + sty + ")")
-
+        # ⚠️ 代入側は負の添字を正規化しない。
+        #   pl_list_set_* を呼んでいたころからそうだった（xs[-1] = v は panic）。
+        #   ここで変えると意味が変わるので、振る舞いはそのままにする。
+        ep: str = self.gen_index_addr(obj, idx, sty, False)
         v: str = self.elem_to_slot(elem, val)
-        self.emit("  call void @" + set_ + "(ptr " + obj + ", i64 " + idx +
-                  ", " + sty + " " + v + ")\n")
+        self.emit("  store " + sty + " " + v + ", ptr " + ep + "\n")
 
     # ── 呼び出し ────────────────────────────────────────────
 
@@ -970,10 +1055,7 @@ class Emitter:
         #   ⚠️ 呼び先はコンパイル時には決まらない（実行時の型で決まる）。
         if n.is_iface_call:
             iobj: str = self.gen_expr(obj_node)
-            self.declare_rt("ptr @pl_check_not_none(ptr)")
-            iok: str = self.new_tmp()
-            self.emit("  " + iok + " = call ptr @pl_check_not_none(ptr " +
-                      iobj + ")\n")
+            iok: str = self.gen_not_none(iobj)
             ivt: str = self.new_tmp()
             self.emit("  " + ivt + " = load ptr, ptr " + iok + "\n")
             islotp: str = self.new_tmp()
@@ -1111,9 +1193,8 @@ class Emitter:
         obj: str = self.deref_rc(ot0, self.gen_expr(obj_node))
 
         # ⚠️ クラス型のフィールドは NULL から始まる（12.6 節）
-        self.declare_rt("ptr @pl_check_not_none(ptr)")
-        ok: str = self.new_tmp()
-        self.emit("  " + ok + " = call ptr @pl_check_not_none(ptr " + obj + ")\n")
+        # ★ 第45章：検査を IR に展開する（規約 R10 の例外。理由は gen_not_none）
+        ok: str = self.gen_not_none(obj)
 
         # ⚠️ 第 1 インデックスは常に 0（「Token の配列の何個目か」）
         t: str = self.new_tmp()
@@ -1373,7 +1454,19 @@ class Emitter:
         if at.kind == ast.TY_BOOL:
             argty = "i64"
 
-        self.declare_rt(self.llvm_type(rt) + " @" + n.builtin + "(" + argty + ")")
+        # ★ 第45章：**戻らない**組み込み（panic / exit）には noreturn を付ける。
+        #   付けないと LLVM は「戻ってくるかもしれない」と見なし、
+        #     ① panic の後ろの経路を生かしたままにする
+        #     ② panic までに並ぶ文字列連結を「メモリを書くかもしれない呼び出し」
+        #        として扱い、**ループ内の load を外に持ち上げられなくなる**
+        #   の 2 つが起きる。linalg.Matrix.check がまさにこれで、
+        #   行列積の内側ループから self.rows / self.cols / self.data の
+        #   読み出しが外に出せなかった。
+        #   ⚠️ sema の never_returns_call と対になっている。片方だけ変えないこと。
+        nr: str = ""
+        if n.builtin == "pl_panic" or n.builtin == "pl_exit":
+            nr = " noreturn"
+        self.declare_rt(self.llvm_type(rt) + " @" + n.builtin + "(" + argty + ")" + nr)
 
         v: str = self.gen_expr(arg_node)
         if at.kind == ast.TY_BOOL:

@@ -105,8 +105,21 @@ void *pl_alloc(long long size) {
 //   ここを通しておけば「何が起きたか分かるメッセージ」に変わります。
 //
 // ⚠️ 本来の解決策は型システム側（T | None と narrowing）です。第15章で塞ぎます。
+//
+// ★ 第45章：検査そのものは codegen が IR に展開するようになりました
+//   （gen_not_none）。フィールド参照はこの言語で最も回数の多い操作で、
+//   ここを呼び出しのままにしておくと -O2 でも 1 回ずつ call を払います。
+//   ランタイムは別にリンクされるのでインライン化されません。
+
+// None だったときだけ呼ばれる出口。
+// ⚠️ **戻ってきません**。呼び出し側の IR は直後に unreachable を置きます。
+void pl_none_fail(void) {
+    pl_panic("field access on None (uninitialized reference field?)");
+}
+
+// ★ 展開後の codegen はもう呼びませんが、ランタイム内から使います。
 void *pl_check_not_none(void *p) {
-    if (!p) pl_panic("field access on None (uninitialized reference field?)");
+    if (!p) pl_none_fail();
     return p;
 }
 
@@ -547,23 +560,36 @@ static void pl_list_grow(PlList *l) {
 }
 
 // 範囲検査（規約 R10）。
-// ★ 検査をここに置くので、生成する IR に分岐が 1 つも出ません。
+//
 // ⚠️ 負の添字は **末尾からの位置**です（第39章。Python と同じ）。
 //   xs[-1] が最後の要素。呼ぶ側で正規化してから渡します。
+//
+// ★ 第45章：**ここはもう「検査の置き場所」ではありません。**
+//   以前は「検査をここに置くので、生成する IR に分岐が 1 つも出ない」と
+//   書いていましたが、その呼び出しこそが最大のボトルネックでした。
+//   いまは codegen が検査ごと IR に展開します（gen_index_addr）。
+//   **IR には分岐が出ます。** そのぶん LLVM が検査をループの外へ
+//   持ち上げたり、範囲が自明なときに消したりできます。
+
+// 範囲外だったときだけ呼ばれる出口。
+// ⚠️ **戻ってきません**。呼び出し側の IR は直後に unreachable を置きます。
+void pl_index_fail(long long i, long long len) {
+    char buf[80];
+    char *w = buf;
+    const char *m = "index out of range: ";
+    while (*m) *w++ = *m++;
+    w += pl_itoa(i, w);
+    *w++ = ' ';
+    *w++ = '(';
+    w += pl_itoa(len, w);
+    *w++ = ')';
+    *w = '\0';
+    pl_panic(buf);
+}
+
+// ★ 展開後の codegen はもう呼びませんが、ランタイム内から使います。
 static void pl_list_check(PlList *l, long long i) {
-    if (i < 0 || i >= l->len) {
-        char buf[80];
-        char *w = buf;
-        const char *m = "index out of range: ";
-        while (*m) *w++ = *m++;
-        w += pl_itoa(i, w);
-        *w++ = ' ';
-        *w++ = '(';
-        w += pl_itoa(l->len, w);
-        *w++ = ')';
-        *w = '\0';
-        pl_panic(buf);
-    }
+    if (i < 0 || i >= l->len) pl_index_fail(i, l->len);
 }
 
 // 部分文字列の位置（第37章：'in' 演算子）。無ければ -1
