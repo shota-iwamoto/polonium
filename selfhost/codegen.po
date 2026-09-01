@@ -834,7 +834,7 @@ class Emitter:
     #
     # ★ 検査は消えない。null なら pl_none_fail へ飛ぶ。
     def gen_not_none(mut self, obj: str) -> str:
-        self.declare_rt("void @pl_none_fail() noreturn")
+        self.declare_rt("void @pl_none_fail() noreturn cold")
 
         id_: int = self.label_counter    # ★ 番号は最初に 1 回だけ確保する
         self.label_counter = self.label_counter + 1
@@ -877,7 +877,7 @@ class Emitter:
     # 戻り値は要素へのポインタ。
     def gen_index_addr(mut self, obj: str, idx0: str, sty: str,
                        normalize: bool) -> str:
-        self.declare_rt("void @pl_index_fail(i64, i64) noreturn")
+        self.declare_rt("void @pl_index_fail(i64, i64) noreturn cold")
 
         lenp: str = self.new_tmp()
         self.emit("  " + lenp + " = getelementptr i8, ptr " + obj + ", i64 8\n")
@@ -1454,18 +1454,26 @@ class Emitter:
         if at.kind == ast.TY_BOOL:
             argty = "i64"
 
+        # ★ 第46章：**cold** も付ける。noreturn は「戻らない」ことしか言わず、
+        #   インライン化の見積りには効かない。panic の手前に並ぶ
+        #   メッセージ組み立て（連結・数値→文字列）が呼び出し 6 回ぶんの
+        #   費用として数えられ、それを含む小さな検査メソッドが
+        #   **丸ごとインライン化を諦められて**いた。
+        #   cold を付けると、その経路は「まず通らない」ものとして扱われる。
+        #
         # ★ 第45章：**戻らない**組み込み（panic / exit）には noreturn を付ける。
         #   付けないと LLVM は「戻ってくるかもしれない」と見なし、
         #     ① panic の後ろの経路を生かしたままにする
         #     ② panic までに並ぶ文字列連結を「メモリを書くかもしれない呼び出し」
         #        として扱い、**ループ内の load を外に持ち上げられなくなる**
-        #   の 2 つが起きる。linalg.Matrix.check がまさにこれで、
-        #   行列積の内側ループから self.rows / self.cols / self.data の
-        #   読み出しが外に出せなかった。
+        #   の 2 つが起きる。
+        #   ⚠️ ②「linalg.Matrix.check の self.rows / self.cols / self.data が
+        #     ループ外に出せない」と第45章では書いていたが、**間違いだった**。
+        #     測ったところ、あの遅さの原因はインライン化のほう（上の第46章）。
         #   ⚠️ sema の never_returns_call と対になっている。片方だけ変えないこと。
         nr: str = ""
         if n.builtin == "pl_panic" or n.builtin == "pl_exit":
-            nr = " noreturn"
+            nr = " noreturn cold"
         self.declare_rt(self.llvm_type(rt) + " @" + n.builtin + "(" + argty + ")" + nr)
 
         v: str = self.gen_expr(arg_node)

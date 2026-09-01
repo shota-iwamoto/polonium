@@ -967,7 +967,7 @@ static char *gen_list_lit(Emitter *e, Node *n) {
 //
 // ★ 検査は消えません。null なら pl_none_fail へ飛びます。
 static char *gen_not_none(Emitter *e, char *obj) {
-    declare_rt(e, "void @pl_none_fail() noreturn");
+    declare_rt(e, "void @pl_none_fail() noreturn cold");
 
     int id = e->label_counter++;  // ★ 番号は最初に 1 回だけ確保する
     char ok_l[32], bad_l[32];
@@ -1011,7 +1011,7 @@ static char *gen_not_none(Emitter *e, char *obj) {
 // 戻り値は要素へのポインタ。
 static char *gen_index_addr(Emitter *e, char *obj, char *idx, const char *sty,
                             bool normalize) {
-    declare_rt(e, "void @pl_index_fail(i64, i64) noreturn");
+    declare_rt(e, "void @pl_index_fail(i64, i64) noreturn cold");
 
     char *lenp = new_tmp(e);
     sb_printf(&e->fn, "  %s = getelementptr i8, ptr %s, i64 8\n", lenp, obj);
@@ -2026,18 +2026,26 @@ static char *gen_builtin_call(Emitter *e, Node *n) {
 
     // declare を 1 回だけ出す
     //
+    // ★ 第46章：**cold** も付けます。noreturn は「戻らない」ことしか言わず、
+    //   インライン化の見積りには効きません。panic の手前に並ぶ
+    //   メッセージ組み立て（連結・数値→文字列）が呼び出し 6 回ぶんの
+    //   費用として数えられ、それを含む小さな検査メソッドが
+    //   **丸ごとインライン化を諦められて**いました。
+    //   cold を付けると、その経路は「まず通らない」ものとして扱われます。
+    //
     // ★ 第45章：**戻らない**組み込み（panic / exit）には noreturn を付けます。
     //   付けないと LLVM は「戻ってくるかもしれない」と見なし、
     //     ① panic の後ろの経路を生かしたままにする
     //     ② panic までに並ぶ文字列連結を「メモリを書くかもしれない呼び出し」
     //        として扱い、**ループ内の load を外に持ち上げられなくなる**
-    //   の 2 つが起きます。linalg.Matrix.check がまさにこれで、
-    //   行列積の内側ループから self.rows / self.cols / self.data の
-    //   読み出しが外に出せませんでした。
+    //   の 2 つが起きます。
+    //   ⚠️ ②「linalg.Matrix.check の self.rows / self.cols / self.data が
+    //     ループ外に出せない」と第45章では書いていましたが、**間違いでした**。
+    //     測ったところ、あの遅さの原因はインライン化のほうです（上の第46章）。
     //   ⚠️ sema の never_returns_call と対になっています。片方だけ変えないこと。
     const char *nr = (strcmp(b->impl, "pl_panic") == 0 ||
                       strcmp(b->impl, "pl_exit") == 0)
-                         ? " noreturn"
+                         ? " noreturn cold"
                          : "";
     StrBuf sig;
     sb_init(&sig);

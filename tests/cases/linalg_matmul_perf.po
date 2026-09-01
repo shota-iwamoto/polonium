@@ -1,0 +1,41 @@
+# OUTPUT: 16302.58788
+# EXIT: 0
+# FLAGS: -O2
+# 第46章：panic の経路がインライン化を止めていないこと
+#
+#   ⚠️ linalg.Matrix.get / set は Matrix.check を呼びます。その check の
+#     中にメッセージの組み立て（連結 4 回 ＋ str() 2 回）を直接書くと、
+#     check が「大きい」と見なされて get / set にインライン化されず、
+#     この 256³ の行列積が **143 ms → 62 ms** の差になりました。
+#
+#   ★ 直したのは 2 か所です。どちらが戻っても、ここで目に見えて遅くなります。
+#     ① codegen が panic / exit / pl_index_fail / pl_none_fail の宣言に
+#       付ける **cold**（src/codegen.c と selfhost/codegen.po）。
+#       noreturn だけでは足りません（インライン化の見積りに効かないため）。
+#     ② lib/linalg.po の Matrix.index_fail / len_fail への切り出し。
+#
+#   ⚠️ -O0 では誰もインライン化しないので差が出ません。# FLAGS: -O2 が要ります。
+#
+#   ★ 答えは list_index_perf.po（二重リスト版）と同じ値です。
+#     data の並べ方が違うだけで、同じ行列を掛けています。
+import linalg
+
+N: int = 256
+
+def make(seed: int) -> linalg.Matrix:
+    d: list[float] = []
+    s: int = seed
+    for i in range(N * N):
+        s = (s * 1103515 + 12345) % 2147483648
+        d.append(float(s % 1000) / 1000.0)
+    return linalg.Matrix(N, N, d)
+
+def main() -> int:
+    a: linalg.Matrix = make(1)
+    b: linalg.Matrix = make(7)
+    c: linalg.Matrix = linalg.matmul(a, b)
+    t: float = 0.0
+    for i in range(N):
+        t = t + c.get(i, i)
+    print(str(t))
+    return 0

@@ -81,6 +81,10 @@ def vcopy(a: list[float]) -> list[float]:
 
 # ⚠️ 長さが違えば panic。黙って短いほうに合わせると、間違いが
 #   「動くが結果がおかしい」形で残ってしまいます。
+# ⚠️ ここは Matrix.check と違い、**切り出していません**。
+#   same_len は add / sub / mul の**ループの外**で 1 回呼ばれるだけなので、
+#   インライン化されてもされなくても速さは変わりません。
+#   実際に測ったら、切り出したほうが少し遅くなりました（0.31 → 0.34 秒）。
 def same_len(a: list[float], b: list[float], who: str) -> None:
     if len(a) != len(b):
         panic("linalg." + who + ": 長さが違います（" +
@@ -296,8 +300,17 @@ class Matrix:
 
     def check(self, i: int, j: int) -> None:
         if i < 0 or i >= self.rows or j < 0 or j >= self.cols:
-            panic("linalg.Matrix: 添字が範囲外です（" + str(i) + ", " +
-                  str(j) + "）")
+            self.index_fail(i, j)
+
+    # ★ 第46章：**メッセージの組み立てはここに切り出してあります。**
+    #   check の中に直接書くと、連結と str() の呼び出し 6 回ぶんが
+    #   check の大きさとして数えられ、check が get / set に
+    #   インライン化されなくなります。get / set は行列積の内側ループから
+    #   1 周に 3 回呼ばれるので、これだけで **2.4 倍** 遅くなりました。
+    #   ⚠️ 検査そのものは減らしていません。分けただけです。
+    def index_fail(self, i: int, j: int) -> None:
+        panic("linalg.Matrix: 添字が範囲外です（" + str(i) + ", " +
+              str(j) + "）")
 
     # i 行目を取り出す（複製を返します）
     def row(self, i: int) -> list[float]:

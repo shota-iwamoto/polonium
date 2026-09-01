@@ -853,6 +853,55 @@ call void @pl_list_push_i64(ptr %t0, i64 42)
 ⚠️ `-flto` を足す案も試しましたが、**効果はほぼゼロ**でした
 （319 ms → 313 ms）。呼び出しを消すのはリンカではなく codegen の仕事です。
 
+#### 戻らない関数には `noreturn` と `cold` の両方を付ける `[ch46]`
+
+```llvm
+declare void @pl_panic(ptr) noreturn cold
+declare void @pl_exit(i64) noreturn cold
+declare void @pl_index_fail(i64, i64) noreturn cold
+declare void @pl_none_fail() noreturn cold
+```
+
+**この 2 つは別の働きをします。**
+
+| 属性 | LLVM に伝えること | これが無いと |
+|---|---|---|
+| `noreturn` | 呼んだら戻ってこない | panic の後ろの経路が生き、ループ内の load を外に出せない（第45章） |
+| `cold` | **その経路はまず通らない** | panic の手前の処理が**インライン化の費用として満額数えられる**（第46章） |
+
+**`cold` が無いと何が起きたか。** 利用者はふつう、失敗したときに
+役に立つメッセージを書きます。
+
+```python
+def check(self, i: int, j: int) -> None:
+    if i < 0 or i >= self.rows or j < 0 or j >= self.cols:
+        panic("linalg.Matrix: 添字が範囲外です（" + str(i) + ", " + str(j) + "）")
+```
+
+当たりの経路は比較 4 つですが、**外れの経路が連結 4 回 ＋ `str()` 2 回**です。
+LLVM はこれを `check` の大きさとして数え、既定のしきい値を超えるので
+`check` を**丸ごとインライン化しません**。`check` は `Matrix.get` / `set` から、
+つまり行列積の内側ループから 1 周に 3 回呼ばれていました。
+
+`cold` を付けるとその経路が割り引かれ、`check` は `get` / `set` ごと
+呼び出し元に畳まれます。**行列積 256³ が 143 ms → 62 ms** になりました。
+
+⚠️ **利用者側にも同じ形があります。** メッセージの組み立てを検査関数の中に
+直接書くと、`cold` を付けてもその関数の中の連結は数えられます。
+`lib/linalg.po` では `Matrix.index_fail` として**別関数に切り出して**あります。
+片方だけでは効きません（切り出しだけでは 140 ms のまま、`cold` だけでは
+100 ms、両方で 62 ms）。
+
+⚠️ ただし**切り出す価値があるのは「ループの中から呼ばれる検査」だけ**です。
+`linalg.same_len` は `add` / `sub` / `mul` のループの**外**で 1 回呼ばれる
+だけなので、切り出しても速くなりません（測ったら 0.31 → 0.34 秒で、
+少し遅くなったので戻しました）。
+
+⚠️ **別名解析（TBAA）は試したうえで入れていません。** クラスのフィールド／
+list のヘッダ／list の要素に別々の型タグを付けて測りましたが、
+**142 ms → 146 ms で効果はゼロ**でした。原因はメモリの別名ではなく
+インライン化だった、ということです。
+
 ### 8.4 class `[ch12]`
 
 ```python
