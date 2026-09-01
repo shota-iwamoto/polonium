@@ -26,6 +26,11 @@
 #define NULL ((void *)0)
 #endif
 
+// long long の最小値。<limits.h> を引かずに済ませます
+// （-9223372036854775808 と直に書くと、まず正の定数を作ってから否定する規則の
+//   ため、そのままでは long long に収まりません）。
+#define PL_LLONG_MIN (-9223372036854775807LL - 1)
+
 // ── 自前の小道具（libc の代わり）────────────────────────────
 //
 // ★ freestanding でも clang は memcpy / memset の呼び出しを生成することが
@@ -396,14 +401,38 @@ char *pl_chr(long long v) {
 //   メッセージを出して死ぬほうがずっと親切です。
 //   分岐を IR に出さず、ランタイム関数に押し込むのが R10 の実践です。
 
+// ★ 第46章：'//' は **切り捨て（truncate）ではなく切り下げ（floor）** です。
+//
+//   C の '/' は 0 の方向へ丸めるので -7 / 2 == -3 になります。Polonium は
+//   Python と同じく負の無限大の方向へ丸め、-7 // 2 == -4 とします。
+//   「Python の書きやすさは絶対」（ロードマップ §0）に従った判断です。
+//
+//   ⚠️ 商だけ直して余りを直さないと a == (a // b) * b + a % b が崩れます。
+//     この等式が成り立つことは tests/cases/floordiv_sign.po で固定しています。
+//
+//   ⚠️ 検査は 1 つ増えますが、どのみち 0 除算のためにこの関数を通るので
+//     命令数の増分だけです（呼び出しは元から 1 回）。
 long long pl_floordiv(long long a, long long b) {
     if (b == 0) pl_panic("division by zero");
-    return a / b;
+    // ★ PL_LLONG_MIN / -1 は C では未定義動作で、実際には SIGFPE で落ちます。
+    //   何が起きたか分からないまま死ぬより、名前を付けて死にます（規約 R10）。
+    if (b == -1 && a == PL_LLONG_MIN) pl_panic("integer overflow in //");
+    long long q = a / b;
+    // 符号が食い違っていて、割り切れていないときだけ 1 つ下げる。
+    if ((a % b != 0) && ((a < 0) != (b < 0))) q--;
+    return q;
 }
 
+// 余りは **除数と同じ符号** になります（Python と同じ）。
+//   -7 % 2 == 1 / 7 % -2 == -1
 long long pl_mod(long long a, long long b) {
     if (b == 0) pl_panic("division by zero");
-    return a % b;
+    // ★ こちらの答えは 0 で確定していますが、a % b の計算自体が
+    //   PL_LLONG_MIN % -1 で落ちるので、割る前に返します。
+    if (b == -1) return 0;
+    long long r = a % b;
+    if (r != 0 && ((r < 0) != (b < 0))) r += b;
+    return r;
 }
 
 // 繰り返し二乗法。ループがあるので当然ランタイム側（R10）。
