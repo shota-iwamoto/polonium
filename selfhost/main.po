@@ -35,6 +35,7 @@ class Options:
     opt_level: str
     stage: int
     keep_ll: bool
+    no_ovf: bool     # 第47章：--no-overflow-check
 
     def init(self) -> None:
         self.input_ = ""
@@ -42,6 +43,7 @@ class Options:
         self.opt_level = "-O0"
         self.stage = STAGE_ALL
         self.keep_ll = False
+        self.no_ovf = False
 
 
 # ★ --version が出す内容。対になる定義: src/main.c の print_version
@@ -66,6 +68,8 @@ def usage(status: int) -> None:
     print("  --dump-ast      AST を S 式で表示して終了（構文解析のデバッグ用）")
     print("  --keep-ll       実行ファイル生成後も .ll を残す")
     print("  --check         型検査までで止める（エラーが無ければ何も出さない）")
+    print("  --no-overflow-check")
+    print("                  整数の + - * の桁あふれを検査しない（既定は検査する）")
     print("  -O0|-O1|-O2|-O3 clang に渡す最適化レベル（既定: -O0）")
     print("  -h, --help      この使い方を表示")
     print("  --version       版番号と target triple を表示")
@@ -101,6 +105,9 @@ def parse_args(args: list[str]) -> Options:
             o.keep_ll = True
         elif a == "--check":
             o.stage = STAGE_CHECK
+        # ★ 第47章：既定は検査あり。速さのために外したいときだけ付ける。
+        elif a == "--no-overflow-check":
+            o.no_ovf = True
         elif a == "-O0" or a == "-O1" or a == "-O2" or a == "-O3":
             o.opt_level = a
         elif len(a) > 1 and strings.startswith(a, "-"):
@@ -190,7 +197,7 @@ def main() -> int:
         name: str = ""
         if mm.name == entry.name:
             name = main_ir
-        ir: str = codegen.codegen(mm, name, triple)
+        ir: str = codegen.codegen(mm, name, triple, opt.no_ovf)
 
         if opt.stage == STAGE_EMIT_IR:
             # -S : IR を出して終了。複数モジュールなら区切りを入れて並べる

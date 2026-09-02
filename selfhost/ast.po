@@ -560,6 +560,10 @@ class Node:
     can_fail: bool       # ND_CALL / ND_METHOD : 呼び出し先が raises 関数か
     err_tag: int         # ND_EXCEPT / ND_RAISE : エラー型の ID
 
+    # ★ 第47章：wrap_add / wrap_sub / wrap_mul（桁あふれを検査しない算術）。
+    #   ⚠️ 旗は**末尾に足す**（列挙値と同じ理由。C 版と揃えるため）。
+    is_wrap: bool
+
     # 兄弟（文のリスト・引数リストは next で繋ぐ）
     next: Node | None
 
@@ -581,6 +585,7 @@ class Node:
         self.is_indirect = False    # 第38章
         self.is_minmax = False      # 第39章
         self.is_list_str = False    # 第44章
+        self.is_wrap = False        # 第47章
         self.targs = None           # 第40章
         self.ifaces = None          # 第41章
         self.is_iface_call = False  # 第41章

@@ -48,6 +48,9 @@ typedef struct {
     bool prop_used;          // 伝播ブロックが使われたか（使われたときだけ出す）
     struct TryCtxG *try_ctx; // 今いる try（入れ子になるので鎖）
 
+    // ── 第47章：整数の桁あふれ検査 ──
+    bool no_ovf;            // --no-overflow-check（検査を出さない）
+
     // ── 第25章：解放（drop）──
     bool drop;              // --drop（解放を挿入するか）
     struct ScopeCtx *scope; // 今いるスコープ（出口で解放するものの一覧）
@@ -453,6 +456,12 @@ static char *gen_index(Emitter *e, Node *n);
 static char *gen_method(Emitter *e, Node *n);
 static char *gen_field(Emitter *e, Node *n);
 
+// 第47章：定義は gen_index の手前。単項マイナスと二項演算のほうが
+// 先に来るので、宣言だけここに置く。
+static char *gen_checked_arith(Emitter *e, const char *intr, const char *l,
+                               const char *r, int op);
+static const char *ovf_intr(OpKind op);
+
 static char *gen_expr(Emitter *e, Node *n) {
     switch (n->kind) {
         case ND_FLOAT:
@@ -577,9 +586,18 @@ static char *gen_expr(Emitter *e, Node *n) {
             else if (is_compare(n->op))
                 sb_printf(&e->fn, "  %s = icmp %s %s %s, %s\n", t,
                           icmp_pred(n->op, ot), llvm_type(ot), l, r);
-            else
+            else {
+                // ★ 第47章：int の + - * は桁あふれを検査します。
+                //   ⚠️ 意図的に折り返したいときは wrap_add / wrap_sub /
+                //     wrap_mul を使ってください（そちらは gen_call で出します）。
+                const char *intr =
+                    ot->kind == TY_INT && !e->no_ovf ? ovf_intr(n->op) : NULL;
+                if (intr) return gen_checked_arith(e, intr, l, r, n->op == OP_ADD   ? 0
+                                                                 : n->op == OP_SUB ? 1
+                                                                                   : 2);
                 sb_printf(&e->fn, "  %s = %s %s %s, %s\n", t, llvm_binop(n),
                           llvm_type(ot), l, r);
+            }
             return t;
         }
 
@@ -657,6 +675,8 @@ static char *gen_expr(Emitter *e, Node *n) {
                 sb_printf(&e->fn, "  %s = fneg double %s\n", t, v);
             } else if (n->op == OP_NEG) {
                 // ⚠️ LLVM に整数の neg 命令はありません。0 からの減算で表現します。
+                // ★ 第47章：-(-9223372036854775808) は表せないので検査します。
+                if (!e->no_ovf) return gen_checked_arith(e, "ssub", "0", v, 3);
                 sb_printf(&e->fn, "  %s = sub i64 0, %s\n", t, v);
             } else if (n->op == OP_BITNOT) {
                 // ~x は全ビット反転 = x XOR -1（-1 は全ビット 1）
@@ -1052,6 +1072,60 @@ static char *gen_index_addr(Emitter *e, char *obj, char *idx, const char *sty,
     sb_printf(&e->fn, "  %s = getelementptr %s, ptr %s, i64 %s\n", ep, sty, data,
               idx);
     return ep;
+}
+
+// ── 整数の桁あふれを検査する（第47章）─────────────────
+//
+// ★ 第45章・第46章と同じ考え方で、**検査ごと IR に出します**（規約 R10 の例外）。
+//   ランタイム関数を呼ぶ形にすると、+ と * はこの言語で最も回数の多い
+//   演算なので、呼び出しの費用が支配的になります。
+//
+// ★ 当たりの経路は `llvm.*.with.overflow` 1 命令 ＋ 予測の当たる分岐だけです。
+//   実測で **2.4%**（整数ループ 2000 万回が 166 → 170 ms）でした。
+//
+// ⚠️ 外れの経路の pl_overflow_fail は **noreturn cold** です。
+//   cold が無いと、この分岐の費用が囲む関数のインライン化の見積りに
+//   入ります（第46章で linalg.Matrix.check が丸ごと落ちた件と同じ）。
+//
+// op は pl_overflow_fail に渡す番号です（0:+ 1:- 2:* 3:単項-）。
+static char *gen_checked_arith(Emitter *e, const char *intr, const char *l,
+                               const char *r, int op) {
+    declare_rt(e, "void @pl_overflow_fail(i64) noreturn cold");
+    StrBuf sig;
+    sb_init(&sig);
+    sb_printf(&sig, "{i64, i1} @llvm.%s.with.overflow.i64(i64, i64)", intr);
+    declare_rt(e, sb_str(&sig));
+
+    char *pair = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call {i64, i1} @llvm.%s.with.overflow.i64(i64 %s, i64 %s)\n",
+              pair, intr, l, r);
+    char *val = new_tmp(e);
+    sb_printf(&e->fn, "  %s = extractvalue {i64, i1} %s, 0\n", val, pair);
+    char *bad = new_tmp(e);
+    sb_printf(&e->fn, "  %s = extractvalue {i64, i1} %s, 1\n", bad, pair);
+
+    int id = e->label_counter++;  // ★ 番号は最初に 1 回だけ確保する
+    char ok_l[32], bad_l[32];
+    snprintf(ok_l, sizeof(ok_l), "ovf.ok.%d", id);
+    snprintf(bad_l, sizeof(bad_l), "ovf.bad.%d", id);
+    emit_cond_br(e, bad, bad_l, ok_l);
+
+    emit_label(e, bad_l);
+    sb_printf(&e->fn, "  call void @pl_overflow_fail(i64 %d)\n", op);
+    sb_printf(&e->fn, "  unreachable\n");
+    e->terminated = true;
+
+    emit_label(e, ok_l);
+    return val;
+}
+
+// 整数の + - * で、検査つきにするかどうか。
+// ⚠️ float・str・list の + * はここに来ません（呼び出し側で分けています）。
+static const char *ovf_intr(OpKind op) {
+    if (op == OP_ADD) return "sadd";
+    if (op == OP_SUB) return "ssub";
+    if (op == OP_MUL) return "smul";
+    return NULL;
 }
 
 static char *gen_index(Emitter *e, Node *n) {
@@ -2187,6 +2261,21 @@ static char *gen_call(Emitter *e, Node *n) {
         return t;
     }
 
+    // ★ 第47章：wrap_add / wrap_sub / wrap_mul。
+    //   **桁あふれを検査せず 2 の補数で折り返します。**
+    //   法 2⁶⁴ の計算（線形合同法など）を書くための逃げ道です。
+    //   ⚠️ min / max と同じく 2 引数なので、組み込みの表では表せません。
+    if (n->is_wrap) {
+        char *a = gen_expr(e, n->args);
+        char *b = gen_expr(e, n->args->next);
+        const char *ins = strcmp(n->name, "wrap_add") == 0   ? "add"
+                          : strcmp(n->name, "wrap_sub") == 0 ? "sub"
+                                                             : "mul";
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = %s i64 %s, %s\n", t, ins, a, b);
+        return t;
+    }
+
     // ★ 第44章：print(xs) / str(xs)
     if (n->is_list_str) {
         Type *el = n->args->type->elem;
@@ -2688,13 +2777,14 @@ static void gen_c_main(Emitter *e, const char *main_ir_name) {
 // ★ 第13章：「1 ファイル = 1 モジュール = 1 つの .ll」（13.2 節）。
 //   import したモジュールのものは、使ったぶんだけ declare / 型定義の複製が
 //   自動で付いてきます（class_type / declare_extern が「出済みか」を見るため）。
-char *codegen(Module *mod, const char *main_ir_name, bool drop,
+char *codegen(Module *mod, const char *main_ir_name, bool drop, bool no_ovf,
               const char *triple) {
     Node *ast = mod->ast;
 
     Emitter e = {0};
     e.ast = ast;
-    e.drop = drop;  // 第25章：解放を挿入するか
+    e.drop = drop;      // 第25章：解放を挿入するか
+    e.no_ovf = no_ovf;  // 第47章：桁あふれの検査を出さないか
     sb_init(&e.header);
     sb_init(&e.globals);
     sb_init(&e.decls);

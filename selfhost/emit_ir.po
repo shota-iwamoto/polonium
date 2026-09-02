@@ -1,8 +1,10 @@
 # emit_ir.po — stage1 のコード生成器を動かす入口（第19章）
 #
-#   ./build/stage1-codegen foo.po
+#   ./build/stage1-codegen [--no-overflow-check] foo.po
 #
 # ★ C 版の `poloniumc -S foo.po` と**バイト単位で同じ出力**を目指します。
+#   ⚠️ だから C 版が受け取る「IR の中身を変えるオプション」は、
+#     ここでも受け取れる必要があります（第47章の --no-overflow-check）。
 import io
 import sys
 import strings
@@ -16,7 +18,20 @@ def main() -> int:
         print("使い方: stage1-codegen <入力.po>")
         return 1
 
-    path: str = args[1]
+    # ⚠️ 引数の形は C 版に合わせます（オプションは入力ファイルより前）。
+    path: str = ""
+    no_ovf: bool = False
+    ai: int = 1
+    while ai < len(args):
+        a: str = args[ai]
+        if a == "--no-overflow-check":
+            no_ovf = True
+        else:
+            path = a
+        ai = ai + 1
+    if len(path) == 0:
+        print("使い方: stage1-codegen [--no-overflow-check] <入力.po>")
+        return 1
 
     # ⚠️ target triple はビルド時に埋め込めない（プリプロセッサが無い）ので、
     #   環境変数から受け取ります。第18章の PLC_LIB_DIR と同じ手です。
@@ -47,6 +62,6 @@ def main() -> int:
         name: str = ""
         if mm.name == entry.name:
             name = main_ir
-        io.print_raw(codegen.codegen(mm, name, triple))
+        io.print_raw(codegen.codegen(mm, name, triple, no_ovf))
         m = mm.next
     return 0

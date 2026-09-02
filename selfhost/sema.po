@@ -2277,6 +2277,36 @@ class Sema:
             n.type = m0
             return m0
 
+        # ★ 第47章：wrap_add / wrap_sub / wrap_mul。
+        #   **桁あふれを検査せず 2 の補数で折り返す**算術。
+        #   ⚠️ 既定の + - * は桁あふれで panic する。折り返しを
+        #     「そういう計算だ」として使いたいところ（法 2⁶⁴ の線形合同法など）
+        #     のための逃げ道で、**書いた人の意図が演算ごとに見える。**
+        #   ⚠️ min / max と同じく 2 引数なので、組み込みの表では表せない。
+        if is_wrap_name(n.name) and self.lookup_func(n.name) is None:
+            nargsw: int = count_siblings(n.args)
+            if nargsw != 2:
+                diag.error_at_hint(unwrap_tok(n.tok),
+                                   n.name + "(a, b) の形で使ってください",
+                                   n.name + " は 2 個の引数を取ります")
+            w0: ast.Type = self.check_expr(unwrap_node(n.args))
+            w1n: ast.Node = unwrap_node(unwrap_node(n.args).next)
+            w1: ast.Type = self.check_expr(w1n)
+            # ⚠️ **問題のある側の引数**を指す（2 つとも int でないときは左から）
+            if w0.kind != ast.TY_INT:
+                diag.error_at_hint(unwrap_tok(unwrap_node(n.args).tok),
+                                   "折り返す算術が使えるのは int だけです",
+                                   "'" + ast.type_name(w0) + "' 型には使えません")
+            if w1.kind != ast.TY_INT:
+                diag.error_at_hint(unwrap_tok(w1n.tok),
+                                   "折り返す算術が使えるのは int だけです",
+                                   "'" + ast.type_name(w1) + "' 型には使えません")
+            n.builtin = ""
+            n.ir_name = ""
+            n.is_wrap = True
+            n.type = self.ty_int()
+            return self.ty_int()
+
         # ── 第28章：rc(x) — 共有所有にくるむ ──
         #
         # ★ 型が「引数の型から作られる」ので、組み込み関数の表では表せません
@@ -3389,6 +3419,10 @@ def sema_program(mods: module.Module | None, entry: module.Module | None) -> Non
 #
 # ★ 「型の上では None かもしれないが、実際には必ずある」ものを 1 か所で開きます。
 #   C 版の UNREACHABLE() と同じ役目です（ch17 17.4 節）。
+
+# ★ 第47章：折り返す算術の名前か（wrap_add / wrap_sub / wrap_mul）
+def is_wrap_name(name: str) -> bool:
+    return name == "wrap_add" or name == "wrap_sub" or name == "wrap_mul"
 
 def count_siblings(first: ast.Node | None) -> int:
     n: int = 0

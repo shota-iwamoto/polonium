@@ -71,6 +71,9 @@ class Emitter:
     try_stack: list[ast.Node]      # 今いる try（入れ子）
     try_labels: list[str]          # その振り分けラベル
 
+    # ── 第47章：整数の桁あふれ検査 ──
+    no_ovf: bool             # --no-overflow-check（検査を出さない）
+
     def init(self, triple: str) -> None:
         self.header = []
         self.globals_ = []
@@ -93,6 +96,7 @@ class Emitter:
         self.prop_used = False
         self.try_stack = []
         self.try_labels = []
+        self.no_ovf = False     # 第47章（codegen() が上書きする）
 
     # プリミティブ型（型検査は終わっているので、ここでは「表現」だけ要る）
     def int_type(self) -> ast.Type:
@@ -691,6 +695,19 @@ class Emitter:
             self.emit("  " + t + " = " + self.llvm_binop_f(n.op) +
                       " double " + l + ", " + r + "\n")
         else:
+            # ★ 第47章：int の + - * は桁あふれを検査する。
+            #   ⚠️ 意図的に折り返したいときは wrap_add / wrap_sub / wrap_mul
+            #     を使う（そちらは gen_call で出す）。
+            intr: str = ""
+            if ot.kind == ast.TY_INT and not self.no_ovf:
+                intr = self.ovf_intr(n.op)
+            if intr != "":
+                code: int = 2
+                if n.op == ast.OP_ADD:
+                    code = 0
+                elif n.op == ast.OP_SUB:
+                    code = 1
+                return self.gen_checked_arith(intr, l, r, code)
             self.emit("  " + t + " = " + self.llvm_binop(n.op) + " " +
                       self.llvm_type(ot) + " " + l + ", " + r + "\n")
         return t
@@ -709,6 +726,9 @@ class Emitter:
             self.emit("  " + t + " = fneg double " + v + "\n")
         elif n.op == ast.OP_NEG:
             # ⚠️ LLVM に整数の neg 命令は無い。0 からの減算で表す
+            # ★ 第47章：-(-9223372036854775808) は表せないので検査する
+            if not self.no_ovf:
+                return self.gen_checked_arith("ssub", "0", v, 3)
             self.emit("  " + t + " = sub i64 0, " + v + "\n")
         elif n.op == ast.OP_BITNOT:
             self.emit("  " + t + " = xor i64 " + v + ", -1\n")
@@ -873,6 +893,56 @@ class Emitter:
     #   len >= 0 なので、i を符号なしとして見れば負の i は巨大な値に
     #   なり、i < 0 も i >= len も icmp ult ひとつで捕まる。
     #
+    # ── 整数の桁あふれを検査する（第47章）──
+    #
+    # ★ 第45章・第46章と同じ考え方で、**検査ごと IR に出す**（規約 R10 の例外）。
+    #   ランタイム関数を呼ぶ形にすると、+ と * はこの言語で最も回数の多い
+    #   演算なので、呼び出しの費用が支配的になる。
+    #
+    # ★ 当たりの経路は llvm.*.with.overflow 1 命令 ＋ 予測の当たる分岐だけ。
+    #   実測で 2.4%（整数ループ 2000 万回が 166 → 170 ms）。
+    #
+    # ⚠️ 外れの経路の pl_overflow_fail は **noreturn cold**。cold が無いと
+    #   この分岐の費用が囲む関数のインライン化の見積りに入る（第46章）。
+    #
+    # op は pl_overflow_fail に渡す番号（0:+ 1:- 2:* 3:単項-）。
+    def gen_checked_arith(mut self, intr: str, l: str, r: str, op: int) -> str:
+        self.declare_rt("void @pl_overflow_fail(i64) noreturn cold")
+        self.declare_rt("{i64, i1} @llvm." + intr +
+                        ".with.overflow.i64(i64, i64)")
+
+        pair: str = self.new_tmp()
+        self.emit("  " + pair + " = call {i64, i1} @llvm." + intr +
+                  ".with.overflow.i64(i64 " + l + ", i64 " + r + ")\n")
+        val: str = self.new_tmp()
+        self.emit("  " + val + " = extractvalue {i64, i1} " + pair + ", 0\n")
+        bad: str = self.new_tmp()
+        self.emit("  " + bad + " = extractvalue {i64, i1} " + pair + ", 1\n")
+
+        id_: int = self.label_counter    # ★ 番号は最初に 1 回だけ確保する
+        self.label_counter = self.label_counter + 1
+        ok_l: str = "ovf.ok." + str(id_)
+        bad_l: str = "ovf.bad." + str(id_)
+        self.emit_cond_br(bad, bad_l, ok_l)
+
+        self.emit_label(bad_l)
+        self.emit("  call void @pl_overflow_fail(i64 " + str(op) + ")\n")
+        self.emit("  unreachable\n")
+        self.terminated = True
+
+        self.emit_label(ok_l)
+        return val
+
+    # 整数の + - * に対応する桁あふれ検査つき命令の名前。無ければ ""。
+    def ovf_intr(self, op: int) -> str:
+        if op == ast.OP_ADD:
+            return "sadd"
+        if op == ast.OP_SUB:
+            return "ssub"
+        if op == ast.OP_MUL:
+            return "smul"
+        return ""
+
     # normalize が True なら負の添字を末尾から数え直す（第39章）。
     # 戻り値は要素へのポインタ。
     def gen_index_addr(mut self, obj: str, idx0: str, sty: str,
@@ -1583,6 +1653,22 @@ class Emitter:
 
     def gen_call(mut self, n: ast.Node) -> str:
         # ★ 第39章：min / max。**分岐を作らず select 1 命令**で済ませる
+        # ★ 第47章：wrap_add / wrap_sub / wrap_mul。
+        #   **桁あふれを検査せず 2 の補数で折り返す。**
+        #   法 2⁶⁴ の計算（線形合同法など）を書くための逃げ道。
+        #   ⚠️ min / max と同じく 2 引数なので、組み込みの表では表せない。
+        if n.is_wrap:
+            wa: str = self.gen_expr(node_of(n.args))
+            wb: str = self.gen_expr(node_of(node_of(n.args).next))
+            wins: str = "mul"
+            if n.name == "wrap_add":
+                wins = "add"
+            elif n.name == "wrap_sub":
+                wins = "sub"
+            wt: str = self.new_tmp()
+            self.emit("  " + wt + " = " + wins + " i64 " + wa + ", " + wb + "\n")
+            return wt
+
         if n.is_minmax:
             ma: str = self.gen_expr(node_of(n.args))
             mb: str = self.gen_expr(node_of(node_of(n.args).next))
@@ -2040,9 +2126,11 @@ class Emitter:
 # ── 入口 ───────────────────────────────────────────────────
 #
 # モジュール 1 つぶんの IR を作る（★ 1 ファイル = 1 モジュール = 1 つの .ll）
-def codegen(mod: module.Module, main_ir_name: str, triple: str) -> str:
+def codegen(mod: module.Module, main_ir_name: str, triple: str,
+            no_ovf: bool) -> str:
     root: ast.Node = node_of(mod.ast)
     e: Emitter = Emitter(triple)
+    e.no_ovf = no_ovf    # 第47章
 
     # ① ヘッダ
     e.header.append("; Generated by " + langinfo.cc() + "\n")

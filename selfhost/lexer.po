@@ -285,7 +285,12 @@ class Lexer:
             # ⚠️ C 版は strtoll + errno。ここは自分で検出する。
             if v > (9223372036854775807 - d) // base:
                 overflow = True
-            v = v * base + d
+            # ★ 第47章：あふれると分かったら**積むのをやめる**。
+            #   以前は積み続けて 2 の補数で折り返していたが、
+            #   いまは `*` が桁あふれで panic する。
+            #   ⚠️ あふれた時点で v は使わない（下で overflow を見て失敗させる）。
+            if not overflow:
+                v = v * base + d
             n = n + 1
             self.pos = self.pos + 1
 

@@ -364,6 +364,9 @@ struct Node {
 
     // ★ 第39章：min / max（2 引数なので組み込みの表に載らない）
     bool is_minmax;
+    // ★ 第47章：wrap_add / wrap_sub / wrap_mul（桁あふれを検査しない算術）。
+    //   ⚠️ 旗は**末尾に足します**（列挙値と同じ理由。selfhost 側と揃えるため）。
+    bool is_wrap;
 
     // ★ 第44章：print(list) / str(list)（要素の型で呼び分ける）
     bool is_list_str;

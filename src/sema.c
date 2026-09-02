@@ -1701,6 +1701,12 @@ const Builtin BUILTINS[] = {
     {NULL, 0, 0, NULL},
 };
 
+// ★ 第47章：折り返す算術の名前か（wrap_add / wrap_sub / wrap_mul）
+static bool is_wrap_name(const char *name) {
+    return strcmp(name, "wrap_add") == 0 || strcmp(name, "wrap_sub") == 0 ||
+           strcmp(name, "wrap_mul") == 0;
+}
+
 // その名前の組み込みが 1 つでもあるか
 bool is_builtin_name(const char *name) {
     for (int i = 0; BUILTINS[i].name; i++)
@@ -2519,6 +2525,36 @@ static Type *check_call(Sema *s, Node *n) {
         n->is_minmax = true;
         n->type = a0;
         return a0;
+    }
+
+    // ★ 第47章：wrap_add / wrap_sub / wrap_mul。
+    //   **桁あふれを検査せず 2 の補数で折り返す**算術です。
+    //   ⚠️ 既定の + - * は桁あふれで panic します。折り返しを
+    //     「そういう計算だ」として使いたいところ（法 2⁶⁴ の線形合同法など）
+    //     のための逃げ道で、**書いた人の意図が演算ごとに見えます。**
+    //   ⚠️ min / max と同じく 2 引数なので、組み込みの表では表せません。
+    if (is_wrap_name(n->name) && !lookup_func(s, n->name)) {
+        int nargs = 0;
+        for (Node *a = n->args; a; a = a->next) nargs++;
+        if (nargs != 2)
+            error_at_hint(n->tok, diag_fmt("%s(a, b) の形で使ってください", n->name),
+                          diag_fmt("%s は 2 個の引数を取ります", n->name));
+        Type *a0 = check_expr(s, n->args);
+        Type *a1 = check_expr(s, n->args->next);
+        // ⚠️ **問題のある側の引数**を指します（2 つとも int でないときは左から）
+        if (a0->kind != TY_INT)
+            error_at_hint(n->args->tok,
+                          "折り返す算術が使えるのは int だけです",
+                          "'%s' 型には使えません", type_name(a0));
+        if (a1->kind != TY_INT)
+            error_at_hint(n->args->next->tok,
+                          "折り返す算術が使えるのは int だけです",
+                          "'%s' 型には使えません", type_name(a1));
+        n->builtin = NULL;
+        n->ir_name = NULL;
+        n->is_wrap = true;
+        n->type = ty_int;
+        return ty_int;
     }
 
     // ── 第28章：rc(x) — 共有所有にくるむ ──

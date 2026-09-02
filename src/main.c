@@ -74,6 +74,8 @@ static void usage(int status) {
             "  --deny-mut      読み取り専用の借用への書き換えを警告ではなくエラーにする\n"
             "  --explain-mut   呼び出しで変更される実引数を一覧表示して終了\n"
             "  --drop          スコープの出口に解放（drop）を挿入する\n"
+            "  --no-overflow-check\n"
+            "                  整数の + - * の桁あふれを検査しない（既定は検査する）\n"
             "  -c              リンクせずオブジェクト（.o）を出す\n"
             "  --target=<t>    生成する IR の target triple を指定する\n"
             "                  （例: --target=riscv64-unknown-elf）\n"
@@ -103,6 +105,7 @@ typedef struct {
     int deny_borrow;  // --deny-borrow（第23章）
     int deny_mut;     // --deny-mut（第24章）
     int drop;         // --drop（第25章。解放を挿入する）
+    int no_ovf;       // --no-overflow-check（第47章。桁あふれの検査を出さない）
     const char *target;  // --target=<triple>（第31章。ベアメタル向け）
     int emit_obj;        // -c（リンクせずオブジェクトを出す。第31章）
 } Options;
@@ -141,6 +144,8 @@ static Options parse_args(int argc, char **argv) {
         if (strcmp(a, "--deny-mut") == 0) { o.deny_mut = 1; continue; }
         // ★ 第25章：解放（drop）の挿入。既定では入れません（決定 D16）。
         if (strcmp(a, "--drop") == 0) { o.drop = 1; continue; }
+        // ★ 第47章：既定は検査あり。速さのために外したいときだけ付ける。
+        if (strcmp(a, "--no-overflow-check") == 0) { o.no_ovf = 1; continue; }
         // ★ 第31章：ベアメタル向け。リンクは自分でやるので -c で止める。
         if (strcmp(a, "-c") == 0) { o.emit_obj = 1; continue; }
         if (strncmp(a, "--target=", 9) == 0) { o.target = a + 9; continue; }
@@ -310,7 +315,7 @@ int main(int argc, char **argv) {
     // ── ④ コード生成（モジュールごとに 1 本の .ll）──
     for (Module *m = mods; m; m = m->next) {
         const char *entry_main = (m == entry && !no_runtime) ? sb_str(&main_ir) : NULL;
-        char *ir = codegen(m, entry_main, opt.drop != 0, triple);
+        char *ir = codegen(m, entry_main, opt.drop != 0, opt.no_ovf != 0, triple);
 
         if (opt.stage == STAGE_EMIT_IR) {
             // -S : IR を出して終了。複数モジュールなら区切りを入れて並べる。

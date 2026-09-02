@@ -21,6 +21,7 @@
 //    既存コード（selfhost/ / lib/）はまだ v1 の参照セマンティクス前提なので、
 //    第26章で移行を終えるまで、解放は **opt-in** にしてあります（決定 D16）。
 //   triple       : 生成する IR の target triple（第31章。--target / pragma target）
-char *codegen(Module *mod, const char *main_ir_name, bool drop, const char *triple);
+char *codegen(Module *mod, const char *main_ir_name, bool drop, bool no_ovf,
+              const char *triple);
 
 #endif  // PLC_CODEGEN_H

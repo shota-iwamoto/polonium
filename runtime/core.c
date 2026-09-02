@@ -355,7 +355,20 @@ char *pl_str_from_float(double v) {
 // ⚠️ float → int は **0 方向への切り捨て**です（-1.7 → -1）。
 //    Python の int() と同じで、round() ではありません。
 double pl_float_from_int(long long v) { return (double)v; }
-long long pl_int_from_float(double v) { return (long long)v; }
+// float → int（0 方向へ切り捨て）
+//
+// ★ 第47章：**範囲の外を黙って通しません。** C の (long long) キャストは
+//   範囲外だと未定義動作で、実際には int の最小値が返っていました
+//   （int(1.0e30) が -9223372036854775808）。NaN も同じです。
+//   ⚠️ 境界は正確です。9223372036854775808.0（＝ int の最大値 + 1）は
+//     double でちょうど表せるので、これ以上を弾けば足ります。
+//     最小値のほうは -9223372036854775808.0 が表せるので、そのものは通します。
+long long pl_int_from_float(double v) {
+    if (v != v) pl_panic("int(): not a number (NaN)");
+    if (v >= 9223372036854775808.0 || v < -9223372036854775808.0)
+        pl_panic("int(): out of range");
+    return (long long)v;
+}
 
 char *pl_str_from_bool(long long v) {
     return pl_str_from_cstr(v ? "True" : "False");
@@ -373,13 +386,27 @@ long long pl_str_to_int(const char *s) {
     }
     if (*p < '0' || *p > '9') pl_panic("int(): not a number");
 
-    long long v = 0;
+    // ★ 第47章：**桁があふれたら panic します。**
+    //   int("99999999999999999999") が黙って 7766279631452241919 に
+    //   なっていました。
+    //   ⚠️ 負の側は 1 つ広い（-9223372036854775808 まで）ので、
+    //     符号を見て上限を変えます。累算は符号なしで行い、
+    //     1 桁進めるたびに上限と比べます。
+    unsigned long long limit = neg ? 9223372036854775808ULL
+                                   : 9223372036854775807ULL;
+    unsigned long long v = 0;
     while (*p >= '0' && *p <= '9') {
-        v = v * 10 + (*p - '0');
+        unsigned long long d = (unsigned long long)(*p - '0');
+        if (v > (limit - d) / 10ULL)
+            pl_panic("int(): out of range");
+        v = v * 10ULL + d;
         p++;
     }
     if (*p != '\0') pl_panic("int(): not a number");
-    return neg ? -v : v;
+    // ⚠️ -9223372036854775808 は long long の正の側に無いので、
+    //   符号なしのまま否定してから変換します。
+    if (neg) return (long long)(0ULL - v);
+    return (long long)v;
 }
 
 long long pl_ord(const char *s) {
@@ -425,6 +452,22 @@ long long pl_floordiv(long long a, long long b) {
 
 // 余りは **除数と同じ符号** になります（Python と同じ）。
 //   -7 % 2 == 1 / 7 % -2 == -1
+// ── 桁あふれ（第47章）────────────────────────────────────
+//
+// ★ codegen が出す `llvm.sadd/ssub/smul.with.overflow` の失敗側から呼ばれます。
+//   ⚠️ **戻りません。** IR は直後に unreachable を置きます。
+//   ⚠️ 宣言には noreturn と cold の両方が付きます（第46章）。付けないと
+//     この呼び出しの費用が、囲む関数のインライン化の見積りに入ります。
+//
+// 引数は演算の種類です。文字列を渡すと演算のたびに大域定数が増えるので、
+// 番号にしてメッセージはこちら側に持ちます。
+void pl_overflow_fail(long long op) {
+    if (op == 0) pl_panic("integer overflow in +");
+    if (op == 1) pl_panic("integer overflow in -");
+    if (op == 2) pl_panic("integer overflow in *");
+    pl_panic("integer overflow in unary -");
+}
+
 long long pl_mod(long long a, long long b) {
     if (b == 0) pl_panic("division by zero");
     // ★ こちらの答えは 0 で確定していますが、a % b の計算自体が
@@ -435,15 +478,41 @@ long long pl_mod(long long a, long long b) {
     return r;
 }
 
+// 掛け算があふれたかを見る。あふれたら 1 を返す。
+//
+// ★ ハードウェアの桁あふれフラグを使う組み込み（__builtin_mul_overflow）は
+//   使いません。ベアメタル（RISC-V）でライブラリ呼び出しに化けないことを
+//   保証したいので、割り戻して確かめる形にしてあります。
+// ⚠️ -1 を先に外すのは、p / b が b == -1 で未定義動作になるためです。
+static int pl_mul_ovf(long long a, long long b, long long *out) {
+    if (a == 0 || b == 0) { *out = 0; return 0; }
+    if (a == -1) { if (b == PL_LLONG_MIN) return 1; *out = -b; return 0; }
+    if (b == -1) { if (a == PL_LLONG_MIN) return 1; *out = -a; return 0; }
+    // 折り返しは符号なしで行う（符号付きの桁あふれは未定義動作のため）
+    long long p = (long long)((unsigned long long)a * (unsigned long long)b);
+    if (p / b != a) return 1;
+    *out = p;
+    return 0;
+}
+
 // 繰り返し二乗法。ループがあるので当然ランタイム側（R10）。
 // 負の指数は int で表せないので実行時エラーにします（第2章から先送りしていた宿題）。
+//
+// ★ 第47章：**あふれたら panic します。** 2 ** 64 が黙って 0 を返していました。
+//   ⚠️ 二乗は「次の周がある」ときだけ行います。最後の周でも二乗していた
+//     元の形だと、答えは正しいのに途中の二乗だけがあふれて
+//     **誤検出**になります（2 ** 62 など）。
 long long pl_ipow(long long base, long long exp) {
     if (exp < 0) pl_panic("negative exponent");
     long long r = 1;
     while (exp > 0) {
-        if (exp & 1) r *= base;
-        base *= base;
+        if (exp & 1) {
+            if (pl_mul_ovf(r, base, &r)) pl_panic("integer overflow in **");
+        }
         exp >>= 1;
+        if (exp > 0) {
+            if (pl_mul_ovf(base, base, &base)) pl_panic("integer overflow in **");
+        }
     }
     return r;
 }
