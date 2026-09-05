@@ -74,6 +74,12 @@ class Emitter:
     # ── 第47章：整数の桁あふれ検査 ──
     no_ovf: bool             # --no-overflow-check（検査を出さない）
 
+    # ── 第48章：添字の中で貯めた「あふれの旗」（空文字列なら無し）──
+    # ⚠️ C 版（src/codegen.c）は out 引数で渡しています。この言語に
+    #   out 引数が無いのでフィールドにしていますが、**出す IR は同じ**です。
+    ovf_flag: str
+    last_ovf: str            # gen_arith_ovf が作った直近の旗
+
     def init(self, triple: str) -> None:
         self.header = []
         self.globals_ = []
@@ -97,6 +103,8 @@ class Emitter:
         self.try_stack = []
         self.try_labels = []
         self.no_ovf = False     # 第47章（codegen() が上書きする）
+        self.ovf_flag = ""      # 第48章
+        self.last_ovf = ""
 
     # プリミティブ型（型検査は終わっているので、ここでは「表現」だけ要る）
     def int_type(self) -> ast.Type:
@@ -906,8 +914,11 @@ class Emitter:
     #   この分岐の費用が囲む関数のインライン化の見積りに入る（第46章）。
     #
     # op は pl_overflow_fail に渡す番号（0:+ 1:- 2:* 3:単項-）。
-    def gen_checked_arith(mut self, intr: str, l: str, r: str, op: int) -> str:
-        self.declare_rt("void @pl_overflow_fail(i64) noreturn cold")
+    # ★ 第48章：ここは「値と、あふれた旗（i1）を作る」だけ。**分岐は出さない。**
+    #   分岐まで出す形（gen_checked_arith）と、旗だけ受け取って範囲検査に
+    #   相乗りさせる形（gen_index_expr）の 2 通りに使い分ける。
+    #   ⚠️ 旗は self.last_ovf に置く（この言語に out 引数が無いため）。
+    def gen_arith_ovf(mut self, intr: str, l: str, r: str) -> str:
         self.declare_rt("{i64, i1} @llvm." + intr +
                         ".with.overflow.i64(i64, i64)")
 
@@ -918,6 +929,14 @@ class Emitter:
         self.emit("  " + val + " = extractvalue {i64, i1} " + pair + ", 0\n")
         bad: str = self.new_tmp()
         self.emit("  " + bad + " = extractvalue {i64, i1} " + pair + ", 1\n")
+        self.last_ovf = bad
+        return val
+
+    # 旗を見てその場で分岐する形（添字の外の算術は全部こちら）。
+    def gen_checked_arith(mut self, intr: str, l: str, r: str, op: int) -> str:
+        self.declare_rt("void @pl_overflow_fail(i64) noreturn cold")
+        val: str = self.gen_arith_ovf(intr, l, r)
+        bad: str = self.last_ovf
 
         id_: int = self.label_counter    # ★ 番号は最初に 1 回だけ確保する
         self.label_counter = self.label_counter + 1
@@ -933,6 +952,21 @@ class Emitter:
         self.emit_label(ok_l)
         return val
 
+    # 貯めた「あふれの旗」で 1 回だけ分岐する（相乗りできる範囲検査が無いとき）。
+    # op は 4 ＝「添字の計算」。
+    def gen_ovf_br(mut self, flag: str) -> None:
+        self.declare_rt("void @pl_overflow_fail(i64) noreturn cold")
+        id_: int = self.label_counter
+        self.label_counter = self.label_counter + 1
+        ok_l: str = "ovf.ok." + str(id_)
+        bad_l: str = "ovf.bad." + str(id_)
+        self.emit_cond_br(flag, bad_l, ok_l)
+        self.emit_label(bad_l)
+        self.emit("  call void @pl_overflow_fail(i64 4)\n")
+        self.emit("  unreachable\n")
+        self.terminated = True
+        self.emit_label(ok_l)
+
     # 整数の + - * に対応する桁あふれ検査つき命令の名前。無ければ ""。
     def ovf_intr(self, op: int) -> str:
         if op == ast.OP_ADD:
@@ -945,9 +979,12 @@ class Emitter:
 
     # normalize が True なら負の添字を末尾から数え直す（第39章）。
     # 戻り値は要素へのポインタ。
+    # ovf は「添字の計算で桁があふれた」ことを表す i1 の値（無ければ ""）。
+    # ★ 第48章：あふれの報告をこの範囲検査に**相乗り**させる。
+    #   理由は gen_index_expr の説明を見ること。
     def gen_index_addr(mut self, obj: str, idx0: str, sty: str,
-                       normalize: bool) -> str:
-        self.declare_rt("void @pl_index_fail(i64, i64) noreturn cold")
+                       normalize: bool, ovf: str) -> str:
+        self.declare_rt("void @pl_index_fail(i64, i64, i64) noreturn cold")
 
         lenp: str = self.new_tmp()
         self.emit("  " + lenp + " = getelementptr i8, ptr " + obj + ", i64 8\n")
@@ -970,12 +1007,28 @@ class Emitter:
         ok_l: str = "idx.ok." + str(id_)
         bad_l: str = "idx.bad." + str(id_)
 
-        inb: str = self.new_tmp()
-        self.emit("  " + inb + " = icmp ult i64 " + idx + ", " + ln + "\n")
+        inb0: str = self.new_tmp()
+        self.emit("  " + inb0 + " = icmp ult i64 " + idx + ", " + ln + "\n")
+
+        # ★ 第48章：桁あふれがあったら、範囲内に見えても失敗させる。
+        #   （折り返した添字がたまたま範囲内に入ることがあるため。
+        #     ここを and で潰しておくのが健全性の要。）
+        inb: str = inb0
+        ovf_arg: str = "0"
+        if ovf != "":
+            nov: str = self.new_tmp()
+            self.emit("  " + nov + " = xor i1 " + ovf + ", true\n")
+            both: str = self.new_tmp()
+            self.emit("  " + both + " = and i1 " + inb0 + ", " + nov + "\n")
+            z: str = self.new_tmp()
+            self.emit("  " + z + " = zext i1 " + ovf + " to i64\n")
+            inb = both
+            ovf_arg = z
         self.emit_cond_br(inb, ok_l, bad_l)
 
         self.emit_label(bad_l)
-        self.emit("  call void @pl_index_fail(i64 " + idx + ", i64 " + ln + ")\n")
+        self.emit("  call void @pl_index_fail(i64 " + idx + ", i64 " + ln +
+                  ", i64 " + ovf_arg + ")\n")
         # ⚠️ pl_index_fail は戻ってこない。unreachable を置かないと
         #   LLVM は「戻るかも」と見て、検査をループ外へ出せなくなる。
         self.emit("  unreachable\n")
@@ -989,16 +1042,81 @@ class Emitter:
                   ", i64 " + idx + "\n")
         return ep
 
+    # ── 添字の式を、あふれの旗を貯めながら生成する（第48章）──
+    #
+    # ★ **なぜ添字だけ特別扱いするのか。**
+    #   self.data[i * self.cols + j] のような小さなメソッドが、桁あふれ検査を
+    #   入れた 0.6.0 で**インライン化されなくなった**（linalg.Matrix の
+    #   行列積が 2.6 倍遅くなった原因）。LLVM の見積りを実測すると
+    #   Matrix.get は **cost=225 / threshold=225** で、**1 点足りずに**落ちていた。
+    #   内訳は、外れの経路の**呼び出し 1 つにつき約 25 点**（cold でも引かれない）。
+    #
+    # ★ そこで、**あふれの報告を範囲検査に相乗りさせる。**
+    #   添字の計算の + - * は分岐せず旗（i1）だけを立て、最後に
+    #   「範囲内 かつ あふれていない」を 1 回だけ分岐する。失敗の呼び出しは
+    #   **もともと 1 つある pl_index_fail だけ**になり、分岐も呼び出しも増えない。
+    #
+    #   ⚠️ **健全性**：折り返した添字がたまたま範囲内に入っても、旗が
+    #     立っているので必ず失敗する（gen_index_addr の and）。
+    #   ⚠️ **意味の違いが 1 つ**：あふれた時点ではなく添字の計算が終わった
+    #     時点で止まる。xs[a * b + f()] は a * b があふれても f() が呼ばれる。
+    #
+    # 旗は self.ovf_flag に貯まる（呼ぶ前に "" にしておくこと）。
+    def gen_index_expr(mut self, n: ast.Node) -> str:
+        intr: str = ""
+        if n.kind == ast.ND_BINOP and not self.no_ovf:
+            lt: ast.Type = type_of(node_of(n.lhs))
+            if lt.kind == ast.TY_INT:
+                intr = self.ovf_intr(n.op)
+
+        # ⚠️ 単項 - も同じ扱い（-INT_MIN があふれる）
+        neg: bool = False
+        if n.kind == ast.ND_UNARY and n.op == ast.OP_NEG and not self.no_ovf:
+            nt: ast.Type = type_of(n)
+            neg = nt.kind == ast.TY_INT
+
+        if intr == "" and not neg:
+            return self.gen_expr(n)      # 算術以外は普通に生成する
+
+        l: str = "0"
+        r: str = ""
+        if neg:
+            r = self.gen_index_expr(node_of(n.lhs))
+            intr = "ssub"
+        else:
+            l = self.gen_index_expr(node_of(n.lhs))
+            r = self.gen_index_expr(node_of(n.rhs))
+
+        val: str = self.gen_arith_ovf(intr, l, r)
+        bad: str = self.last_ovf
+        if self.ovf_flag != "":
+            o: str = self.new_tmp()
+            self.emit("  " + o + " = or i1 " + self.ovf_flag + ", " + bad + "\n")
+            self.ovf_flag = o
+        else:
+            self.ovf_flag = bad
+        return val
+
     def gen_index(mut self, n: ast.Node) -> str:
         obj_node: ast.Node = node_of(n.lhs)
         ot: ast.Type = type_of(obj_node)
         obj: str = self.gen_expr(obj_node)
-        idx0: str = self.gen_expr(node_of(n.rhs))
+        # ⚠️ 入れ子（xs[ys[i * 2]]）に備えて、貯め場所を退避してから使う
+        saved: str = self.ovf_flag
+        self.ovf_flag = ""
+        idx0: str = self.gen_index_expr(node_of(n.rhs))
+        ovf: str = self.ovf_flag
+        self.ovf_flag = saved
 
         # str の添字は 1 文字の str を返す。
         # ★ こちらは 1 文字の str を**新しく作る**ので、どのみち確保が
         #   入る。展開しても利かないので従来どおり呼び出す。
         if ot.kind == ast.TY_STR:
+            # ⚠️ str の添字は pl_norm_index / pl_str_index に任せるので、
+            #   相乗りさせる範囲検査がここには無い。旗が立っていたら
+            #   ここで 1 回だけ分岐して報告する。
+            if ovf != "":
+                self.gen_ovf_br(ovf)
             self.declare_rt("i64 @pl_str_len(ptr)")
             self.declare_rt("i64 @pl_norm_index(i64, i64)")
             ln0: str = self.new_tmp()
@@ -1014,7 +1132,7 @@ class Emitter:
 
         elem: ast.Type = ast.elem_of(ot)
         sty: str = self.slot_ty(elem)
-        ep: str = self.gen_index_addr(obj, idx0, sty, True)
+        ep: str = self.gen_index_addr(obj, idx0, sty, True, ovf)
         t: str = self.new_tmp()
         self.emit("  " + t + " = load " + sty + ", ptr " + ep + "\n")
         return self.slot_to_elem(elem, t)
@@ -1023,13 +1141,17 @@ class Emitter:
         obj_node: ast.Node = node_of(target.lhs)
         elem: ast.Type = ast.elem_of(type_of(obj_node))
         obj: str = self.gen_expr(obj_node)
-        idx: str = self.gen_expr(node_of(target.rhs))
+        saved: str = self.ovf_flag
+        self.ovf_flag = ""
+        idx: str = self.gen_index_expr(node_of(target.rhs))
+        ovf: str = self.ovf_flag
+        self.ovf_flag = saved
 
         sty: str = self.slot_ty(elem)
         # ⚠️ 代入側は負の添字を正規化しない。
         #   pl_list_set_* を呼んでいたころからそうだった（xs[-1] = v は panic）。
         #   ここで変えると意味が変わるので、振る舞いはそのままにする。
-        ep: str = self.gen_index_addr(obj, idx, sty, False)
+        ep: str = self.gen_index_addr(obj, idx, sty, False, ovf)
         v: str = self.elem_to_slot(elem, val)
         self.emit("  store " + sty + " " + v + ", ptr " + ep + "\n")
 

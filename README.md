@@ -24,7 +24,7 @@ def main() -> int:
 | コンパイラ | `poloniumc`（C 実装 → **セルフホスト済み**） |
 | バックエンド | LLVM IR を直接出力（テキスト） |
 | 型付け | 静的・型注釈必須・実行時型情報なし |
-| 現在地 | v2（安全性・エラー処理・共有所有）実装済み／**RISC-V のベアメタルで動作**・455 テスト |
+| 現在地 | v2（安全性・エラー処理・共有所有）実装済み／**RISC-V のベアメタルで動作**・475 テスト |
 
 ---
 
@@ -71,7 +71,7 @@ printf 'def main() -> int:\n    print("hello")\n    return 0\n' > hello.po
 ```
 bin/poloniumc
 lib/polonium/runtime.a
-lib/polonium/lib/*.po        ← 標準ライブラリ（文字列・入出力・数学・線形代数ほか）
+lib/polonium/lib/*.po        ← 標準ライブラリ（文字列・入出力・時刻・数学・線形代数ほか）
 ```
 
 ### B. ソースからビルドする
@@ -92,7 +92,7 @@ sudo make install            # 既定は /usr/local
 make install PREFIX=$HOME/.local   # 自分の環境だけに入れるなら
 
 poloniumc hello.po -o hello  # どこからでも呼べる
-poloniumc --version          # → poloniumc 0.6.0 (stage0)
+poloniumc --version          # → poloniumc 0.6.1 (stage0)
 ```
 
 ### よく使うコマンド

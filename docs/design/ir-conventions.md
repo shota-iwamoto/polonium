@@ -858,7 +858,7 @@ call void @pl_list_push_i64(ptr %t0, i64 42)
 ```llvm
 declare void @pl_panic(ptr) noreturn cold
 declare void @pl_exit(i64) noreturn cold
-declare void @pl_index_fail(i64, i64) noreturn cold
+declare void @pl_index_fail(i64, i64, i64) noreturn cold
 declare void @pl_none_fail() noreturn cold
 ```
 
@@ -896,6 +896,59 @@ LLVM はこれを `check` の大きさとして数え、既定のしきい値を
 `linalg.same_len` は `add` / `sub` / `mul` のループの**外**で 1 回呼ばれる
 だけなので、切り出しても速くなりません（測ったら 0.31 → 0.34 秒で、
 少し遅くなったので戻しました）。
+
+#### ⚠️ `cold` でも「呼び出しがあること」自体の費用は消えません `[ch48]`
+
+第46章では「`cold` を付ければ外れの経路は割り引かれる」と書きました。
+**割り引かれるのは経路の中身だけで、呼び出しが 1 つあること自体は数えられます。**
+第47章で桁あふれ検査を入れたら、`linalg.Matrix` の行列積がまた 2.6 倍
+遅くなり、LLVM に直接聞いて分かりました。
+
+```console
+$ clang -O2 -Rpass-missed=inline ...
+remark: 'linalg.Matrix.get' not inlined into 'linalg.matmul'
+        because too costly to inline (cost=225, threshold=225)
+```
+
+IR を書き換えて確かめた内訳です。
+
+| 外れの経路の書き方 | インライン化されるか |
+|---|---|
+| `call void @pl_overflow_fail(i64 2)` | ❌ されない |
+| 引数を無くした `call void @pl_overflow_fail0()` | ❌ されない（**引数は関係ない**） |
+| `call void @llvm.trap()`（組み込み命令） | ✅ される |
+| `unreachable` だけ | ✅ される |
+
+**外れの経路の呼び出し 1 つにつき約 25 点**です。`Matrix.get` には
+外れの経路が 5 つあり、225 点のうち約 125 点が「一度も通らない経路」でした。
+
+> **R13. 外れの経路の「呼び出しの数」を増やさない。** `cold` を付けても
+> 1 つにつき約 25 点かかる。小さなメソッド（`get` / `set`）はこれで
+> インライン化のしきい値を越える。
+
+**この規則に従った結果が、添字の中の桁あふれ検査です。**
+分岐せずに旗（`i1`）を立て、**もとからある範囲検査に相乗り**させます。
+
+```llvm
+  %ovf = or i1 %mo, %ao          ; 添字の中の + - * の旗をまとめる
+  %inb = icmp ult i64 %idx, %len
+  %nov = xor i1 %ovf, true
+  %ok  = and i1 %inb, %nov       ; ★ 範囲内 かつ あふれていない
+  br i1 %ok, label %idx.ok.4, label %idx.bad.4
+idx.bad.4:
+  call void @pl_index_fail(i64 %idx, i64 %len, i64 %z)   ; ★ 呼び出しは 1 つのまま
+  unreachable
+```
+
+`pl_index_fail` の 3 つめの引数が「あふれたか」です（`zext i1`）。
+あふれたときの `%idx` は折り返した値で意味がないので、
+ランタイムは数を出さず `integer overflow in index computation` と言います。
+
+⚠️ **健全性**：折り返した添字がたまたま範囲内に入っても、`and` で
+潰しているので必ず失敗します（`tests/cases/rt_overflow_index.po`）。
+
+⚠️ **添字の外の算術は今までどおり**、演算ごとにその場で分岐します
+（`gen_checked_arith`）。相乗りできる検査が無いためです。
 
 ⚠️ **別名解析（TBAA）はまだ入れていませんが、効きます。**
 最初に測ったときは 142 ms → 146 ms で効果ゼロでしたが、
@@ -1038,3 +1091,4 @@ clang -S -emit-llvm -O0 /tmp/ref.c -o -
 | R10 | 制御フローを含む処理はランタイム関数呼び出しにする（⚠️ 添字の境界検査と None 検査は例外。8.3 節） |
 | R11 | `target triple` を必ず出力する |
 | R12 | ポインタ型は常に `ptr`（opaque pointer） |
+| R13 | 外れの経路の**呼び出しの数**を増やさない（`cold` でも 1 つ約 25 点。8.3 節 `[ch48]`） |

@@ -465,6 +465,9 @@ void pl_overflow_fail(long long op) {
     if (op == 0) pl_panic("integer overflow in +");
     if (op == 1) pl_panic("integer overflow in -");
     if (op == 2) pl_panic("integer overflow in *");
+    // 4 は添字の計算（第48章）。演算子の種類は言いません
+    //   — 添字の式の中の + - * を 1 つの旗にまとめて見ているためです。
+    if (op == 4) pl_panic("integer overflow in index computation");
     pl_panic("integer overflow in unary -");
 }
 
@@ -671,7 +674,10 @@ static void pl_list_grow(PlList *l) {
 
 // 範囲外だったときだけ呼ばれる出口。
 // ⚠️ **戻ってきません**。呼び出し側の IR は直後に unreachable を置きます。
-void pl_index_fail(long long i, long long len) {
+// ⚠️ 第48章：3 つめの引数は「添字の計算で桁があふれたか」です。
+//   あふれたときは i に意味がない（折り返した値）ので、数を出しません。
+void pl_index_fail(long long i, long long len, long long overflowed) {
+    if (overflowed) pl_panic("integer overflow in index computation");
     char buf[80];
     char *w = buf;
     const char *m = "index out of range: ";
@@ -687,7 +693,7 @@ void pl_index_fail(long long i, long long len) {
 
 // ★ 展開後の codegen はもう呼びませんが、ランタイム内から使います。
 static void pl_list_check(PlList *l, long long i) {
-    if (i < 0 || i >= l->len) pl_index_fail(i, l->len);
+    if (i < 0 || i >= l->len) pl_index_fail(i, l->len, 0);
 }
 
 // 部分文字列の位置（第37章：'in' 演算子）。無ければ -1

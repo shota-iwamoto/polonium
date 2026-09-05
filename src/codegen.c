@@ -1029,9 +1029,12 @@ static char *gen_not_none(Emitter *e, char *obj) {
 //
 // normalize が true なら負の添字を末尾から数え直します（第39章）。
 // 戻り値は要素へのポインタ。
+// ovf は「添字の計算で桁があふれた」ことを表す i1 の値（無ければ NULL）。
+// ★ 第48章：あふれの報告を**この範囲検査に相乗り**させます。理由は
+//   gen_index_expr の説明を見てください。
 static char *gen_index_addr(Emitter *e, char *obj, char *idx, const char *sty,
-                            bool normalize) {
-    declare_rt(e, "void @pl_index_fail(i64, i64) noreturn cold");
+                            bool normalize, const char *ovf) {
+    declare_rt(e, "void @pl_index_fail(i64, i64, i64) noreturn cold");
 
     char *lenp = new_tmp(e);
     sb_printf(&e->fn, "  %s = getelementptr i8, ptr %s, i64 8\n", lenp, obj);
@@ -1056,10 +1059,26 @@ static char *gen_index_addr(Emitter *e, char *obj, char *idx, const char *sty,
 
     char *inb = new_tmp(e);
     sb_printf(&e->fn, "  %s = icmp ult i64 %s, %s\n", inb, idx, len);
+
+    // ★ 第48章：桁あふれがあったら、範囲内に見えても失敗させます。
+    //   （折り返した添字がたまたま範囲内に入ることがあるため。
+    //     ここを and で潰しておくのが健全性の要です。）
+    const char *ovf_arg = "0";
+    if (ovf) {
+        char *nov = new_tmp(e);
+        sb_printf(&e->fn, "  %s = xor i1 %s, true\n", nov, ovf);
+        char *both = new_tmp(e);
+        sb_printf(&e->fn, "  %s = and i1 %s, %s\n", both, inb, nov);
+        char *z = new_tmp(e);
+        sb_printf(&e->fn, "  %s = zext i1 %s to i64\n", z, ovf);
+        inb = both;
+        ovf_arg = z;
+    }
     emit_cond_br(e, inb, ok_l, bad_l);
 
     emit_label(e, bad_l);
-    sb_printf(&e->fn, "  call void @pl_index_fail(i64 %s, i64 %s)\n", idx, len);
+    sb_printf(&e->fn, "  call void @pl_index_fail(i64 %s, i64 %s, i64 %s)\n", idx,
+              len, ovf_arg);
     // ⚠️ pl_index_fail は戻ってきません。unreachable を置かないと
     //   LLVM は「戻るかも」と見て、検査をループ外へ出せなくなります。
     sb_printf(&e->fn, "  unreachable\n");
@@ -1087,10 +1106,11 @@ static char *gen_index_addr(Emitter *e, char *obj, char *idx, const char *sty,
 //   cold が無いと、この分岐の費用が囲む関数のインライン化の見積りに
 //   入ります（第46章で linalg.Matrix.check が丸ごと落ちた件と同じ）。
 //
-// op は pl_overflow_fail に渡す番号です（0:+ 1:- 2:* 3:単項-）。
-static char *gen_checked_arith(Emitter *e, const char *intr, const char *l,
-                               const char *r, int op) {
-    declare_rt(e, "void @pl_overflow_fail(i64) noreturn cold");
+// ★ 第48章：ここは「値と、あふれた旗（i1）を作る」だけです。**分岐は出しません。**
+//   分岐まで出す形（gen_checked_arith）と、旗だけ受け取って範囲検査に
+//   相乗りさせる形（gen_index_expr）の 2 通りに使い分けます。
+static char *gen_arith_ovf(Emitter *e, const char *intr, const char *l,
+                           const char *r, char **bad_out) {
     StrBuf sig;
     sb_init(&sig);
     sb_printf(&sig, "{i64, i1} @llvm.%s.with.overflow.i64(i64, i64)", intr);
@@ -1103,6 +1123,17 @@ static char *gen_checked_arith(Emitter *e, const char *intr, const char *l,
     sb_printf(&e->fn, "  %s = extractvalue {i64, i1} %s, 0\n", val, pair);
     char *bad = new_tmp(e);
     sb_printf(&e->fn, "  %s = extractvalue {i64, i1} %s, 1\n", bad, pair);
+    *bad_out = bad;
+    return val;
+}
+
+// 旗を見てその場で分岐する形（添字の外の算術は全部こちら）。
+// op は pl_overflow_fail に渡す番号です（0:+ 1:- 2:* 3:単項-）。
+static char *gen_checked_arith(Emitter *e, const char *intr, const char *l,
+                               const char *r, int op) {
+    declare_rt(e, "void @pl_overflow_fail(i64) noreturn cold");
+    char *bad;
+    char *val = gen_arith_ovf(e, intr, l, r, &bad);
 
     int id = e->label_counter++;  // ★ 番号は最初に 1 回だけ確保する
     char ok_l[32], bad_l[32];
@@ -1119,6 +1150,22 @@ static char *gen_checked_arith(Emitter *e, const char *intr, const char *l,
     return val;
 }
 
+// 貯めた「あふれの旗」で 1 回だけ分岐する（相乗りできる範囲検査が無いとき）。
+// op は 4 ＝「添字の計算」です。
+static void gen_ovf_br(Emitter *e, const char *flag) {
+    declare_rt(e, "void @pl_overflow_fail(i64) noreturn cold");
+    int id = e->label_counter++;
+    char ok_l[32], bad_l[32];
+    snprintf(ok_l, sizeof(ok_l), "ovf.ok.%d", id);
+    snprintf(bad_l, sizeof(bad_l), "ovf.bad.%d", id);
+    emit_cond_br(e, flag, bad_l, ok_l);
+    emit_label(e, bad_l);
+    sb_printf(&e->fn, "  call void @pl_overflow_fail(i64 4)\n");
+    sb_printf(&e->fn, "  unreachable\n");
+    e->terminated = true;
+    emit_label(e, ok_l);
+}
+
 // 整数の + - * で、検査つきにするかどうか。
 // ⚠️ float・str・list の + * はここに来ません（呼び出し側で分けています）。
 static const char *ovf_intr(OpKind op) {
@@ -1128,15 +1175,81 @@ static const char *ovf_intr(OpKind op) {
     return NULL;
 }
 
+// ── 添字の式を、あふれの旗を貯めながら生成する（第48章）─────
+//
+// ★ **なぜ添字だけ特別扱いするのか。**
+//   `self.data[i * self.cols + j]` のような小さなメソッドが、
+//   桁あふれ検査を入れた 0.6.0 で**インライン化されなくなりました**
+//   （linalg.Matrix の行列積が 2.6 倍遅くなった原因）。
+//   LLVM の見積りを実測すると `Matrix.get` は **cost=225 / threshold=225** で、
+//   **1 点足りずに**落ちていました。内訳を数えると、外れの経路の
+//   **呼び出し 1 つにつき約 25 点**です（cold を付けても引かれません）。
+//   `llvm.trap` に差し替えると通ることも確かめました（＝呼び出しが費用）。
+//
+// ★ そこで、**あふれの報告を範囲検査に相乗りさせます。**
+//   添字の計算の `+ - *` は分岐せず旗（i1）だけを立て、
+//   最後に `範囲内 かつ あふれていない` を 1 回だけ分岐します。
+//   失敗の呼び出しは **もともと 1 つある pl_index_fail だけ**になり、
+//   分岐も呼び出しも増えません。
+//
+//   ⚠️ **健全性。** 折り返した添字がたまたま範囲内に入っても、
+//     旗が立っているので必ず失敗します（gen_index_addr の and）。
+//     「検査を省く」案とはここが違います。
+//
+//   ⚠️ **意味の違いが 1 つだけあります。** あふれた時点ではなく
+//     添字の計算が終わった時点で止まるので、`xs[a * b + f()]` は
+//     a * b があふれても f() が呼ばれます。診断は
+//     「添字の計算があふれた」になります（演算子の種類は言いません）。
+//
+// ovf には、貯めた旗を or でつないだ値が入ります（無ければ NULL のまま）。
+static char *gen_index_expr(Emitter *e, Node *n, char **ovf) {
+    const char *intr = NULL;
+    if (!e->no_ovf && n->kind == ND_BINOP && n->lhs->type &&
+        n->lhs->type->kind == TY_INT)
+        intr = ovf_intr(n->op);
+
+    // ⚠️ 単項 - も同じ扱いにします（-INT_MIN があふれます）。
+    bool neg = !e->no_ovf && n->kind == ND_UNARY && n->op == OP_NEG && n->type &&
+               n->type->kind == TY_INT;
+
+    if (!intr && !neg) return gen_expr(e, n);  // 算術以外は普通に生成する
+
+    char *l, *r;
+    if (neg) {
+        l = "0";
+        r = gen_index_expr(e, n->lhs, ovf);
+        intr = "ssub";
+    } else {
+        l = gen_index_expr(e, n->lhs, ovf);
+        r = gen_index_expr(e, n->rhs, ovf);
+    }
+
+    char *bad;
+    char *val = gen_arith_ovf(e, intr, l, r, &bad);
+    if (*ovf) {
+        char *o = new_tmp(e);
+        sb_printf(&e->fn, "  %s = or i1 %s, %s\n", o, *ovf, bad);
+        *ovf = o;
+    } else {
+        *ovf = bad;
+    }
+    return val;
+}
+
 static char *gen_index(Emitter *e, Node *n) {
     Type *ot = n->lhs->type;
     char *obj = gen_expr(e, n->lhs);
-    char *idx = gen_expr(e, n->rhs);
+    char *ovf = NULL;
+    char *idx = gen_index_expr(e, n->rhs, &ovf);
 
     // str の添字は 1 文字の str を返す（型システム 5.8）。
     // ★ こちらは 1 文字の str を**新しく作る**ので、どのみち確保が
     //   入ります。展開しても利かないので従来どおり呼び出します。
     if (ot->kind == TY_STR) {
+        // ⚠️ str の添字は pl_norm_index / pl_str_index に任せるので、
+        //   相乗りさせる範囲検査がここにはありません。旗が立っていたら
+        //   ここで 1 回だけ分岐して報告します。
+        if (ovf) gen_ovf_br(e, ovf);
         declare_rt(e, "i64 @pl_str_len(ptr)");
         declare_rt(e, "i64 @pl_norm_index(i64, i64)");
         char *ln = new_tmp(e);
@@ -1153,7 +1266,7 @@ static char *gen_index(Emitter *e, Node *n) {
 
     Type *elem = ot->elem;
     const char *sty = slot_ty(elem);
-    char *ep = gen_index_addr(e, obj, idx, sty, true);
+    char *ep = gen_index_addr(e, obj, idx, sty, true, ovf);
     char *t = new_tmp(e);
     sb_printf(&e->fn, "  %s = load %s, ptr %s\n", t, sty, ep);
     return slot_to_elem(e, elem, t);
@@ -1162,13 +1275,14 @@ static char *gen_index(Emitter *e, Node *n) {
 static void gen_index_store(Emitter *e, Node *target, char *val) {
     Type *elem = target->lhs->type->elem;
     char *obj = gen_expr(e, target->lhs);
-    char *idx = gen_expr(e, target->rhs);
+    char *ovf = NULL;
+    char *idx = gen_index_expr(e, target->rhs, &ovf);
 
     const char *sty = slot_ty(elem);
     // ⚠️ 代入側は負の添字を正規化しません。
     //   pl_list_set_* を呼んでいたころからそうでした（xs[-1] = v は panic）。
     //   ここで変えると意味が変わるので、振る舞いはそのままにします。
-    char *ep = gen_index_addr(e, obj, idx, sty, false);
+    char *ep = gen_index_addr(e, obj, idx, sty, false, ovf);
     char *v = elem_to_slot(e, elem, val);
     sb_printf(&e->fn, "  store %s %s, ptr %s\n", sty, v, ep);
 }

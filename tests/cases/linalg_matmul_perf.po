@@ -1,28 +1,43 @@
 # OUTPUT: 16302.58788
+# OUTPUT: ok
 # EXIT: 0
 # FLAGS: -O2
 # 第46章：panic の経路がインライン化を止めていないこと
 #
-#   ⚠️ linalg.Matrix.get / set は Matrix.check を呼びます。その check の
-#     中にメッセージの組み立て（連結 4 回 ＋ str() 2 回）を直接書くと、
-#     check が「大きい」と見なされて get / set にインライン化されず、
-#     この 256³ の行列積が **143 ms → 62 ms** の差になりました。
+#   ⚠️ linalg.Matrix.get / set は小さなメソッドです。**外れの経路**
+#     （範囲外・桁あふれ）の呼び出しが増えると、LLVM のインライン化の
+#     見積り（cost）がしきい値を超え、内側ループに呼び出しが戻ります。
+#     実測でそれが 2 回起きました。
+#       第46章 … check の中にメッセージ組み立てを直接書いていた（143 → 62 ms）
+#       第48章 … 桁あふれ検査で分岐と呼び出しが 2 つ増えた（cost=225 / threshold=225）
 #
-#   ★ 直したのは 2 か所です。どちらが戻っても、ここで目に見えて遅くなります。
-#     ① codegen が panic / exit / pl_index_fail / pl_none_fail の宣言に
-#       付ける **cold**（src/codegen.c と selfhost/codegen.po）。
-#       noreturn だけでは足りません（インライン化の見積りに効かないため）。
-#     ② lib/linalg.po の Matrix.index_fail / len_fail への切り出し。
+#   ★ いま効いている 3 つ。どれが戻ってもここで遅くなります。
+#     ① codegen が panic / pl_index_fail などに付ける **cold**
+#     ② lib/linalg.po の Matrix.index_fail / len_fail への切り出し
+#     ③ 添字の中の桁あふれを**範囲検査に相乗り**させる（第48章。gen_index_expr）
+#
+# ★ 第48章：**時間を検査するようになりました**（§3-B4 の指摘）。
+#   同じ行列積を「二重リスト」と「linalg.Matrix」の 2 通りで測り、**比**を見ます。
+#   いまの値は 2.1 前後、インライン化が外れると 4.2 前後になります。
 #
 #   ⚠️ -O0 では誰もインライン化しないので差が出ません。# FLAGS: -O2 が要ります。
-#
-#   ★ 答えは list_index_perf.po（二重リスト版）と同じ値です。
-#     data の並べ方が違うだけで、同じ行列を掛けています。
 import linalg
+import time
 
 N: int = 256
 
-def make(seed: int) -> linalg.Matrix:
+def make_list(seed: int) -> list[list[float]]:
+    m: list[list[float]] = []
+    s: int = seed
+    for i in range(N):
+        row: list[float] = []
+        for j in range(N):
+            s = (s * 1103515 + 12345) % 2147483648
+            row.append(float(s % 1000) / 1000.0)
+        m.append(row)
+    return m
+
+def make_mat(seed: int) -> linalg.Matrix:
     d: list[float] = []
     s: int = seed
     for i in range(N * N):
@@ -31,11 +46,41 @@ def make(seed: int) -> linalg.Matrix:
     return linalg.Matrix(N, N, d)
 
 def main() -> int:
-    a: linalg.Matrix = make(1)
-    b: linalg.Matrix = make(7)
-    c: linalg.Matrix = linalg.matmul(a, b)
+    # ── 基準：同じ行列積を二重リストで ──
+    a: list[list[float]] = make_list(1)
+    b: list[list[float]] = make_list(7)
+    c: list[list[float]] = []
+    for i in range(N):
+        row: list[float] = []
+        for j in range(N):
+            row.append(0.0)
+        c.append(row)
+
+    t0: int = time.monotonic_ns()
+    for i in range(N):
+        for k in range(N):
+            aik: float = a[i][k]
+            for j in range(N):
+                c[i][j] = c[i][j] + aik * b[k][j]
+    t_list: int = time.since_ns(t0)
+
+    # ── 本命：linalg.Matrix（平坦な list[float] ＋ get/set）──
+    am: linalg.Matrix = make_mat(1)
+    bm: linalg.Matrix = make_mat(7)
+    t0 = time.monotonic_ns()
+    cm: linalg.Matrix = linalg.matmul(am, bm)
+    t_mat: int = time.since_ns(t0)
+
     t: float = 0.0
     for i in range(N):
-        t = t + c.get(i, i)
+        t = t + cm.get(i, i)
     print(str(t))
+
+    ratio: float = float(t_mat) / float(t_list)
+    if ratio > 3.5:
+        print("NG get/set がインライン化されていません: linalg / 二重リスト = " +
+              str(ratio))
+        print("   （clang -O2 -Rpass-missed=inline で cost と threshold を見てください）")
+        return 1
+    print("ok")
     return 0

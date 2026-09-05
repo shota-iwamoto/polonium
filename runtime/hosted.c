@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 // ⚠️ WIFEXITED / WEXITSTATUS は POSIX の <sys/wait.h> にあります。
 //    macOS では <stdlib.h> が連れてきますが、Linux では明示しないと通りません
@@ -254,4 +255,41 @@ PlList *pl_argv(void) {
     for (long long i = 0; i < g_argc; i++)
         pl_list_push_ptr(l, pl_str_from_cstr(g_argv[i]));
     return l;
+}
+
+// ── 時刻（第48章）────────────────────────────────────────────
+//
+// ★ lib/time.po がこの 2 つだけを使います。単位は**ナノ秒**です。
+//   秒やミリ秒への換算は Polonium 側でやります（境界は int だけで済ませる）。
+//
+// ⚠️ **ベアメタルにはありません。** 時計は OS（か割り込み）の持ち物なので、
+//    core.c ではなくここに置いています。kernel/ からは import time できません。
+
+// 単調時計。**起点に意味はありません**（差だけを使ってください）。
+//
+// ⚠️ 実時刻を使わないのは、NTP の補正で**時間が戻ることがある**ためです。
+//    速さを測っている最中に戻ると、負の経過時間が出ます。
+long long pl_time_ns(void) {
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC)
+    // POSIX（macOS 10.12+ / Linux / MSYS2 の mingw-w64）
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+#endif
+    // ⚠️ 単調時計が無い環境への逃げ道。timespec_get は C11 の標準なので
+    //    どこでも通りますが、実時刻なので**戻ることがあります**。
+    if (timespec_get(&ts, TIME_UTC) == TIME_UTC)
+        return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+    return 0;
+}
+
+// 実時刻（1970-01-01 00:00:00 UTC からのナノ秒）。
+//
+// ⚠️ こちらは**飛びます**（NTP・夏時間・利用者が時計を直す）。
+//    経過時間を測るのには使わないでください。
+long long pl_time_wall_ns(void) {
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) == TIME_UTC)
+        return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+    return 0;
 }

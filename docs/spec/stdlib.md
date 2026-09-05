@@ -27,6 +27,7 @@ def main() -> int:
 | [`random`](#random) | **疑似乱数** — Python の `random` 相当 |
 | [`numeric`](#numeric) | **数値解析** — 積分・求根・微分・常微分方程式・最適化 |
 | [`physics`](#physics) | **物理定数と単位換算** |
+| [`time`](#time) | **時刻と経過時間** — 自分のプログラムの速さを測る |
 
 > **⚠️ 数値計算のモジュールも、すべて Polonium で書かれています。**
 > `libm` を呼びません。ランタイムが libc に依存しない約束（ベアメタルで動く）
@@ -707,3 +708,40 @@ def filter[T](xs: list[T], keep: fn(T) -> bool) -> list[T]:
 `max_of` / `sorted_indices` / `index_of` は `<` や `==` を使います。
 クラスを渡すと、実体化したときに「演算子が適用できません」と言われます
 （型制約が無いためです）。
+
+---
+
+## time
+
+**自分のプログラムの速さを測るためのモジュールです**（第48章）。
+
+```python
+import time
+
+def main() -> int:
+    t0: int = time.monotonic_ns()
+    heavy()
+    print(str(time.since_ms(t0)) + " ms")
+    return 0
+```
+
+| 関数 | 戻り値 | 内容 |
+|---|---|---|
+| `monotonic_ns()` | `int` | 単調時計（ナノ秒）。**起点に意味はありません** |
+| `monotonic()` | `float` | 同じものを秒で |
+| `now_ns()` | `int` | 実時刻（1970-01-01 UTC からのナノ秒） |
+| `now()` | `float` | 同じものを秒で（Python の `time.time()` 相当） |
+| `since_ns(start)` | `int` | `monotonic_ns()` の値からの経過ナノ秒 |
+| `since_ms(start)` | `float` | 同じものをミリ秒で |
+| `since_sec(start)` | `float` | 同じものを秒で |
+| `ns_to_ms(ns)` / `ns_to_sec(ns)` | `float` | 単位の換算 |
+
+> **⚠️ 速さを測るときは `monotonic_ns` を使ってください。**
+> `now_ns`（実時刻）は **戻ることがあります**（NTP の補正・夏時間・
+> 利用者が時計を直す）。測っている最中に戻ると経過時間が負になります。
+
+> **⚠️ ベアメタル（`kernel/`）では使えません。** 時計は OS の持ち物なので、
+> 実体は `runtime/hosted.c` にあります。他のモジュールと違い、
+> このモジュールだけは `extern` の先が PC 用ランタイムに限られます。
+
+**眠る手立て（`sleep`）はまだありません。** 並行実行と一緒に設計します。

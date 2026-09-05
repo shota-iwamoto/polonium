@@ -689,6 +689,32 @@ def main() -> int:
 ⚠️ 鍵の比較は `==` です。`int` / `float` / `str` は**中身**で、
 クラスと `list` は**同一性**（同じものを指しているか）で比べます。
 
+### time
+
+**自分のプログラムの速さを測るためのモジュールです。**
+
+```python
+import time
+
+def main() -> int:
+    t0: int = time.monotonic_ns()
+    total: int = 0
+    for i in range(10000000):
+        total = total + i
+    print(str(time.since_ms(t0)) + " ms")   # → 例: 12.481 ms
+    print(str(total))
+    return 0
+```
+
+`monotonic_ns()` の起点に意味はありません。**2 つ取って引き算**して使います
+（`since_ms` / `since_sec` はそれを 1 行でやるものです）。
+「いつ動いたか」を記録したいときは `now()` / `now_ns()`（実時刻）を使います。
+
+> **⚠️ 速さを測るのに実時刻を使わないでください。** NTP の補正などで
+> **時間が戻ることがあり**、経過時間が負になります。
+
+> **⚠️ このモジュールだけはベアメタルで使えません**（時計は OS の持ち物です）。
+
 ### 数値計算
 
 `math` / `linalg` / `stats` / `random` / `numeric` / `physics` があります。
