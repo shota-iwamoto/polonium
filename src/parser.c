@@ -391,6 +391,16 @@ static Node *postfix(Parser *p) {
             Node *idx = new_node(ND_INDEX, open);
             idx->lhs = n;
             idx->rhs = lo;
+
+            // ★ 第50章：2 次元の添字 m[i, j]。
+            //   ⚠️ 添字は **next でつないだ並び**にします（引数リストと同じ形）。
+            //     list[T] と str は 1 つだけです（意味解析で弾きます）。
+            Node *tail = lo;
+            while (consume(p, ",")) {
+                tail->next = expr(p);
+                tail = tail->next;
+            }
+
             expect_close(p, "]", open);
             n = idx;
             continue;
@@ -778,11 +788,21 @@ static Node *hidden_decl(Token *tok, char *name, Node *init);
 // ★ 「読み」と「書き」で 2 つ作ります。同じノードを使い回しても動きますが、
 //   1 つのノードが木の 2 か所に現れるのは（sema が 2 回検査することになり）
 //   後から読む人を必ず混乱させます。
-static Node *retarget(Node *target, char *obj, char *idx) {
+// ★ 第50章：添字は 1 つとは限りません（m[i, j]）。隠し変数の名前も並びで渡します。
+static Node *retarget(Node *target, char *obj, char **idx, int nidx) {
     Node *n = new_node(target->kind, target->tok);
     n->lhs = new_var_node(target->tok, obj);
-    if (target->kind == ND_INDEX) n->rhs = new_var_node(target->tok, idx);
-    else n->name = target->name;  // ND_FIELD
+    if (target->kind == ND_INDEX) {
+        Node head = {0};
+        Node *cur = &head;
+        for (int i = 0; i < nidx; i++) {
+            cur->next = new_var_node(target->tok, idx[i]);
+            cur = cur->next;
+        }
+        n->rhs = head.next;
+    } else {
+        n->name = target->name;  // ND_FIELD
+    }
     return n;
 }
 
@@ -816,16 +836,28 @@ static Node *aug_assign(Parser *p, Token *t, OpKind op, Node *target, Node *rhs)
     cur->next = hidden_decl(target->tok, obj, target->lhs);
     cur = cur->next;
 
-    char *idx = NULL;
+    // ★ 第50章：添字は 1 つとは限りません（m[i, j] += v）。全部を 1 回ずつ
+    //   隠し変数に入れます。⚠️ 並びから外すときに next を切ること
+    //   （切らないと、隠し変数の初期化式に隣の添字がぶら下がったままになります）。
+    char *idx[8];
+    int nidx = 0;
     if (target->kind == ND_INDEX) {
-        idx = hidden_name(p, "aug.idx");
-        cur->next = hidden_decl(target->tok, idx, target->rhs);
-        cur = cur->next;
+        for (Node *ix = target->rhs; ix;) {
+            Node *nx = ix->next;
+            ix->next = NULL;
+            if (nidx == 8)
+                error_at(target->tok, "添字が多すぎます（8 個までです）");
+            idx[nidx] = hidden_name(p, "aug.idx");
+            cur->next = hidden_decl(target->tok, idx[nidx], ix);
+            cur = cur->next;
+            nidx++;
+            ix = nx;
+        }
     }
 
     Node *asg = new_node(ND_ASSIGN, t);
-    asg->lhs = retarget(target, obj, idx);  // 書き
-    asg->rhs = new_binop_node(t, op, retarget(target, obj, idx), rhs);  // 読み
+    asg->lhs = retarget(target, obj, idx, nidx);  // 書き
+    asg->rhs = new_binop_node(t, op, retarget(target, obj, idx, nidx), rhs);  // 読み
     cur->next = asg;
 
     // 隠し変数をこの文の中に閉じ込めるため、ブロックで包む（第11章の for と同じ）

@@ -336,6 +336,53 @@ class Matrix:
     def is_square(self) -> bool:
         return self.rows == self.cols
 
+    # ── 演算子（第50章）────────────────────────────────────
+    #
+    # ★ これで行列の式がそのまま読めます。
+    #
+    #     c = a * b + d          （前は madd(matmul(a, b), d)）
+    #     print(str(m[i, j]))    （前は m.get(i, j)）
+    #
+    # ⚠️ **`*` は行列の積です（numpy とは違います）。**
+    #   numpy の `a * b` は要素ごとの積、`a @ b` が行列の積ですが、
+    #   Polonium に `@` はありません。数学の書き方に合わせて `*` を
+    #   行列の積にしました。**要素ごとの積は `mmul(a, b)`** です。
+    #
+    # ⚠️ **スカラー倍は `mscale(a, k)`** です。`a * 2.0` とは書けません
+    #   （多重定義は左辺の型だけで決まり、引数の型では選び分けないため）。
+
+    def __add__(self, o: Matrix) -> Matrix:
+        return madd(self, o)
+
+    def __sub__(self, o: Matrix) -> Matrix:
+        return msub(self, o)
+
+    # ⚠️ 行列の積です（要素ごとの積は mmul）
+    def __mul__(self, o: Matrix) -> Matrix:
+        return matmul(self, o)
+
+    def __neg__(self) -> Matrix:
+        return mneg(self)
+
+    # 形と全要素が等しいか。⚠️ float の比較なので、誤差は考慮しません
+    #   （近いかを見たいときは msub してノルムを取ってください）。
+    def __eq__(self, o: Matrix) -> bool:
+        if self.rows != o.rows or self.cols != o.cols:
+            return False
+        i: int = 0
+        while i < self.size():
+            if self.data[i] != o.data[i]:
+                return False
+            i = i + 1
+        return True
+
+    # m[i, j] / m[i, j] = v（第50章）
+    def __getitem__(self, i: int, j: int) -> float:
+        return self.get(i, j)
+
+    def __setitem__(mut self, i: int, j: int, v: float) -> None:
+        self.set(i, j, v)
+
 
 # ── 作る ────────────────────────────────────────────────────
 

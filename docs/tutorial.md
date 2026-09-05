@@ -569,6 +569,48 @@ def main() -> int:
 
 ---
 
+### 6.6 演算子の多重定義
+
+**クラスに `__add__` などを書くと、演算子で書けます**（Python と同じ名前です）。
+
+```python
+class Money:
+    yen: int
+
+    def init(self, yen: int) -> None:
+        self.yen = yen
+
+    def __add__(self, o: Money) -> Money:
+        return Money(self.yen + o.yen)
+
+    def __eq__(self, o: Money) -> bool:
+        return self.yen == o.yen
+
+def main() -> int:
+    a: Money = Money(300)
+    b: Money = Money(120)
+    print(str((a + b).yen))     # → 420
+    print(str(a != b))          # → True（__eq__ から導かれます）
+    return 0
+```
+
+使えるのは `+ - * / // % **`・単項 `-`・`== != < <= > >=`、そして添字です。
+
+```python
+m[i, j]          # → __getitem__(i, j)
+m[i, j] = v      # → __setitem__(i, j, v)
+```
+
+`linalg.Matrix` はこれを使っているので、行列の式がそのまま書けます。
+
+```python
+c = a * b + d        # ⚠️ '*' は行列の積です（要素ごとの積は linalg.mmul）
+print(str(c[0, 0]))
+```
+
+> **⚠️ 左辺の型だけで決まります。** `2.0 * m` は書けません（`m * 2.0`）。
+> 反転（Python の `__rmul__`）はありません。
+
 ## 7. 標準ライブラリ
 
 `import` するだけで使えます。**中身はすべて Polonium で書かれています**（`lib/*.po`）。

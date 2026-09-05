@@ -461,6 +461,7 @@ static Type *check_call(Sema *s, Node *n);
 static Type *check_list_lit(Sema *s, Node *n);
 static Type *check_index_expr(Sema *s, Node *n);
 static Type *check_method(Sema *s, Node *n);
+static Type *check_class_method(Sema *s, Node *n, Class *c);
 static Type *check_field(Sema *s, Node *n);
 
 // 型注釈（構文）を Type（意味）に変換する。
@@ -978,6 +979,56 @@ static Type *check_tuple(Sema *s, Node *n);     // 第44章：タプル
 static Type *check_slice(Sema *s, Node *n);     // 第37章：スライス
 static Type *check_in(Sema *s, Node *n);        // 第37章：in / not in
 
+// ── 演算子の多重定義（第50章）──────────────────────────────
+//
+// ★ `a + b` の左辺がクラスで、そのクラスに `__add__` があれば
+//   **`a.__add__(b)` に読み替えます。** 読み替えるのは意味解析だけで、
+//   codegen と IR は 1 行も変えていません（ふつうのメソッド呼び出しに
+//   なるためです）。
+//
+// 🤔 なぜ Python と同じ `__add__` という名前か
+//   ふつうのメソッドと**必ず区別できる**名前が要ります。`add` にすると
+//   `linalg.Matrix.add` のような既存のメソッドが、書いた覚えのないところで
+//   演算子として呼ばれてしまいます。`__…__` は Python の利用者にそのまま
+//   通じる、いちばん驚きの少ない選び方です。
+//
+// ⚠️ **反転（`__radd__`）はありません。** `2.0 * m` は書けません
+//   （`m * 2.0` と書いてください）。左辺の型だけで決まるほうが、
+//   どのメソッドが呼ばれるか読んで分かります。
+static const char *op_method_name(OpKind op) {
+    switch (op) {
+        case OP_ADD: return "__add__";
+        case OP_SUB: return "__sub__";
+        case OP_MUL: return "__mul__";
+        case OP_TRUEDIV: return "__truediv__";
+        case OP_FLOORDIV: return "__floordiv__";
+        case OP_MOD: return "__mod__";
+        case OP_POW: return "__pow__";
+        case OP_EQ: return "__eq__";
+        case OP_NE: return "__ne__";
+        case OP_LT: return "__lt__";
+        case OP_LE: return "__le__";
+        case OP_GT: return "__gt__";
+        case OP_GE: return "__ge__";
+        default: return NULL;
+    }
+}
+
+// そのクラスにそのメソッドがあるか
+static bool class_has_method(Class *c, const char *name) {
+    return c && lookup_func_in(c->owner, mangle(c->name, name)) != NULL;
+}
+
+// n（ND_BINOP）を n->lhs.name(n->rhs) の呼び出しに作り替える
+static Type *rewrite_to_method(Sema *s, Node *n, Class *c, const char *name) {
+    n->kind = ND_METHOD;
+    n->name = (char *)name;
+    n->args = n->rhs;
+    n->rhs = NULL;
+    n->args->next = NULL;
+    return check_class_method(s, n, c);
+}
+
 static Type *check_binop(Sema *s, Node *n) {
     // ★ 第37章：in / not in は「両辺が同じ型」ではないので先に分岐します
     if (n->op == OP_IN || n->op == OP_NOTIN) return check_in(s, n);
@@ -986,6 +1037,38 @@ static Type *check_binop(Sema *s, Node *n) {
     if (n->op == OP_IS || n->op == OP_ISNOT) return check_is(s, n);
 
     Type *l = check_expr(s, n->lhs);
+
+    // ★ 第50章：左辺がクラスなら、演算子は多重定義を探します。
+    //   ⚠️ 右辺はここでは検査しません。**メソッドの引数として**
+    //     check_class_method が検査します（2 回検査しないため）。
+    if (l->kind == TY_CLASS && l->cls) {
+        const char *mn = op_method_name(n->op);
+        if (mn && class_has_method(l->cls, mn))
+            return rewrite_to_method(s, n, l->cls, mn);
+
+        // ★ `!=` は `__ne__` が無ければ `not (a == b)` に読み替えます
+        //   （Python と同じ。`__eq__` だけ書けば両方使えます）。
+        if (n->op == OP_NE && class_has_method(l->cls, "__eq__")) {
+            Node *call = new_node(ND_METHOD, n->tok);
+            call->lhs = n->lhs;
+            call->name = "__eq__";
+            call->args = n->rhs;
+            call->args->next = NULL;
+            Type *rt = check_class_method(s, call, l->cls);
+            if (rt->kind != TY_BOOL)
+                error_at(n->tok,
+                         "'!=' に使うには __eq__ が bool を返す必要があります"
+                         "（いまは '%s' を返しています）",
+                         type_name(rt));
+            call->type = rt;
+            n->kind = ND_UNARY;
+            n->op = OP_NOT;
+            n->lhs = call;
+            n->rhs = NULL;
+            return ty_bool;
+        }
+    }
+
     Type *r = check_expr(s, n->rhs);
 
     // ★ 第39章：繰り返し（"ab" * 3 / [0] * 3）だけは **両辺の型が違います**。
@@ -1019,6 +1102,13 @@ static Type *check_binop(Sema *s, Node *n) {
                           "（Polonium には暗黙の型変換がないため、'/' は float 専用です）",
                           "整数の除算に '/' は使えません");
         }
+        if (l->kind == TY_CLASS && op_method_name(n->op))
+            error_at_hint(n->tok,
+                          diag_fmt("クラス '%s' に '%s(self, other) -> …' を"
+                                   "定義すると、この演算子が使えます",
+                                   l->cls->name, op_method_name(n->op)),
+                          "型 '%s' に演算子 '%s' は適用できません", type_name(l),
+                          op_symbol(n->op));
         error_at(n->tok, "型 '%s' に演算子 '%s' は適用できません", type_name(l),
                  op_symbol(n->op));
     }
@@ -1236,6 +1326,14 @@ static Type *check_unary(Sema *s, Node *n) {
         return ty_bool;
     }
 
+    // ★ 第50章：クラスの単項マイナスは __neg__ に読み替えます。
+    if (t->kind == TY_CLASS && n->op == OP_NEG && class_has_method(t->cls, "__neg__")) {
+        n->kind = ND_METHOD;
+        n->name = "__neg__";
+        n->args = NULL;
+        return check_class_method(s, n, t->cls);
+    }
+
     // ★ float には - と + が使えます（~ はビット演算なので int だけ）。
     if (t->kind == TY_FLOAT) {
         if (n->op == OP_NEG || n->op == OP_POS) return t;
@@ -1441,6 +1539,36 @@ static void check_assign(Sema *s, Node *n) {
 
     // 添字への代入 xs[i] = v（第10章）
     if (target->kind == ND_INDEX) {
+        // ★ 第50章：クラスへの代入は __setitem__ に読み替えます。
+        //   m[i, j] = v  →  m.__setitem__(i, j, v)
+        //   ⚠️ 読み替えるのは**代入文そのもの**です（値まで実引数にするため）。
+        Type *ot = check_expr(s, target->lhs);
+        if (ot->kind == TY_CLASS && ot->cls) {
+            if (!class_has_method(ot->cls, "__setitem__"))
+                error_at_hint(target->tok,
+                              diag_fmt("クラス '%s' に '__setitem__(self, …, 値) -> None' を"
+                                       "定義すると、添字への代入が使えます",
+                                       ot->cls->name),
+                              "型 '%s' の添字には代入できません", type_name(ot));
+
+            Node *args = target->rhs;
+            Node *last = args;
+            while (last->next) last = last->next;
+            n->rhs->next = NULL;
+            last->next = n->rhs;      // 最後の実引数は「代入する値」
+
+            // ⚠️ **代入文のノードそのもの**を呼び出しにします。
+            //   （文の並び next を壊さないよう、入れ替えではなく上書きです。）
+            n->kind = ND_METHOD;
+            n->tok = target->tok;
+            n->name = "__setitem__";
+            n->lhs = target->lhs;
+            n->args = args;
+            n->rhs = NULL;
+            n->type = check_class_method(s, n, ot->cls);
+            return;
+        }
+
         Type *et = check_index_expr(s, target);
         target->type = et;
 
@@ -1849,6 +1977,33 @@ static Type *check_list_lit(Sema *s, Node *n) {
 // 添字アクセスの検査（型システム 5.8）
 static Type *check_index_expr(Sema *s, Node *n) {
     Type *ot = check_expr(s, n->lhs);
+
+    // ★ 第50章：クラスの添字は __getitem__ に読み替えます（m[i, j] を含む）。
+    //   ⚠️ 添字は **並び**なので、そのまま実引数のリストになります。
+    if (ot->kind == TY_CLASS && ot->cls) {
+        if (!class_has_method(ot->cls, "__getitem__"))
+            error_at_hint(n->tok,
+                          diag_fmt("クラス '%s' に '__getitem__(self, …) -> …' を"
+                                   "定義すると、添字が使えます", ot->cls->name),
+                          "型 '%s' は添字を取れません", type_name(ot));
+        n->kind = ND_METHOD;
+        n->name = "__getitem__";
+        n->args = n->rhs;
+        n->rhs = NULL;
+        return check_class_method(s, n, ot->cls);
+    }
+
+    // list[T] と str の添字は 1 つだけです
+    if (n->rhs->next) {
+        Diag d = {0};
+        d.message = diag_fmt("型 '%s' に添字を 2 つ以上は書けません", type_name(ot));
+        d.primary.tok = n->rhs->next->tok;
+        d.primary.label = "2 つめの添字はここです";
+        d.hint = "2 次元の添字（m[i, j]）が使えるのは __getitem__ を"
+                 "定義したクラスだけです";
+        diag_fail(&d);
+    }
+
     Type *it = check_expr(s, n->rhs);
 
     if (it->kind != TY_INT) {

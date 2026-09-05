@@ -963,6 +963,58 @@ class Sema:
                               ast.type_name(b) + "' 型でした）")
         return t
 
+    # ── 演算子の多重定義（第50章）──────────────────────────
+    #
+    # ★ `a + b` の左辺がクラスで、そのクラスに `__add__` があれば
+    #   **`a.__add__(b)` に読み替える。** 読み替えるのは意味解析だけで、
+    #   codegen と IR は 1 行も変えていない（ふつうのメソッド呼び出しになる）。
+    #
+    # ⚠️ **反転（`__radd__`）は無い。** `2.0 * m` は書けない（`m * 2.0` と書く）。
+    def op_method_name(self, op: int) -> str:
+        if op == ast.OP_ADD:
+            return "__add__"
+        if op == ast.OP_SUB:
+            return "__sub__"
+        if op == ast.OP_MUL:
+            return "__mul__"
+        if op == ast.OP_TRUEDIV:
+            return "__truediv__"
+        if op == ast.OP_FLOORDIV:
+            return "__floordiv__"
+        if op == ast.OP_MOD:
+            return "__mod__"
+        if op == ast.OP_POW:
+            return "__pow__"
+        if op == ast.OP_EQ:
+            return "__eq__"
+        if op == ast.OP_NE:
+            return "__ne__"
+        if op == ast.OP_LT:
+            return "__lt__"
+        if op == ast.OP_LE:
+            return "__le__"
+        if op == ast.OP_GT:
+            return "__gt__"
+        if op == ast.OP_GE:
+            return "__ge__"
+        return ""
+
+    # そのクラスにそのメソッドがあるか
+    def class_has_method(mut self, c: ast.Class, name: str) -> bool:
+        owner: types.ModuleSyms = self.syms_by_name(c.owner_name)
+        return self.lookup_func_in(owner, self.mangle(c.name, name)) is not None
+
+    # n（ND_BINOP）を n.lhs.name(n.rhs) の呼び出しに作り替える
+    def rewrite_to_method(mut self, n: mut ast.Node, c: ast.Class,
+                          name: str) -> ast.Type:
+        rhs: ast.Node = unwrap_node(n.rhs)
+        rhs.next = None
+        n.kind = ast.ND_METHOD
+        n.name = copy(name)
+        n.args = rhs
+        n.rhs = None
+        return self.check_class_method(n, c)
+
     def check_binop(mut self, n: ast.Node) -> ast.Type:
         # ★ 第37章：in / not in は「両辺が同じ型」ではないので先に分岐
         if n.op == ast.OP_IN or n.op == ast.OP_NOTIN:
@@ -975,6 +1027,37 @@ class Sema:
         lhs: ast.Node = unwrap_node(n.lhs)
         rhs: ast.Node = unwrap_node(n.rhs)
         l: ast.Type = self.check_expr(lhs)
+
+        # ★ 第50章：左辺がクラスなら、演算子は多重定義を探す。
+        #   ⚠️ 右辺はここでは検査しない。**メソッドの引数として**
+        #     check_class_method が検査する（2 回検査しないため）。
+        if l.kind == ast.TY_CLASS:
+            lc: ast.Class = unwrap_class(l.cls)
+            mn: str = self.op_method_name(n.op)
+            if mn != "" and self.class_has_method(lc, mn):
+                return self.rewrite_to_method(n, lc, mn)
+
+            # ★ `!=` は `__ne__` が無ければ `not (a == b)` に読み替える
+            #   （Python と同じ。`__eq__` だけ書けば両方使える）。
+            if n.op == ast.OP_NE and self.class_has_method(lc, "__eq__"):
+                call: ast.Node = ast.new_node(ast.ND_METHOD, n.tok)
+                call.lhs = lhs
+                call.name = "__eq__"
+                rhs.next = None
+                call.args = rhs
+                rt: ast.Type = self.check_class_method(call, lc)
+                if rt.kind != ast.TY_BOOL:
+                    diag.error_at(unwrap_tok(n.tok),
+                                  "'!=' に使うには __eq__ が bool を返す必要が" +
+                                  "あります（いまは '" + ast.type_name(rt) +
+                                  "' を返しています）")
+                call.type = rt
+                n.kind = ast.ND_UNARY
+                n.op = ast.OP_NOT
+                n.lhs = call
+                n.rhs = None
+                return self.ty_bool()
+
         r: ast.Type = self.check_expr(rhs)
 
         # ★ 第39章：繰り返し（"ab" * 3 / [0] * 3）だけは両辺の型が違う。
@@ -999,6 +1082,15 @@ class Sema:
                                    "（Polonium には暗黙の型変換がないため、" +
                                    "'/' は float 専用です）",
                                    "整数の除算に '/' は使えません")
+            # ★ 第50章：クラスなら「多重定義すれば書ける」ことを示す
+            if l.kind == ast.TY_CLASS and self.op_method_name(n.op) != "":
+                diag.error_at_hint(unwrap_tok(n.tok),
+                                   "クラス '" + unwrap_class(l.cls).name +
+                                   "' に '" + self.op_method_name(n.op) +
+                                   "(self, other) -> …' を定義すると、" +
+                                   "この演算子が使えます",
+                                   "型 '" + ast.type_name(l) + "' に演算子 '" +
+                                   ast.op_symbol(n.op) + "' は適用できません")
             diag.error_at(unwrap_tok(n.tok),
                           "型 '" + ast.type_name(l) + "' に演算子 '" +
                           ast.op_symbol(n.op) + "' は適用できません")
@@ -1054,6 +1146,15 @@ class Sema:
                     "演算子 '" + ast.op_symbol(n.op) + "' はここです",
                     n.tok, operand, t)
             return self.ty_bool()
+
+        # ★ 第50章：クラスの単項マイナスは __neg__ に読み替える
+        if t.kind == ast.TY_CLASS and n.op == ast.OP_NEG:
+            uc: ast.Class = unwrap_class(t.cls)
+            if self.class_has_method(uc, "__neg__"):
+                n.kind = ast.ND_METHOD
+                n.name = "__neg__"
+                n.args = None
+                return self.check_class_method(n, uc)
 
         # ★ float には - と + が使える（~ はビット演算なので int だけ）
         if t.kind == ast.TY_FLOAT:
@@ -1232,6 +1333,38 @@ class Sema:
 
         # 添字への代入 xs[i] = v（第10章）
         if target.kind == ast.ND_INDEX:
+            # ★ 第50章：クラスへの代入は __setitem__ に読み替える。
+            #   m[i, j] = v  →  m.__setitem__(i, j, v)
+            #   ⚠️ 読み替えるのは**代入文そのもの**（値まで実引数にするため）。
+            tobj: ast.Type = self.check_expr(unwrap_node(target.lhs))
+            if tobj.kind == ast.TY_CLASS:
+                sc: ast.Class = unwrap_class(tobj.cls)
+                if not self.class_has_method(sc, "__setitem__"):
+                    diag.error_at_hint(unwrap_tok(target.tok),
+                                       "クラス '" + sc.name +
+                                       "' に '__setitem__(self, …, 値) -> None' を" +
+                                       "定義すると、添字への代入が使えます",
+                                       "型 '" + ast.type_name(tobj) +
+                                       "' の添字には代入できません")
+                args: ast.Node = unwrap_node(target.rhs)
+                last: ast.Node = args
+                while last.next is not None:
+                    last = unwrap_node(last.next)
+                val: ast.Node = unwrap_node(n.rhs)
+                val.next = None
+                last.next = val          # 最後の実引数は「代入する値」
+
+                # ⚠️ **代入文のノードそのもの**を呼び出しにする
+                #   （文の並び next を壊さないよう、入れ替えではなく上書き）。
+                n.kind = ast.ND_METHOD
+                n.tok = target.tok
+                n.name = "__setitem__"
+                n.lhs = target.lhs
+                n.args = args
+                n.rhs = None
+                n.type = self.check_class_method(n, sc)
+                return
+
             et: ast.Type = self.check_index_expr(target)
             target.type = et
 
@@ -1747,10 +1880,37 @@ class Sema:
         self.expected = None
         return ast.type_list(et)
 
-    def check_index_expr(mut self, n: ast.Node) -> ast.Type:
+    def check_index_expr(mut self, n: mut ast.Node) -> ast.Type:
         obj: ast.Node = unwrap_node(n.lhs)
         idx: ast.Node = unwrap_node(n.rhs)
         ot: ast.Type = self.check_expr(obj)
+
+        # ★ 第50章：クラスの添字は __getitem__ に読み替える（m[i, j] を含む）。
+        #   ⚠️ 添字は **並び**なので、そのまま実引数のリストになる。
+        if ot.kind == ast.TY_CLASS:
+            gc: ast.Class = unwrap_class(ot.cls)
+            if not self.class_has_method(gc, "__getitem__"):
+                diag.error_at_hint(unwrap_tok(n.tok),
+                                   "クラス '" + gc.name +
+                                   "' に '__getitem__(self, …) -> …' を" +
+                                   "定義すると、添字が使えます",
+                                   "型 '" + ast.type_name(ot) +
+                                   "' は添字を取れません")
+            n.kind = ast.ND_METHOD
+            n.name = "__getitem__"
+            n.args = idx
+            n.rhs = None
+            return self.check_class_method(n, gc)
+
+        # list[T] と str の添字は 1 つだけ
+        if idx.next is not None:
+            diag.error_full(unwrap_tok(unwrap_node(idx.next).tok),
+                            "型 '" + ast.type_name(ot) +
+                            "' に添字を 2 つ以上は書けません",
+                            "2 つめの添字はここです", None, "",
+                            "2 次元の添字（m[i, j]）が使えるのは __getitem__ を" +
+                            "定義したクラスだけです")
+
         it: ast.Type = self.check_expr(idx)
 
         if it.kind != ast.TY_INT:

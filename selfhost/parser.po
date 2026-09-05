@@ -335,6 +335,17 @@ class Parser:
                 idx: ast.Node = ast.new_node(ast.ND_INDEX, open_tok)
                 idx.lhs = n
                 idx.rhs = lo
+
+                # ★ 第50章：2 次元の添字 m[i, j]。
+                #   ⚠️ 添字は **next でつないだ並び**にする（引数リストと同じ形）。
+                #     list[T] と str は 1 つだけ（意味解析で弾く）。
+                if lo is not None:
+                    tail: ast.Node = lo
+                    while self.consume(",") is not None:
+                        nxt: ast.Node = self.expr()
+                        tail.next = nxt
+                        tail = nxt
+
                 self.expect_close("]", open_tok)
                 n = idx
                 continue
@@ -649,11 +660,18 @@ class Parser:
         return n
 
     # 代入先と同じ形のノードを、対象を隠し変数に差し替えて作り直す
-    def retarget(self, target: ast.Node, obj: str, idx: str) -> ast.Node:
+    # ★ 第50章：添字は 1 つとは限らない（m[i, j]）。名前も並びで渡す。
+    def retarget(self, target: ast.Node, obj: str, idx: list[str]) -> ast.Node:
         n: ast.Node = ast.new_node(target.kind, target.tok)
         n.lhs = ast.new_var_node(target.tok, obj)
         if target.kind == ast.ND_INDEX:
-            n.rhs = ast.new_var_node(target.tok, idx)
+            head: ast.Node = ast.new_node(ast.ND_BLOCK, target.tok)
+            cur: ast.Node = head
+            for nm in idx:
+                v: ast.Node = ast.new_var_node(target.tok, nm)
+                cur.next = v
+                cur = v
+            n.rhs = head.next
         else:
             n.name = target.name   # ND_FIELD
         return n
@@ -678,12 +696,22 @@ class Parser:
         cur.next = decl
         cur = decl
 
-        idx: str = ""
+        # ★ 第50章：添字は 1 つとは限らない（m[i, j] += v）。全部を 1 回ずつ
+        #   隠し変数に入れる。⚠️ 並びから外すときに next を切ること
+        #   （切らないと、隠し変数の初期化式に隣の添字がぶら下がったままになる）。
+        idx: list[str] = []
         if target.kind == ast.ND_INDEX:
-            idx = self.hidden_name("aug.idx")
-            decl2: ast.Node = self.hidden_decl(target.tok, idx, target.rhs)
-            cur.next = decl2
-            cur = decl2
+            ix: ast.Node | None = target.rhs
+            while ix is not None:
+                cur_ix: ast.Node = ix
+                nx: ast.Node | None = cur_ix.next
+                cur_ix.next = None
+                nm2: str = self.hidden_name("aug.idx")
+                idx.append(nm2)
+                decl2: ast.Node = self.hidden_decl(target.tok, nm2, cur_ix)
+                cur.next = decl2
+                cur = decl2
+                ix = nx
 
         asg: ast.Node = ast.new_node(ast.ND_ASSIGN, t)
         asg.lhs = self.retarget(target, obj, idx)                    # 書き
