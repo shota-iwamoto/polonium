@@ -68,6 +68,15 @@ jobs:
       - name: ① ビルド
         run: make
 
+      # ★ 第54章：**インライン化の見積りを、この機械で測って表示します。**
+      #   小さなメソッド（linalg.Matrix.get / set）が呼び出し元に畳まれるかは、
+      #   clang の版と「外れの経路の呼び出しの数」で決まります。
+      #   ⚠️ ここは**落としません**（数字を残すだけ）。番人テストは make test の
+      #     linalg_matmul_perf.po のほうです。
+      - name: インライン化の見積り（診断。落としません）
+        continue-on-error: true
+        run: make inline-report
+
       - name: ② テスト（+ 解放の検査 + セルフホストの比較）
         run: make test
 

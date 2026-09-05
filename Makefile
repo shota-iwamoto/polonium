@@ -147,7 +147,30 @@ OBJS    := $(SRCS:src/%.c=build/%.o)
 DEPS    := $(OBJS:.o=.d)
 TARGET  := build/$(LANG_CC)$(EXEEXT)
 
-.PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan drop-asan drop-leak info
+
+# ── インライン化の見積りを見る（第54章）─────────────────────
+#
+# ★ 「小さなメソッドが呼び出し元に畳まれているか」を **clang に直接聞きます**。
+#   推測せずに済むように、CI でも毎回表示しています。
+#
+#   ⚠️ cost が threshold 以上だと畳まれません。外れの経路（範囲外・桁あふれ・
+#     None）の**呼び出し 1 つにつき約 25 点**かかります（規約 R13）。
+inline-report: $(TARGET) $(RUNTIME_OBJ)
+	@echo "── 使う clang"
+	@$(CLANG) --version | head -2
+	@echo ""
+	@echo "── linalg.Matrix.get / set は呼び出し元に畳まれるか"
+	@rm -rf build/inline && mkdir -p build/inline
+	@./$(TARGET) -O2 --keep-ll tests/cases/linalg_matmul_perf.po -o build/inline/x >/dev/null 2>&1 || true
+	@out=$$($(CLANG) -O2 -Rpass-missed=inline build/inline/x.*.ll $(RUNTIME_OBJ) -o /dev/null 2>&1 | grep -E "linalg.Matrix.(get|set). not inlined into .linalg.matmul." | sort -u); \
+	if [ -n "$$out" ]; then \
+	  echo "  ⚠️ 畳まれていません（内側ループに呼び出しが残ります）"; \
+	  echo "$$out" | sed "s/^/  /"; \
+	else \
+	  echo "  ★ 畳まれています（not inlined の指摘なし）"; \
+	fi
+
+.PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan drop-asan drop-leak info inline-report
 
 all: $(TARGET) $(RUNTIME_OBJ)
 

@@ -270,17 +270,29 @@ PlList *pl_argv(void) {
 // ⚠️ 実時刻を使わないのは、NTP の補正で**時間が戻ることがある**ためです。
 //    速さを測っている最中に戻ると、負の経過時間が出ます。
 long long pl_time_ns(void) {
-    struct timespec ts;
 #if defined(CLOCK_MONOTONIC)
     // POSIX（macOS 10.12+ / Linux / MSYS2 の mingw-w64）
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
-        return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+    {
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+            return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+    }
 #endif
-    // ⚠️ 単調時計が無い環境への逃げ道。timespec_get は C11 の標準なので
-    //    どこでも通りますが、実時刻なので**戻ることがあります**。
-    if (timespec_get(&ts, TIME_UTC) == TIME_UTC)
-        return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
-    return 0;
+    // ⚠️ 単調時計が無い環境への逃げ道。実時刻なので**戻ることがあります**。
+    //
+    // ⚠️ **timespec_get は「C11 だからどこでもある」ではありません。**
+    //    MSYS2（mingw-w64）の clang は -std=c11 でも持っていません
+    //    （CI の Windows ジョブが「undeclared function」で見つけました）。
+    //    TIME_UTC が定義されているかで判断します。
+#if defined(TIME_UTC)
+    {
+        struct timespec ts;
+        if (timespec_get(&ts, TIME_UTC) == TIME_UTC)
+            return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+    }
+#endif
+    // 最後の逃げ道（秒の精度しかありません）。time は C89 からあります。
+    return (long long)time(NULL) * 1000000000LL;
 }
 
 // 実時刻（1970-01-01 00:00:00 UTC からのナノ秒）。
@@ -288,8 +300,19 @@ long long pl_time_ns(void) {
 // ⚠️ こちらは**飛びます**（NTP・夏時間・利用者が時計を直す）。
 //    経過時間を測るのには使わないでください。
 long long pl_time_wall_ns(void) {
-    struct timespec ts;
-    if (timespec_get(&ts, TIME_UTC) == TIME_UTC)
-        return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
-    return 0;
+#if defined(TIME_UTC)
+    {
+        struct timespec ts;
+        if (timespec_get(&ts, TIME_UTC) == TIME_UTC)
+            return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+    }
+#endif
+#if defined(CLOCK_REALTIME)
+    {
+        struct timespec ts;
+        if (clock_gettime(CLOCK_REALTIME, &ts) == 0)
+            return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+    }
+#endif
+    return (long long)time(NULL) * 1000000000LL;
 }
