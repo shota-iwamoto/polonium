@@ -759,7 +759,8 @@ def main() -> int:
 
 ### 数値計算
 
-`math` / `linalg` / `stats` / `random` / `numeric` / `physics` があります。
+`math` / `linalg` / `stats` / `random` / `numeric` / `physics` /
+**`complex`** / **`fft`** があります。
 **どれも Polonium で書かれていて、`libm` を呼びません**（ベアメタルでも動きます）。
 
 ```python
@@ -778,6 +779,27 @@ def main() -> int:
     print(physics.escape_velocity(5.972e24, 6.371e6))   # 11185.977892
     return 0
 ```
+
+複素数とフーリエ変換もあります（`complex` / `fft`）。
+**言語の組み込み型ではなく、演算子の多重定義（§6.6）で書かれた
+ふつうのライブラリです。**
+
+```python
+import complex
+import fft
+
+def main() -> int:
+    z: complex.Complex = complex.rect(3.0, 4.0)
+    print((z * z).show())            # → -7.0+24.0i
+    print(str(complex.mag(z)))       # → 5.0
+
+    xs: list[float] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    print(str(fft.spectrum(xs)[0]))  # → 8.0
+    return 0
+```
+
+> **⚠️ スカラー倍は `complex.scale(z, 2.0)`** です（`z * 2.0` は書けません）。
+> **⚠️ `fft` の長さは 2 のべき乗だけ**です。
 
 ベクトルは専用の型ではなく **`list[float]` をそのまま**使います。
 一覧は [spec/stdlib.md](spec/stdlib.md) を見てください。

@@ -28,6 +28,8 @@ def main() -> int:
 | [`numeric`](#numeric) | **数値解析** — 積分・求根・微分・常微分方程式・最適化 |
 | [`physics`](#physics) | **物理定数と単位換算** |
 | [`time`](#time) | **時刻と経過時間** — 自分のプログラムの速さを測る |
+| [`complex`](#complex) | **複素数** — Python の `cmath` 相当 |
+| [`fft`](#fft) | **高速フーリエ変換** |
 
 > **⚠️ 数値計算のモジュールも、すべて Polonium で書かれています。**
 > `libm` を呼びません。ランタイムが libc に依存しない約束（ベアメタルで動く）
@@ -770,3 +772,83 @@ def main() -> int:
 > このモジュールだけは `extern` の先が PC 用ランタイムに限られます。
 
 **眠る手立て（`sleep`）はまだありません。** 並行実行と一緒に設計します。
+
+---
+
+## complex
+
+**複素数です**（第51章）。`lib/complex.po` は **Polonium だけで書かれていて、
+言語は 1 行も変えていません** — 0.7.0 の[演算子の多重定義](language-spec.md)で
+`z1 * z2 + z3` がそのまま書けるようになったためです。
+
+```python
+import complex
+
+def main() -> int:
+    a: complex.Complex = complex.rect(3.0, 4.0)
+    b: complex.Complex = complex.rect(1.0, -2.0)
+    print((a * b).show())             # → 11.0-2.0i
+    print(str(complex.mag(a)))        # → 5.0
+    print(complex.sqrt(complex.rect(-1.0, 0.0)).show())   # → 0.0+1.0i
+    return 0
+```
+
+| 作る | |
+|---|---|
+| `rect(re, im)` | 実部と虚部から |
+| `polar(r, theta)` | 大きさと偏角から |
+| `real(x)` / `zero()` / `one()` / `i()` | 実数から / 0 / 1 / 虚数単位 |
+| `from_reals(xs)` | `list[float]` → `list[Complex]` |
+
+| 演算子 | 意味 |
+|---|---|
+| `+` `-` `*` `/` | 複素数どうしの四則 |
+| 単項 `-` | 符号反転 |
+| `==` `!=` | 実部・虚部の一致（⚠️ 誤差は考慮しません。`isclose` を使ってください） |
+
+| 関数 | |
+|---|---|
+| `mag(z)` / `mag2(z)` | 大きさ `\|z\|`（`hypot` なので途中であふれません）/ `\|z\|²` |
+| `phase(z)` / `conj(z)` | 偏角（-π〜π）/ 共役 |
+| `scale(z, k)` | **スカラー倍**（下の注意を見てください） |
+| `exp` `log` `sqrt` `pow` `powi` `sin` `cos` `tan` | 初等関数（名前は Python の `cmath` に合わせています） |
+| `reals` / `imags` / `mags` | `list[Complex]` から実部 / 虚部 / 大きさを取り出す |
+| `isclose(a, b, tol)` | `\|a - b\| <= tol` |
+
+> **⚠️ スカラー倍は `scale(z, k)` です。** `z * 2.0` とは書けません。
+> 演算子の多重定義は**左辺の型だけ**で決まり、引数の型では選び分けないためです。
+
+> **⚠️ 複素数はオブジェクトです**（`int` / `float` のような「値」ではありません）。
+> 演算のたびに 1 つ確保します。内側ループで何万回も回すところは、
+> 実部と虚部を `list[float]` 2 本で持つほうが速くなります。
+
+---
+
+## fft
+
+**高速フーリエ変換**（第51章）。`complex` の上に、やはり Polonium だけで
+書かれています。
+
+```python
+import fft
+
+def main() -> int:
+    xs: list[float] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    for v in fft.spectrum(xs):
+        print(str(v))          # → 8.0, 0.0, 0.0, ...
+    return 0
+```
+
+| 関数 | |
+|---|---|
+| `fft(zs)` / `ifft(zs)` | 順変換 / 逆変換（`ifft` が 1/N を掛けます） |
+| `fft_real(xs)` | `list[float]` をそのまま変換 |
+| `spectrum(xs)` | 振幅スペクトル（`\|X[k]\|` の並び） |
+| `is_pow2(n)` | 長さが 2 のべき乗か |
+
+> **⚠️ 長さは 2 のべき乗だけです**（基数 2 の Cooley–Tukey）。
+> ほかの長さは `panic` します。0 埋めしてから渡してください。
+
+> **⚠️ 速さより読みやすさを取っています。** 蝶形演算のたびに複素数を
+> 確保します。大きな N を何度も変換するなら、実部と虚部を
+> `list[float]` 2 本で持つ書き方のほうが速くなります。
