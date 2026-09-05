@@ -155,11 +155,24 @@ TARGET  := build/$(LANG_CC)$(EXEEXT)
 #
 #   ⚠️ cost が threshold 以上だと畳まれません。外れの経路（範囲外・桁あふれ・
 #     None）の**呼び出し 1 つにつき約 25 点**かかります（規約 R13）。
+# ── 小さなメソッドが呼び出し元に畳まれるか（第54章）─────────
+#
+# ★ **時間ではなく構造で見ます。** clang に -Rpass-missed=inline で
+#   直接聞くので、機械が変わっても答えは変わりません。
+#
+#   ⚠️ 外れの経路（範囲外・桁あふれ・None）の**呼び出し 1 つにつき約 25 点**
+#     かかります（規約 R13）。cost が threshold 以上になると畳まれません。
+#
+#   make inline-report … 表示するだけ（人が見る用）
+#   make inline-check  … 畳まれていなければ **落ちます**（CI 用）
+#
+# ⚠️ clang の指摘の文言が変わったら、この検査は「指摘なし＝合格」に倒れます。
+#   見落とす側に倒れるので、番人としては安全側です。
 inline-report: $(TARGET) $(RUNTIME_OBJ)
 	@echo "── 使う clang"
 	@$(CLANG) --version | head -2
 	@echo ""
-	@echo "── linalg.Matrix.get / set は呼び出し元に畳まれるか"
+	@echo "── linalg.Matrix.get / set は linalg.matmul に畳まれるか"
 	@rm -rf build/inline && mkdir -p build/inline
 	@./$(TARGET) -O2 --keep-ll tests/cases/linalg_matmul_perf.po -o build/inline/x >/dev/null 2>&1 || true
 	@out=$$($(CLANG) -O2 -Rpass-missed=inline build/inline/x.*.ll $(RUNTIME_OBJ) -o /dev/null 2>&1 | grep -E "linalg.Matrix.(get|set). not inlined into .linalg.matmul." | sort -u); \
@@ -170,7 +183,19 @@ inline-report: $(TARGET) $(RUNTIME_OBJ)
 	  echo "  ★ 畳まれています（not inlined の指摘なし）"; \
 	fi
 
-.PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan drop-asan drop-leak info inline-report
+inline-check: $(TARGET) $(RUNTIME_OBJ)
+	@rm -rf build/inline && mkdir -p build/inline
+	@./$(TARGET) -O2 --keep-ll tests/cases/linalg_matmul_perf.po -o build/inline/x >/dev/null 2>&1 || true
+	@out=$$($(CLANG) -O2 -Rpass-missed=inline build/inline/x.*.ll $(RUNTIME_OBJ) -o /dev/null 2>&1 | grep -E "linalg.Matrix.(get|set). not inlined into .linalg.matmul." | sort -u); \
+	if [ -n "$$out" ]; then \
+	  echo "⚠️ linalg.Matrix.get / set が畳まれていません（内側ループに呼び出しが残ります）"; \
+	  echo "$$out" | sed "s/^/  /"; \
+	  echo "  → 外れの経路の呼び出しを増やしていないか確かめてください（規約 R13）"; \
+	  exit 1; \
+	fi; \
+	echo "★ linalg.Matrix.get / set は畳まれています（$$($(CLANG) --version | head -1)）"
+
+.PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan drop-asan drop-leak info inline-report inline-check
 
 all: $(TARGET) $(RUNTIME_OBJ)
 

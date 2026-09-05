@@ -16,19 +16,19 @@
 #     ② lib/linalg.po の Matrix.index_fail / len_fail への切り出し
 #     ③ 添字の中の桁あふれを**範囲検査に相乗り**させる（第48章。gen_index_expr）
 #
-# ★ 第54章：**比べる相手を変えました。**
-#   はじめは「二重リストの行列積」と比べていましたが、それは
-#   **データの並べ方まで違う**ので、機械が変わると比も変わります
-#   （macOS 2.1 に対して CI の Linux は 4.28。インライン化は効いているのに
-#     番人が鳴りました）。
+# ★ 第54章：**インライン化されたかどうかの判定は、ここではしません。**
 #
-#   いまは **まったく同じ計算を、同じ平坦な list[float] に直接書いたもの**と
-#   比べます。違いは「get / set を通すかどうか」**だけ**です。
+#   時間の比で見ようとして 2 回失敗しました（どちらも CI が教えてくれました）。
 #
-#     畳まれているとき   … 1.1 前後
-#     畳まれないとき     … 3.4 前後（-mllvm -inline-threshold=120 で確認）
-#     しきい値           … 2.0
+#     ① linalg 対 二重リスト     … macOS 2.1 / Linux 4.28（並べ方まで違う）
+#     ② linalg 対 平坦の直書き   … macOS 1.07 / Linux 3.57
+#        （直書き側は N が定数畳み込みできるので、**同じ計算ではない**）
 #
+#   **機械と clang の版が変わると比が変わり、「畳まれていない」と区別できません。**
+#   正確な判定は **`make inline-check`**（clang に -Rpass-missed=inline で直接
+#   聞く。CI でも毎回走ります）に任せました。
+#
+#   ここは「**ひどく遅くなっていないか**」だけを見ます（しきい値 6.0）。
 #   ⚠️ -O0 では誰もインライン化しないので差が出ません。# FLAGS: -O2 が要ります。
 import linalg
 import time
@@ -76,10 +76,10 @@ def main() -> int:
         return 1
 
     ratio: float = float(t_mat) / float(t_flat)
-    if ratio > 2.0:
-        print("NG get/set がインライン化されていません: linalg / 直書き = " +
+    if ratio > 6.0:
+        print("NG linalg.Matrix の行列積がひどく遅いです: linalg / 直書き = " +
               str(ratio))
-        print("   （make inline-report で cost と threshold を見てください）")
+        print("   （まず make inline-check。畳まれているなら別の原因です）")
         return 1
     print("ok")
     return 0
