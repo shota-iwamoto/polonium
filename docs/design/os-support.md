@@ -154,3 +154,24 @@ pragma profile freestanding
 4. **`panic` はランタイム関数 1 本（`pl_panic`）に集約する**（差し替え点を増やさない）
 5. **アンワインドを必要とする仕様を入れない**（エラー処理は戻り値検査。§ [error-handling.md](error-handling.md)）
 6. **`rc[T]` や `list` の内部で確保器を直接呼ばない**（必ず `pl_alloc` 経由。差し替え 1 点に集約）
+
+---
+
+## 時計（第48・54章）
+
+`lib/time.po` の実体は `runtime/hosted.c` にあります（**ベアメタルには
+ありません**。時計は OS の持ち物です）。
+
+| 環境 | 使うもの |
+|---|---|
+| macOS / Linux | `clock_gettime(CLOCK_MONOTONIC)` |
+| MSYS2（mingw-w64） | 同上（mingw-w64 が持っています） |
+| どれも無いとき | `timespec_get`（あれば）→ `time(NULL)`（秒の精度） |
+
+> **⚠️ 「C11 の標準だからどこにでもある」は成り立ちません。**
+> `timespec_get` / `TIME_UTC` は C11 で標準になりましたが、**MSYS2 の clang は
+> `-std=c11` でも持っていません**（CI の Windows ジョブが
+> 「call to undeclared function 'timespec_get'」で見つけました）。
+> **`#if defined(TIME_UTC)` で確かめてから使います。**
+> 同じ理由で `clock_gettime` も `#if defined(CLOCK_MONOTONIC)` で守ります
+> （strict C11 では POSIX の宣言が隠れる環境があります）。

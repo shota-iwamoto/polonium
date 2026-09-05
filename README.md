@@ -92,7 +92,7 @@ sudo make install            # 既定は /usr/local
 make install PREFIX=$HOME/.local   # 自分の環境だけに入れるなら
 
 poloniumc hello.po -o hello  # どこからでも呼べる
-poloniumc --version          # → poloniumc 0.7.2 (stage0)
+poloniumc --version          # → poloniumc 0.7.3 (stage0)
 ```
 
 ### よく使うコマンド
