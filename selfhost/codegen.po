@@ -13,6 +13,15 @@ import token
 import types
 
 
+# ── 別名解析（TBAA）のタグ。第49章。──────────────────────────
+# ⚠️ 番号は C 版（src/codegen.c の TBAA_*）と**必ず同じ**にすること。
+#   2 実装が 1 バイト違わない IR を出す約束（ロードマップ §4-5）。
+TBAA_NONE: str = ""
+TBAA_FIELD: str = ", !tbaa !4"
+TBAA_LISTHDR: str = ", !tbaa !5"
+TBAA_LISTELEM: str = ", !tbaa !6"
+
+
 # break / continue の飛び先（規約 6.5）
 class LoopCtx:
     outer: LoopCtx | None
@@ -268,24 +277,47 @@ class Emitter:
     #
     # ★ zext / trunc はこの 2 つの関数の中だけに閉じ込める
 
-    def gen_load(mut self, ty: ast.Type, ptr: str) -> str:
+    # ── 別名解析のタグ（TBAA。第49章）──────────────────────
+    #
+    # ★ LLVM は既定で「ポインタはどれも同じ場所を指すかもしれない」と考える。
+    #   そのため c.data[i] = v を書くと、その後の self.cols の読み出しが
+    #   **書き換わったかもしれない**と見なされ、ループの外に出せない。
+    #
+    # ★ 重ならない 3 種類に名前を付けて、LLVM に「別物だ」と言い切る。
+    #   field / listhdr（data と len）/ listelem。
+    #   健全性：pl_list_new はヘッダと要素配列を**別々に確保**し、
+    #   クラスのオブジェクトもまた別の確保なので、決して重ならない。
+    #
+    # ⚠️ **タグを付けないアクセスは「何とでも別名かもしれない」**と扱われる。
+    #   ローカル変数・グローバル・文字列・unsafe: の生ポインタ・extern には
+    #   付けない（付けないほうが安全側）。
+    #   ⚠️ 番号は C 版（src/codegen.c の TBAA_*）と同じにすること。
+
+    def gen_load_tb(mut self, ty: ast.Type, ptr: str, tb: str) -> str:
         t: str = self.new_tmp()
         self.emit("  " + t + " = load " + self.llvm_mem_type(ty) + ", ptr " +
-                  ptr + "\n")
+                  ptr + tb + "\n")
         if ty.kind != ast.TY_BOOL:
             return t
         t2: str = self.new_tmp()
         self.emit("  " + t2 + " = trunc i8 " + t + " to i1\n")
         return t2
 
-    def gen_store(mut self, ty: ast.Type, val: str, ptr: str) -> None:
+    def gen_load(mut self, ty: ast.Type, ptr: str) -> str:
+        return self.gen_load_tb(ty, ptr, TBAA_NONE)
+
+    def gen_store_tb(mut self, ty: ast.Type, val: str, ptr: str,
+                     tb: str) -> None:
         v: str = val
         if ty.kind == ast.TY_BOOL:
             t: str = self.new_tmp()
             self.emit("  " + t + " = zext i1 " + v + " to i8\n")
             v = t
         self.emit("  store " + self.llvm_mem_type(ty) + " " + v + ", ptr " +
-                  ptr + "\n")
+                  ptr + tb + "\n")
+
+    def gen_store(mut self, ty: ast.Type, val: str, ptr: str) -> None:
+        self.gen_store_tb(ty, val, ptr, TBAA_NONE)
 
     # ── 基本ブロック（規約 R6 / R7）────────────────────────
 
@@ -989,7 +1021,7 @@ class Emitter:
         lenp: str = self.new_tmp()
         self.emit("  " + lenp + " = getelementptr i8, ptr " + obj + ", i64 8\n")
         ln: str = self.new_tmp()
-        self.emit("  " + ln + " = load i64, ptr " + lenp + "\n")
+        self.emit("  " + ln + " = load i64, ptr " + lenp + TBAA_LISTHDR + "\n")
 
         idx: str = idx0
         if normalize:
@@ -1036,7 +1068,7 @@ class Emitter:
 
         self.emit_label(ok_l)
         data: str = self.new_tmp()
-        self.emit("  " + data + " = load ptr, ptr " + obj + "\n")
+        self.emit("  " + data + " = load ptr, ptr " + obj + TBAA_LISTHDR + "\n")
         ep: str = self.new_tmp()
         self.emit("  " + ep + " = getelementptr " + sty + ", ptr " + data +
                   ", i64 " + idx + "\n")
@@ -1134,7 +1166,8 @@ class Emitter:
         sty: str = self.slot_ty(elem)
         ep: str = self.gen_index_addr(obj, idx0, sty, True, ovf)
         t: str = self.new_tmp()
-        self.emit("  " + t + " = load " + sty + ", ptr " + ep + "\n")
+        self.emit("  " + t + " = load " + sty + ", ptr " + ep + TBAA_LISTELEM +
+                  "\n")
         return self.slot_to_elem(elem, t)
 
     def gen_index_store(mut self, target: ast.Node, val: str) -> None:
@@ -1153,7 +1186,8 @@ class Emitter:
         #   ここで変えると意味が変わるので、振る舞いはそのままにする。
         ep: str = self.gen_index_addr(obj, idx, sty, False, ovf)
         v: str = self.elem_to_slot(elem, val)
-        self.emit("  store " + sty + " " + v + ", ptr " + ep + "\n")
+        self.emit("  store " + sty + " " + v + ", ptr " + ep + TBAA_LISTELEM +
+                  "\n")
 
     # ── 呼び出し ────────────────────────────────────────────
 
@@ -1425,7 +1459,8 @@ class Emitter:
                 self.declare_extern_global(n)
             return self.gen_load(type_of(n), n.ir_name)
 
-        return self.gen_load(type_of(n), self.gen_field_ptr(n))
+        # ★ 第49章：ここは「クラスのフィールド」だと LLVM に伝える（TBAA）
+        return self.gen_load_tb(type_of(n), self.gen_field_ptr(n), TBAA_FIELD)
 
     # インスタンス生成 Token(1, "x")
     # ── 第41章：vtable ──────────────────────────────────────
@@ -2059,7 +2094,8 @@ class Emitter:
                         self.declare_extern_global(target)
                     self.gen_store(type_of(n), v4, target.ir_name)
                     return ""
-                self.gen_store(type_of(n), v4, self.gen_field_ptr(target))
+                self.gen_store_tb(type_of(n), v4, self.gen_field_ptr(target),
+                                  TBAA_FIELD)
                 return ""
 
             self.gen_store(type_of(n), v4, target.ir_name)
@@ -2322,6 +2358,17 @@ def codegen(mod: module.Module, main_ir_name: str, triple: str,
     out.append(strings.join(e.globals_, ""))
     out.append(strings.join(e.decls, ""))
     out.append(strings.join(e.body, ""))
+
+    # ⑥ 第49章：別名解析（TBAA）の型タグ。
+    #   ⚠️ 番号は固定。**2 実装が同じ IR を出す**ため、使っていなくても
+    #     常にこの 7 行を出す。
+    out.append("\n!0 = !{!\"" + langinfo.name() + "\"}\n")
+    out.append("!1 = !{!\"field\", !0}\n")
+    out.append("!2 = !{!\"listhdr\", !0}\n")
+    out.append("!3 = !{!\"listelem\", !0}\n")
+    out.append("!4 = !{!1, !1, i64 0}\n")
+    out.append("!5 = !{!2, !2, i64 0}\n")
+    out.append("!6 = !{!3, !3, i64 0}\n")
     return strings.join(out, "")
 
 

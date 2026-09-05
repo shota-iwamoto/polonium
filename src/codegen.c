@@ -295,10 +295,36 @@ static const char *fcmp_pred(OpKind op) {
 // ★ zext / trunc はこの 2 つの関数の中だけに閉じ込めます。
 //   他の場所には 1 つも現れません。
 
+// ── 別名解析のタグ（TBAA。第49章）──────────────────────────
+//
+// ★ LLVM は既定で「ポインタはどれも同じ場所を指すかもしれない」と考えます。
+//   そのため `c.data[i] = v` を書くと、その後の `self.cols` の読み出しが
+//   **書き換わったかもしれない**と見なされ、ループの外に出せません。
+//   実際、第48章のあとの行列積の内側ループには `self.cols` の
+//   読み直しが残っていました。
+//
+// ★ 重ならない 3 種類に名前を付けて、LLVM に「別物だ」と言い切ります。
+//
+//   field    … クラスのフィールド
+//   listhdr  … list のヘッダ（data ポインタと len）
+//   listelem … list の要素
+//
+//   健全性：`pl_list_new` はヘッダと要素配列を**別々に確保**し
+//   （runtime/core.c）、クラスのオブジェクトもまた別の確保です。
+//   この 3 つは決して重なりません。
+//
+// ⚠️ **タグを付けないアクセスは「何とでも別名かもしれない」**と扱われます。
+//   ローカル変数・グローバル・文字列・`unsafe:` の生ポインタ・`extern` には
+//   付けません。**付けないほうが安全側**です。
+#define TBAA_NONE ""
+#define TBAA_FIELD ", !tbaa !4"
+#define TBAA_LISTHDR ", !tbaa !5"
+#define TBAA_LISTELEM ", !tbaa !6"
+
 // メモリから読む：bool なら i8 → i1 に縮める
-static char *gen_load(Emitter *e, Type *ty, const char *ptr) {
+static char *gen_load_tb(Emitter *e, Type *ty, const char *ptr, const char *tb) {
     char *t = new_tmp(e);
-    sb_printf(&e->fn, "  %s = load %s, ptr %s\n", t, llvm_mem_type(ty), ptr);
+    sb_printf(&e->fn, "  %s = load %s, ptr %s%s\n", t, llvm_mem_type(ty), ptr, tb);
     if (ty->kind != TY_BOOL) return t;
 
     char *t2 = new_tmp(e);
@@ -306,14 +332,23 @@ static char *gen_load(Emitter *e, Type *ty, const char *ptr) {
     return t2;
 }
 
+static char *gen_load(Emitter *e, Type *ty, const char *ptr) {
+    return gen_load_tb(e, ty, ptr, TBAA_NONE);
+}
+
 // メモリへ書く：bool なら i1 → i8 に広げる
-static void gen_store(Emitter *e, Type *ty, const char *val, const char *ptr) {
+static void gen_store_tb(Emitter *e, Type *ty, const char *val, const char *ptr,
+                         const char *tb) {
     if (ty->kind == TY_BOOL) {
         char *t = new_tmp(e);
         sb_printf(&e->fn, "  %s = zext i1 %s to i8\n", t, val);
         val = t;
     }
-    sb_printf(&e->fn, "  store %s %s, ptr %s\n", llvm_mem_type(ty), val, ptr);
+    sb_printf(&e->fn, "  store %s %s, ptr %s%s\n", llvm_mem_type(ty), val, ptr, tb);
+}
+
+static void gen_store(Emitter *e, Type *ty, const char *val, const char *ptr) {
+    gen_store_tb(e, ty, val, ptr, TBAA_NONE);
 }
 
 // ── 基本ブロック（規約 R6 / R7）────────────────────────────
@@ -1039,7 +1074,7 @@ static char *gen_index_addr(Emitter *e, char *obj, char *idx, const char *sty,
     char *lenp = new_tmp(e);
     sb_printf(&e->fn, "  %s = getelementptr i8, ptr %s, i64 8\n", lenp, obj);
     char *len = new_tmp(e);
-    sb_printf(&e->fn, "  %s = load i64, ptr %s\n", len, lenp);
+    sb_printf(&e->fn, "  %s = load i64, ptr %s" TBAA_LISTHDR "\n", len, lenp);
 
     if (normalize) {
         char *isneg = new_tmp(e);
@@ -1086,7 +1121,7 @@ static char *gen_index_addr(Emitter *e, char *obj, char *idx, const char *sty,
 
     emit_label(e, ok_l);
     char *data = new_tmp(e);
-    sb_printf(&e->fn, "  %s = load ptr, ptr %s\n", data, obj);
+    sb_printf(&e->fn, "  %s = load ptr, ptr %s" TBAA_LISTHDR "\n", data, obj);
     char *ep = new_tmp(e);
     sb_printf(&e->fn, "  %s = getelementptr %s, ptr %s, i64 %s\n", ep, sty, data,
               idx);
@@ -1268,7 +1303,7 @@ static char *gen_index(Emitter *e, Node *n) {
     const char *sty = slot_ty(elem);
     char *ep = gen_index_addr(e, obj, idx, sty, true, ovf);
     char *t = new_tmp(e);
-    sb_printf(&e->fn, "  %s = load %s, ptr %s\n", t, sty, ep);
+    sb_printf(&e->fn, "  %s = load %s, ptr %s" TBAA_LISTELEM "\n", t, sty, ep);
     return slot_to_elem(e, elem, t);
 }
 
@@ -1284,7 +1319,7 @@ static void gen_index_store(Emitter *e, Node *target, char *val) {
     //   ここで変えると意味が変わるので、振る舞いはそのままにします。
     char *ep = gen_index_addr(e, obj, idx, sty, false, ovf);
     char *v = elem_to_slot(e, elem, val);
-    sb_printf(&e->fn, "  store %s %s, ptr %s\n", sty, v, ep);
+    sb_printf(&e->fn, "  store %s %s, ptr %s" TBAA_LISTELEM "\n", sty, v, ep);
 }
 
 static char *gen_new(Emitter *e, Node *n);
@@ -1628,7 +1663,8 @@ static char *gen_field(Emitter *e, Node *n) {
 
     // ★ 読み書きは第6章の gen_load / gen_store をそのまま使います。
     //   bool フィールドの i8 ↔ i1 変換（規約 R5）は、何も書かずに手に入ります。
-    return gen_load(e, n->type, gen_field_ptr(e, n));
+    // ★ 第49章：ここは「クラスのフィールド」だと LLVM に伝えます（TBAA）。
+    return gen_load_tb(e, n->type, gen_field_ptr(e, n), TBAA_FIELD);
 }
 
 // インスタンス生成 Token(1, "x")。
@@ -2645,8 +2681,10 @@ static char *gen_stmt(Emitter *e, Node *n) {
                 //    ときだけに限ります（xs[f()].g = v で f が 2 回走るのを防ぐ）。
                 else if (n->lhs->kind == ND_FIELD && !n->lhs->mod_name &&
                          n->lhs->lhs->kind == ND_VAR)
-                    emit_drop_value(e, n->type,
-                                    gen_load(e, n->type, gen_field_ptr(e, n->lhs)));
+                    emit_drop_value(
+                        e, n->type,
+                        gen_load_tb(e, n->type, gen_field_ptr(e, n->lhs),
+                                    TBAA_FIELD));
             }
             // 添字への代入 xs[i] = v（第10章）
             if (n->lhs->kind == ND_INDEX) {
@@ -2661,7 +2699,8 @@ static char *gen_stmt(Emitter *e, Node *n) {
                     gen_store(e, n->type, val, n->lhs->ir_name);
                     return NULL;
                 }
-                gen_store(e, n->type, val, gen_field_ptr(e, n->lhs));
+                gen_store_tb(e, n->type, val, gen_field_ptr(e, n->lhs),
+                             TBAA_FIELD);
                 return NULL;
             }
             gen_store(e, n->type, val, n->lhs->ir_name);
@@ -2964,5 +3003,16 @@ char *codegen(Module *mod, const char *main_ir_name, bool drop, bool no_ovf,
     sb_printf(&out, "%s", sb_str(&e.decls));
     sb_printf(&out, "%s", sb_str(&e.body));
     sb_printf(&out, "%s", sb_str(&e.dropdefs));
+
+    // ⑥ 第49章：別名解析（TBAA）の型タグ。
+    //   ⚠️ 番号は固定です。**2 実装が同じ IR を出す**ため、
+    //     使っていなくても常にこの 7 行を出します。
+    sb_printf(&out, "\n!0 = !{!\"" PLC_LANG_NAME "\"}\n");
+    sb_printf(&out, "!1 = !{!\"field\", !0}\n");
+    sb_printf(&out, "!2 = !{!\"listhdr\", !0}\n");
+    sb_printf(&out, "!3 = !{!\"listelem\", !0}\n");
+    sb_printf(&out, "!4 = !{!1, !1, i64 0}\n");
+    sb_printf(&out, "!5 = !{!2, !2, i64 0}\n");
+    sb_printf(&out, "!6 = !{!3, !3, i64 0}\n");
     return sb_str(&out);
 }
