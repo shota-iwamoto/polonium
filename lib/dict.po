@@ -71,6 +71,10 @@ class Dict[K, V]:
     def has(self, k: K) -> bool:
         return self.index_of(k) >= 0
 
+    # ★ 第52章：`k in d` と書けます（`in` は**右辺の入れ物**が決めます）。
+    def __contains__(self, k: K) -> bool:
+        return self.index_of(k) >= 0
+
     # 無ければ実行時エラー
     # ⚠️ 鍵をメッセージに出しません。K が str とは限らないためです。
     def get(self, k: K) -> V:

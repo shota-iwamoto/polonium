@@ -699,6 +699,7 @@ class Parser:
         # ★ 第50章：添字は 1 つとは限らない（m[i, j] += v）。全部を 1 回ずつ
         #   隠し変数に入れる。⚠️ 並びから外すときに next を切ること
         #   （切らないと、隠し変数の初期化式に隣の添字がぶら下がったままになる）。
+        # ⚠️ 上限（8）は C 版（src/parser.c）と同じにします。
         idx: list[str] = []
         if target.kind == ast.ND_INDEX:
             ix: ast.Node | None = target.rhs
@@ -706,6 +707,8 @@ class Parser:
                 cur_ix: ast.Node = ix
                 nx: ast.Node | None = cur_ix.next
                 cur_ix.next = None
+                if len(idx) == 8:
+                    self.fail(self.tok_of(target), "添字が多すぎます（8 個までです）")
                 nm2: str = self.hidden_name("aug.idx")
                 idx.append(nm2)
                 decl2: ast.Node = self.hidden_decl(target.tok, nm2, cur_ix)
@@ -830,7 +833,69 @@ class Parser:
                 self.fail_hint(self.peek(),
                                "分解代入は 'q, r = f()' の形で書きます",
                                "'=' が必要です")
-            up.rhs = self.expr()
+            first_val: ast.Node = self.expr()
+            up.rhs = first_val
+
+            # ★ 第53章：右辺もカンマで並べられる（`a, b = b, a`）。
+            #
+            #   ⚠️ **こちらは「代入」**（宣言は兼ねない）。宣言も兼ねるのは
+            #     `q, r = f()`（右辺がタプル 1 つ）のほう。
+            #
+            #   a, b = b, a   →   swap.0 = b       ← 右辺を先に全部読む
+            #                     swap.1 = a
+            #                     a = swap.0
+            #                     b = swap.1
+            if self.peek().is_punct(","):
+                vals: list[ast.Node] = []
+                vals.append(first_val)
+                while self.consume(",") is not None:
+                    vals.append(self.expr())
+
+                names: list[ast.Node] = []
+                pv: ast.Node | None = up.params
+                while pv is not None:
+                    cur_v: ast.Node = pv
+                    names.append(cur_v)
+                    pv = cur_v.next
+                if len(names) != len(vals):
+                    self.fail_hint(ut,
+                                   "左辺は " + str(len(names)) + " 個、右辺は " +
+                                   str(len(vals)) + " 個です",
+                                   "受け取る名前と値の数が違います")
+
+                # ⚠️ C 版（src/parser.c）は隠し変数の名前を 8 個の配列で持つので、
+                #   **同じ上限**にします（2 実装で同じものを受け付けるため）。
+                #   ⚠️ 個数の食い違いより**後**に見ること（C 版と順序を揃える）。
+                if len(vals) > 8:
+                    self.fail_hint(ut, "並べられるのは 8 個までです",
+                                   "値が多すぎます")
+
+                head: ast.Node = ast.new_node(ast.ND_BLOCK, ut)
+                cur: ast.Node = head
+
+                # ① 右辺を全部、隠し変数に入れる（読みを書きより先に済ませる）
+                tmps: list[str] = []
+                for val in vals:
+                    val.next = None
+                    nm2: str = self.hidden_name("swap")
+                    tmps.append(nm2)
+                    d: ast.Node = self.hidden_decl(ut, nm2, val)
+                    cur.next = d
+                    cur = d
+
+                # ② 隠し変数から、それぞれの名前へ代入する
+                k: int = 0
+                for nd in names:
+                    asg: ast.Node = ast.new_node(ast.ND_ASSIGN, ut)
+                    asg.lhs = ast.new_var_node(nd.tok, nd.name)
+                    asg.rhs = ast.new_var_node(ut, tmps[k])
+                    cur.next = asg
+                    cur = asg
+                    k = k + 1
+
+                blk: ast.Node = ast.new_node(ast.ND_BLOCK, ut)
+                blk.body = head.next
+                return blk
             return up
 
         lhs: ast.Node = self.expr()

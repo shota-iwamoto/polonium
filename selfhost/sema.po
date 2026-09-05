@@ -837,9 +837,53 @@ class Sema:
     # ★ 右辺の型で意味が変わります。list[T] なら要素に等しいものがあるか、
     #   str なら部分文字列として含まれるか。
     # ⚠️ dict には使えません（d.has(k) を使う）。
-    def check_in(mut self, n: ast.Node) -> ast.Type:
+    def check_in(mut self, n: mut ast.Node) -> ast.Type:
         l: ast.Type = self.check_expr(unwrap_node(n.lhs))
         r: ast.Type = self.check_expr(unwrap_node(n.rhs))
+
+        # ★ 第52章：`k in d` は `d.__contains__(k)` に読み替える。
+        #   ⚠️ ここだけは **右辺の型**で決まる（入れ物のほうが決める）。
+        #     Python の __contains__ と同じで、in は「入れ物に聞く」演算子。
+        if r.kind == ast.TY_CLASS:
+            cc: ast.Class = unwrap_class(r.cls)
+            if self.class_has_method(cc, "__contains__"):
+                obj: ast.Node = unwrap_node(n.rhs)   # 入れ物
+                arg: ast.Node = unwrap_node(n.lhs)   # 探すもの
+                arg.next = None
+
+                # ⚠️ ノードの中身を丸ごと写すと式の並び（実引数の next）が
+                #   壊れる。**その場で作り替える。**
+                if n.op == ast.OP_IN:
+                    n.kind = ast.ND_METHOD
+                    n.name = "__contains__"
+                    n.lhs = obj
+                    n.args = arg
+                    n.rhs = None
+                    rt: ast.Type = self.check_class_method(n, cc)
+                    if rt.kind != ast.TY_BOOL:
+                        diag.error_at(unwrap_tok(n.tok),
+                                      "'in' に使うには __contains__ が bool を" +
+                                      "返す必要があります（いまは '" +
+                                      ast.type_name(rt) + "' を返しています）")
+                    return self.ty_bool()
+
+                # not in は結果を反転させる
+                call: ast.Node = ast.new_node(ast.ND_METHOD, n.tok)
+                call.lhs = obj
+                call.name = "__contains__"
+                call.args = arg
+                rt2: ast.Type = self.check_class_method(call, cc)
+                if rt2.kind != ast.TY_BOOL:
+                    diag.error_at(unwrap_tok(n.tok),
+                                  "'not in' に使うには __contains__ が bool を" +
+                                  "返す必要があります（いまは '" +
+                                  ast.type_name(rt2) + "' を返しています）")
+                call.type = rt2
+                n.kind = ast.ND_UNARY
+                n.op = ast.OP_NOT
+                n.lhs = call
+                n.rhs = None
+                return self.ty_bool()
 
         if r.kind == ast.TY_STR:
             if l.kind != ast.TY_STR:
@@ -860,8 +904,16 @@ class Sema:
         diag.error_full(unwrap_tok(unwrap_node(n.rhs).tok),
                         "'" + ast.type_name(r) + "' 型に 'in' は使えません",
                         "ここには list[T] か str が必要です", None, "",
-                        "dict の鍵を調べるには d.has(k) を使ってください")
+                        self.in_hint(r))
         return self.ty_bool()
+
+    # 'in' が使えないときのヒント
+    def in_hint(self, r: ast.Type) -> str:
+        if r.kind == ast.TY_CLASS:
+            return ("クラス '" + unwrap_class(r.cls).name +
+                    "' に '__contains__(self, x) -> bool' を定義すると、" +
+                    "'in' が使えます")
+        return "dict の鍵を調べるには d.has(k) を使ってください"
 
     # 三項演算子 a if c else b（第37章）
     def check_ternary(mut self, n: ast.Node) -> ast.Type:

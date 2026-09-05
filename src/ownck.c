@@ -969,6 +969,23 @@ static bool is_hidden_var(const char *name) {
     return name && strchr(name, '.') != NULL;
 }
 
+// ★ 第53章：隠し変数のうち、`swap.N` だけは**所有します**。
+//
+//   ⚠️ ほかの隠し変数（`for.it.N` / `aug.obj.N` / `aug.idx.N`）は
+//     「対象を 1 回だけ評価するための借り」です。ところが `swap.N` は
+//     **右辺の値そのものを預かる場所**なので、借りにすると壊れます。
+//
+//     a, b = b, a  で swap.N を借りにすると:
+//       swap.0 = b            ← b は借りたまま（b は自分のものと思っている）
+//       a = swap.0            ← a の古い値を解放する。だが swap.1 がそれを指している
+//       b = swap.1            ← **解放済みの領域**を b に入れてしまう
+//
+//     所有にすると、右辺を読んだ時点で b / a が null 化されるので、
+//     解放が 1 回だけになります（`--drop` 付きで実際に壊れて分かりました）。
+static bool is_owning_hidden(const char *name) {
+    return name && strncmp(name, "swap.", 5) == 0;
+}
+
 // 「この変数は借りものを束縛している」と記録する（第25章）。
 static void mark_borrow_bind(Own *o, const char *ir_name) {
     if (!ir_name) return;
@@ -1057,8 +1074,10 @@ static void stmt(Own *o, Flow *f, Node *n) {
             // ★ 第25章：右辺を所有したかどうかで、この変数を解放するかが決まります。
             //   脱糖が作った隠し変数（for.it.0 など）は必ず借りものです。
             bool owns = false;
-            if (is_hidden_var(n->name)) use_expr(o, f, n->rhs);
-            else owns = move_expr(o, f, n->rhs, MV_ASSIGN);
+            if (is_hidden_var(n->name) && !is_owning_hidden(n->name))
+                use_expr(o, f, n->rhs);
+            else
+                owns = move_expr(o, f, n->rhs, MV_ASSIGN);
             if (!owns && ty_is_owned(n->type)) n->binds_borrow = true;
             remember_decl(o, n);
             bind_alias(o, n, n->rhs);

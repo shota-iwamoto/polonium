@@ -1256,6 +1256,51 @@ static Type *check_in(Sema *s, Node *n) {
     Type *l = check_expr(s, n->lhs);
     Type *r = check_expr(s, n->rhs);
 
+    // ★ 第52章：`k in d` は `d.__contains__(k)` に読み替えます。
+    //   ⚠️ ここだけは **右辺の型**で決まります（入れ物のほうが決めます）。
+    //     Python の `__contains__` と同じで、`in` は「入れ物に聞く」演算子です。
+    //   ⚠️ `not in` は結果を反転させます（ND_UNARY の not で包みます）。
+    if (r->kind == TY_CLASS && r->cls && class_has_method(r->cls, "__contains__")) {
+        Node *obj = n->rhs;   // 入れ物
+        Node *arg = n->lhs;   // 探すもの
+        arg->next = NULL;
+
+        // ⚠️ ノードの中身を丸ごと写すと、式の並び（実引数の next）が
+        //   壊れます。**その場で作り替えます。**
+        if (n->op == OP_IN) {
+            n->kind = ND_METHOD;
+            n->name = "__contains__";
+            n->lhs = obj;
+            n->args = arg;
+            n->rhs = NULL;
+            Type *rt = check_class_method(s, n, r->cls);
+            if (rt->kind != TY_BOOL)
+                error_at(n->tok,
+                         "'in' に使うには __contains__ が bool を返す必要が"
+                         "あります（いまは '%s' を返しています）",
+                         type_name(rt));
+            return ty_bool;
+        }
+
+        // not in は結果を反転させます
+        Node *call = new_node(ND_METHOD, n->tok);
+        call->lhs = obj;
+        call->name = "__contains__";
+        call->args = arg;
+        Type *rt = check_class_method(s, call, r->cls);
+        if (rt->kind != TY_BOOL)
+            error_at(n->tok,
+                     "'not in' に使うには __contains__ が bool を返す必要が"
+                     "あります（いまは '%s' を返しています）",
+                     type_name(rt));
+        call->type = rt;
+        n->kind = ND_UNARY;
+        n->op = OP_NOT;
+        n->lhs = call;
+        n->rhs = NULL;
+        return ty_bool;
+    }
+
     if (r->kind == TY_STR) {
         if (l->kind != TY_STR)
             error_at(n->tok,
@@ -1281,7 +1326,10 @@ static Type *check_in(Sema *s, Node *n) {
     d.message = diag_fmt("'%s' 型に 'in' は使えません", type_name(r));
     d.primary.tok = n->rhs->tok;
     d.primary.label = "ここには list[T] か str が必要です";
-    d.hint = "dict の鍵を調べるには d.has(k) を使ってください";
+    d.hint = r->kind == TY_CLASS
+                 ? diag_fmt("クラス '%s' に '__contains__(self, x) -> bool' を"
+                            "定義すると、'in' が使えます", r->cls->name)
+                 : "dict の鍵を調べるには d.has(k) を使ってください";
     diag_fail(&d);
     return ty_bool;
 }

@@ -322,6 +322,17 @@ def count(words: list[str]) -> None:
 
 ---
 
+### `in` `[ch52]`
+
+```python
+if "a" in d:        # → d.__contains__("a")
+    print(str(d.get("a")))
+if "z" not in d:
+    ...
+```
+
+`d.has(k)` と同じものです。⚠️ `in` は**右辺（入れ物）の型**で決まります。
+
 ## math
 
 **Python の `math` に相当します。** すべて `float` を受け取り `float` を返します。

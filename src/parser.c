@@ -992,6 +992,74 @@ static Node *simple_stmt(Parser *p) {
                           "分解代入は 'q, r = f()' の形で書きます",
                           "'=' が必要です");
         n->rhs = expr(p);
+
+        // ★ 第53章：右辺もカンマで並べられます（`a, b = b, a`）。
+        //
+        //   ⚠️ **こちらは「代入」です**（宣言は兼ねません）。
+        //     宣言も兼ねるのは `q, r = f()`（右辺がタプル 1 つ）のほうです。
+        //     入れ替えに使うのが目的なので、**既にある変数**へ書きます。
+        //
+        //   a, b = b, a   →   swap.0 = b       ← 右辺を先に全部読む
+        //                     swap.1 = a
+        //                     a = swap.0
+        //                     b = swap.1
+        //
+        //   ★ 右辺を全部読んでから書くので、入れ替えが正しく動きます。
+        if (tok_is(peek(p), ",")) {
+            Node vhead = {0};
+            Node *vtail = &vhead;
+            vtail->next = n->rhs;
+            vtail = vtail->next;
+            int nvals = 1;
+            while (consume(p, ",")) {
+                vtail->next = expr(p);
+                vtail = vtail->next;
+                nvals++;
+            }
+
+            int nnames = 0;
+            for (Node *v = n->params; v; v = v->next) nnames++;
+            if (nnames != nvals)
+                error_at_hint(ut,
+                              diag_fmt("左辺は %d 個、右辺は %d 個です", nnames,
+                                       nvals),
+                              "受け取る名前と値の数が違います");
+
+            Node head = {0};
+            Node *cur = &head;
+
+            // ① 右辺を全部、隠し変数に入れる（読みを書きより先に済ませる）
+            char *tmp[8];
+            int k = 0;
+            for (Node *v = vhead.next; v;) {
+                Node *nx = v->next;
+                v->next = NULL;
+                // ⚠️ 上限は selfhost/parser.po にも同じ数を書いてあります
+                //   （2 実装で同じものを受け付けるため）。
+                if (k == 8)
+                    error_at_hint(ut, "並べられるのは 8 個までです",
+                                  "値が多すぎます");
+                tmp[k] = hidden_name(p, "swap");
+                cur->next = hidden_decl(ut, tmp[k], v);
+                cur = cur->next;
+                k++;
+                v = nx;
+            }
+
+            // ② 隠し変数から、それぞれの名前へ代入する
+            k = 0;
+            for (Node *v = n->params; v; v = v->next, k++) {
+                Node *asg = new_node(ND_ASSIGN, ut);
+                asg->lhs = new_var_node(v->tok, v->name);
+                asg->rhs = new_var_node(ut, tmp[k]);
+                cur->next = asg;
+                cur = cur->next;
+            }
+
+            Node *blk = new_node(ND_BLOCK, ut);
+            blk->body = head.next;
+            return blk;
+        }
         return n;
     }
 
